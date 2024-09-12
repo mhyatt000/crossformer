@@ -1,0 +1,59 @@
+#!/bin/bash -l
+#PBS -l select=1:system=polaris
+#PBS -l place=scatter
+#PBS -l walltime=72:00:00
+#PBS -l filesystems=home:grand
+#PBS -j oe
+#PBS -q preemptable
+#PBS -A EVITA
+
+# Enable GPU-MPI (if supported by application)
+export MPICH_GPU_SUPPORT_ENABLED=1
+
+# Change to working directory
+cd ${PBS_O_WORKDIR}
+
+echo ${PBS_O_WORKDIR}
+
+# MPI and OpenMP settings
+NNODES=`wc -l < $PBS_NODEFILE`
+# NRANKS_PER_NODE=$(nvidia-smi -L | wc -l)
+NRANKS_PER_NODE=1
+NTOTRANKS=$(( NNODES * NRANKS_PER_NODE ))
+
+NDEPTH=8
+NTHREADS=1
+
+cat $PBS_NODEFILE
+
+echo "NUM_OF_NODES= ${NNODES} TOTAL_NUM_RANKS= ${NTOTRANKS} RANKS_PER_NODE= ${NRANKS_PER_NODE}"
+
+
+echo "Job ID: $PBS_JOBID"
+echo "Job Name: $PBS_JOBNAME"
+echo "Node File: $PBS_NODEFILE"
+echo "Number of Nodes: $PBS_NUM_NODES"
+echo "Total Processors: $PBS_NP"
+echo "Queue: $PBS_QUEUE"
+echo "Working Directory: $PBS_O_WORKDIR"
+echo "Submitting Host: $PBS_O_HOST"
+
+module use /soft/modulefiles/
+module load conda
+conda activate bafl
+
+# export TF_CPP_MIN_LOG_LEVEL=0
+# export NCCL_IB_DISABLE=1
+# export NCCL_SOCKET_IFNAME=eno1
+
+echo $HTTPS_PROXY
+echo $HTTP_PROXY
+echo
+
+# For applications that internally handle binding MPI/OpenMP processes to GPUs
+# mpiexec -n ${NTOTRANKS} --ppn ${NRANKS_PER_NODE} --depth=${NDEPTH} --cpu-bind depth \
+    # --env OMP_NUM_THREADS=${NTHREADS} -env OMP_PLACES=threads \
+python train.py --config configs/bafl_pretrain_config.py
+
+# For applications that need mpiexec to bind MPI ranks to GPUs
+#mpiexec -n ${NTOTRANKS} --ppn ${NRANKS_PER_NODE} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} -env OMP_PLACES=threads ./set_affinity_gpu_polaris.sh ./hello_affinity

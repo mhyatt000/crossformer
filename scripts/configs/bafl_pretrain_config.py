@@ -82,7 +82,7 @@ def get_config():
         dict(
             seed=42,
             num_steps=300000,
-            save_dir="",
+            save_dir="~",
             model=get_model_config("detr"),
             window_size=window_size,
             dataset_kwargs=get_dataset_config("multi", window_size, 100),
@@ -143,7 +143,7 @@ def get_dataset_config(task_cond, window_size, action_horizon, mix="bafl"):
     return dict(
         oxe_kwargs=dict(
             data_mix=mix,
-            data_dir="",
+            data_dir="~/tensorflow_datasets",
             load_camera_views=("primary", "high", "nav", "left_wrist", "right_wrist"),
             load_proprio=True,
             load_depth=False,
