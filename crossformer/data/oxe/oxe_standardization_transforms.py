@@ -34,6 +34,27 @@ METRIC_WAYPOINT_SPACING = {
 }
 
 
+def oakink_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    """Applies to Oak-Ink dataset."""
+    trajectory["observation"]["state"].pop("cam_intr")
+    trajectory["observation"]["state"].pop("mano_shape")
+    trajectory["observation"]["state"].pop("joints_vis")
+
+    # flatten state keys into a single tensor
+    state = tf.reshape(
+        tf.concat([tf.reshape(v, [tf.shape(v)[0], -1]) for v in trajectory["observation"]["state"].values()], axis=-1),
+        [-1, 111],
+    )
+
+    # roll the state by 1
+    actions = tf.roll(state, shift=-1, axis=0)
+    last = state[-2:-1] # if we are done then the absolute mesh is same as last
+    trajectory["action"] = tf.concat([actions[:-1], last], axis=0)
+
+    trajectory['observation']['proprio'] = state
+    return trajectory
+
+
 def bridge_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     # NOTE: this is not actually the official OXE copy of bridge, it is our own more up-to-date copy that you
     # can find at https://rail.eecs.berkeley.edu/datasets/bridge_release/data/tfds/
@@ -577,9 +598,7 @@ def utokyo_xarm_pick_place_dataset_transform(
     return trajectory
 
 
-def utokyo_xarm_bimanual_dataset_transform(
-    trajectory: Dict[str, Any]
-) -> Dict[str, Any]:
+def utokyo_xarm_bimanual_dataset_transform( trajectory: Dict[str, Any]) -> Dict[str, Any]:
     trajectory["action"] = trajectory["action"][..., -7:]
     trajectory["observation"]["proprio"] = trajectory["observation"][
         "end_effector_pose"
@@ -1068,6 +1087,8 @@ def droid_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 
 
 OXE_STANDARDIZATION_TRANSFORMS = {
+    "rlds_oakink": oakink_dataset_transform,
+    #
     "bridge_dataset": bridge_dataset_transform,
     "fractal20220817_data": rt1_dataset_transform,
     "kuka": kuka_dataset_transform,

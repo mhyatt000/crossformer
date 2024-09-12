@@ -41,6 +41,21 @@ CROSS_EMBODIMENT = [
     (name, weight * 0.15) for name, weight in OXE_MAGIC_SOUP_BALANCED
 ] + [(name, weight * 0.85) for name, weight in CROSS_EMBODIMENT_TARGET]
 
+
+import rlds_oakink
+
+BAFL_SOUP = [
+    ("rlds_oakink", 1.0),
+    # ("berkeley_mvp_converted_externally_to_rlds", 0.1),
+    # ("nyu_rot_dataset_converted_externally_to_rlds", 0.1),
+    # ("ucsd_kitchen_dataset_converted_externally_to_rlds", 0.1),
+    # ("ucsd_pick_and_place_dataset_converted_externally_to_rlds", 0.1),
+    # ("utokyo_xarm_bimanual_converted_externally_to_rlds", 0.1),
+    # ("utokyo_xarm_pick_and_place_converted_externally_to_rlds", 0.1),
+]
+
+
 OXE_NAMED_MIXES = {
     "cross_embodiment": CROSS_EMBODIMENT,
+    'bafl': BAFL_SOUP,
 }

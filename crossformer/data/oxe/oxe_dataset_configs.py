@@ -29,6 +29,11 @@ class ProprioEncoding(IntEnum):
     POS_NAV = 5  # XY + yaw
     QUADRUPED = 6
 
+    # single arm
+    MANO = 7  # Hand 3D Pose (21 x 3) +
+    # MANO Pose (16 x 3) +
+    # = 111 total
+
 
 class ActionEncoding(IntEnum):
     """Defines supported action encoding schemes for different datasets."""
@@ -42,8 +47,36 @@ class ActionEncoding(IntEnum):
     )
     QUADRUPED = 6
 
+    # single arm
+    MANO = 7  # Hand 3D Pose (21 x 3) +
+    # MANO Pose (16 x 3) +
+    # = 111 total
 
+
+# === Individual Dataset Configs ===
 OXE_DATASET_CONFIGS = {
+    "rlds_oakink": {  # OAK INK Dataset
+        "image_obs_keys": {
+            "primary": "image",
+            "high": None,
+            "nav": None,
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": [
+            "cam_intr",
+            "mano_pose",
+            "mano_shape",
+            "joints_3d",
+            "joints_vis",
+        ],
+        "proprio_encoding": ProprioEncoding.MANO,
+        "action_encoding": ActionEncoding.MANO,
+    },
+    #
+    #
+    #
     "fractal20220817_data": {
         "image_obs_keys": {
             "primary": "image",
@@ -261,7 +294,15 @@ OXE_DATASET_CONFIGS = {
         "action_encoding": ActionEncoding.EEF_POS,
     },
     "nyu_rot_dataset_converted_externally_to_rlds": {
-        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
+        "image_obs_keys": {
+            "primary": "image",
+            "secondary": None,
+            "wrist": None,
+            "high": None,
+            "nav": None,
+            "left_wrist": None,
+            "right_wrist": None,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
@@ -357,13 +398,25 @@ OXE_DATASET_CONFIGS = {
         "action_encoding": ActionEncoding.EEF_POS,
     },
     "ucsd_kitchen_dataset_converted_externally_to_rlds": {
-        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
+        "image_obs_keys": {
+            "primary": "image",
+            "high": None,
+            "nav": None,
+            "left_wrist": None,
+            "right_wrist": None,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
     "ucsd_pick_and_place_dataset_converted_externally_to_rlds": {
-        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
+        "image_obs_keys": {
+            "primary": "image",
+            "high": None,
+            "nav": None,
+            "left_wrist": None,
+            "right_wrist": None,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
@@ -429,15 +482,25 @@ OXE_DATASET_CONFIGS = {
     "utokyo_xarm_pick_and_place_converted_externally_to_rlds": {
         "image_obs_keys": {
             "primary": "image",
-            "secondary": "image2",
-            "wrist": "hand_image",
+            "high": "image2",
+            "left_wrist": "hand_image",
+            "right_wrist": None,
+            "nav": None,
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
     "utokyo_xarm_bimanual_converted_externally_to_rlds": {
-        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
+        "image_obs_keys": {
+            "primary": "image",
+            "secondary": None,
+            "high": None,
+            "nav": None,
+            "left_wrist": None,
+            "right_wrist": None,
+            "wrist": None,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
@@ -449,7 +512,14 @@ OXE_DATASET_CONFIGS = {
         "action_encoding": ActionEncoding.EEF_POS,
     },
     "berkeley_mvp_converted_externally_to_rlds": {
-        "image_obs_keys": {"primary": None, "secondary": None, "wrist": "hand_image"},
+        "image_obs_keys": {
+            "primary": None,
+            "secondary": None,
+            "high": None,
+            "nav": None,
+            "left_wrist": "hand_image",
+            "right_wrist": None,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_QUAT,
         "action_encoding": ActionEncoding.JOINT_POS,
