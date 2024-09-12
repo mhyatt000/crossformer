@@ -57,10 +57,22 @@ def make_oxe_dataset_kwargs(
         )
     elif dataset_kwargs["action_encoding"] is ActionEncoding.QUADRUPED:
         dataset_kwargs["action_normalization_mask"] = [True] * 12
+
+    # MANO
+    elif dataset_kwargs["action_encoding"] is ActionEncoding.MANO:
+        dataset_kwargs["action_normalization_mask"] = [True] * 111
+
     else:
         raise ValueError(
             f"Cannot load {name} with unsupported action encoding {dataset_kwargs['action_encoding']}."
         )
+
+
+    print(name)
+    print(set(load_camera_views))
+    print(set(dataset_kwargs["image_obs_keys"]))
+    print()
+
 
     # adjust loaded camera views
     if missing_keys := (set(load_camera_views) - set(dataset_kwargs["image_obs_keys"])):
