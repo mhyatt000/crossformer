@@ -67,13 +67,6 @@ def make_oxe_dataset_kwargs(
             f"Cannot load {name} with unsupported action encoding {dataset_kwargs['action_encoding']}."
         )
 
-
-    print(name)
-    print(set(load_camera_views))
-    print(set(dataset_kwargs["image_obs_keys"]))
-    print()
-
-
     # adjust loaded camera views
     if missing_keys := (set(load_camera_views) - set(dataset_kwargs["image_obs_keys"])):
         raise ValueError(
@@ -104,9 +97,9 @@ def make_oxe_dataset_kwargs(
     if load_language:
         dataset_kwargs["language_key"] = "language_instruction"
 
-    dataset_kwargs[
-        "action_proprio_normalization_type"
-    ] = action_proprio_normalization_type
+    dataset_kwargs["action_proprio_normalization_type"] = (
+        action_proprio_normalization_type
+    )
 
     del dataset_kwargs["proprio_encoding"]
     del dataset_kwargs["action_encoding"]

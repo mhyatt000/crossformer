@@ -79,11 +79,15 @@ def get_config():
     window_size = FieldReference(default=5)
     grad_acc = FieldReference(default=4)
 
+    import os
     return ConfigDict(
         dict(
+            pretrained_path="hf://rail-berkeley/crossformer",
+            pretrained_step=placeholder(int),
+            #
             seed=42,
             num_steps=300000*grad_acc,
-            save_dir="",
+            save_dir=os.path.expanduser("~"),
             model=get_model_config("detr"),
             window_size=window_size,
             dataset_kwargs=get_dataset_config("multi", window_size, 100),
@@ -124,7 +128,7 @@ def get_config():
                 entity=placeholder(str),
             ),
             wandb_resume_id=placeholder(str),
-            eval_datasets=('rlds_oakink'),
+            eval_datasets=(),
         )
     )
 
