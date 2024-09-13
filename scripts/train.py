@@ -38,7 +38,7 @@ from crossformer.utils.typing import Data
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string("name", "experiment", "Experiment name.")
+flags.DEFINE_string("name", None, "Experiment name.")
 flags.DEFINE_bool("debug", False, "Debug config (no wandb logging)")
 
 config_dir = os.path.join(os.path.dirname(__file__), "configs")

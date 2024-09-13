@@ -77,12 +77,14 @@ HEAD_TO_DATASET = {
 
 def get_config():
     window_size = FieldReference(default=5)
+    grad_acc = FieldReference(default=4)
 
+    import os
     return ConfigDict(
         dict(
             seed=42,
-            num_steps=300000,
-            save_dir="~",
+            num_steps=300000*grad_acc,
+            save_dir=os.path.join(os.path.expanduser('~'),'evita'),
             model=get_model_config("detr"),
             window_size=window_size,
             dataset_kwargs=get_dataset_config("multi", window_size, 100),
@@ -98,7 +100,7 @@ def get_config():
                 weight_decay=0.1,
                 clip_gradient=1.0,
                 frozen_keys=tuple(),
-                # grad_accumulation_steps=None,  # if you are using grad accumulation, you need to adjust max_steps accordingly
+                grad_accumulation_steps=grad_acc,  # if you are using grad accumulation, you need to adjust max_steps accordingly
             ),
             prefetch_num_batches=0,
             start_step=placeholder(int),
@@ -150,7 +152,7 @@ def get_dataset_config(task_cond, window_size, action_horizon, mix="bafl"):
         ),
         traj_transform_kwargs=traj_transform_kwargs,
         frame_transform_kwargs=frame_transform_kwargs,
-        batch_size=4,  # 512,
+        batch_size=16,
         shuffle_buffer_size=50000,
         balance_weights=False,
         traj_transform_threads=48,
