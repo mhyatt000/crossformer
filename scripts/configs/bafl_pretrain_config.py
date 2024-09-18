@@ -1,4 +1,5 @@
 from ml_collections import ConfigDict
+import os
 from ml_collections.config_dict import FieldReference, placeholder
 
 from crossformer.data.oxe.oxe_dataset_mixes import OXE_NAMED_MIXES
@@ -77,14 +78,17 @@ HEAD_TO_DATASET = {
 
 def get_config():
     window_size = FieldReference(default=5)
-    grad_acc = FieldReference(default=4)
+    grad_acc = FieldReference(default=32)
 
-    import os
     return ConfigDict(
         dict(
+            pretrained_path= "hf://rail-berkeley/crossformer",
+            # pretrained_path="/grand/EVITA/bafl/experiment_20240912_230921", # "hf://rail-berkeley/crossformer",
+            pretrained_step=placeholder(int),
+            #
             seed=42,
             num_steps=300000*grad_acc,
-            save_dir=os.path.join(os.path.expanduser('~'),'evita'),
+            save_dir=os.environ.get('BAFL_SAVE', os.path.expanduser('~')),
             model=get_model_config("detr"),
             window_size=window_size,
             dataset_kwargs=get_dataset_config("multi", window_size, 100),
@@ -125,7 +129,7 @@ def get_config():
                 entity=placeholder(str),
             ),
             wandb_resume_id=placeholder(str),
-            eval_datasets=('rlds_oakink'),
+            eval_datasets=(),
         )
     )
 
@@ -145,7 +149,7 @@ def get_dataset_config(task_cond, window_size, action_horizon, mix="bafl"):
     return dict(
         oxe_kwargs=dict(
             data_mix=mix,
-            data_dir="~/tensorflow_datasets",
+            data_dir=os.environ.get('BAFL_DATA', os.path.join(os.path.expanduser("~"),"tensorflow_datasets")),
             load_camera_views=("primary", "high", "nav", "left_wrist", "right_wrist"),
             load_proprio=True,
             load_depth=False,

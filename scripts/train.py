@@ -17,7 +17,6 @@ from ml_collections import config_flags
 import optax
 from tpu_utils import prevent_cross_region
 import tqdm
-import wandb
 
 import crossformer
 from crossformer.data.dataset import make_interleaved_dataset
@@ -30,15 +29,17 @@ from crossformer.utils.train_utils import (
     create_optimizer,
     filter_eval_datasets,
     format_name_with_config,
+    merge_params,
     process_text,
     Timer,
     TrainState,
 )
 from crossformer.utils.typing import Data
+import wandb
 
 FLAGS = flags.FLAGS
 
-flags.DEFINE_string("name", None, "Experiment name.")
+flags.DEFINE_string("name", "experiment", "Experiment name.")
 flags.DEFINE_bool("debug", False, "Debug config (no wandb logging)")
 
 config_dir = os.path.join(os.path.dirname(__file__), "configs")
@@ -126,9 +127,7 @@ def main(_):
     save_callback = SaveCallback(save_dir)
 
     if jax.process_index() == 0:
-        codebase_directory = osp.abspath(
-            osp.join(osp.dirname(crossformer.__file__), "..")
-        )
+        codebase_directory = osp.abspath( osp.join(osp.dirname(crossformer.__file__), ".."))
         wandb.run.log_code(codebase_directory)
 
     # set up text tokenization (this needs to happen after batching but before sharding)
@@ -171,6 +170,13 @@ def main(_):
         f"Batch size per device: {example_batch['action'].shape[0] // jax.device_count()}"
     )
 
+    is_pretrained =  FLAGS.config.get('pretrained_path',None) 
+    if is_pretrained is not None:
+        pretrained_model = CrossFormerModel.load_pretrained(
+            FLAGS.config.pretrained_path,
+            step=FLAGS.config.pretrained_step,
+        )
+
     # set up model and initialize weights
     rng = jax.random.PRNGKey(FLAGS.config.seed)
     rng, init_rng = jax.random.split(rng)
@@ -194,6 +200,11 @@ def main(_):
         if not callable(loader):  # Means that it is a ModuleSpec
             loader = ModuleSpec.instantiate(loader)
         model = model.replace(params=loader(model.params))
+
+    if is_pretrained is not None:
+        merged_params = merge_params(model.params, pretrained_model.params)
+        model = model.replace(params=merged_params)
+        del pretrained_model
 
     # create train state
     train_state = TrainState.create(rng, model, tx)
