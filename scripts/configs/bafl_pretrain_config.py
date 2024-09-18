@@ -78,7 +78,7 @@ HEAD_TO_DATASET = {
 
 def get_config():
     window_size = FieldReference(default=5)
-    grad_acc = FieldReference(default=32)
+    grad_acc = None
 
     return ConfigDict(
         dict(
@@ -87,8 +87,9 @@ def get_config():
             pretrained_step=placeholder(int),
             #
             seed=42,
-            num_steps=300000*grad_acc,
             save_dir=os.environ.get('BAFL_SAVE', os.path.expanduser('~')),
+            num_steps=300000*(grad_acc or 1),
+            save_dir=os.path.expanduser("~"),
             model=get_model_config("detr"),
             window_size=window_size,
             dataset_kwargs=get_dataset_config("multi", window_size, 100),

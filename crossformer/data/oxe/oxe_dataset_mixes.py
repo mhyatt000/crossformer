@@ -58,4 +58,5 @@ BAFL_SOUP = [
 OXE_NAMED_MIXES = {
     "cross_embodiment": CROSS_EMBODIMENT,
     'bafl': BAFL_SOUP,
+    'bridge': [('bridge_dataset', 1.0)],
 }

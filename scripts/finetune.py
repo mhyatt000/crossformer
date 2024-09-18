@@ -1,4 +1,5 @@
 import datetime
+from pprint import pprint
 from functools import partial
 import os
 
@@ -6,14 +7,15 @@ from absl import app, flags, logging
 import flax
 from flax.traverse_util import flatten_dict
 import jax
+from jax.experimental import multihost_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from ml_collections import config_flags, ConfigDict
 import optax
 import tensorflow as tf
 import tqdm
-import wandb
 
-from crossformer.data.dataset import make_single_dataset
+from crossformer.data.dataset import make_interleaved_dataset, make_single_dataset
+from crossformer.data.oxe import make_oxe_dataset_kwargs_and_weights
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec
@@ -21,12 +23,14 @@ from crossformer.utils.train_callbacks import SaveCallback, ValidationCallback
 from crossformer.utils.train_utils import (
     check_config_diff,
     create_optimizer,
+    filter_eval_datasets,
     format_name_with_config,
     merge_params,
     process_text,
     Timer,
     TrainState,
 )
+import wandb
 
 try:
     from jax_smi import initialise_tracking  # type: ignore
@@ -59,8 +63,8 @@ def main(_):
         CrossFormer Finetuning Script
         ======================
         Pretrained model: {FLAGS.config.pretrained_path}
-        Finetuning Dataset: {FLAGS.config.dataset_kwargs.name}
-        Data dir: {FLAGS.config.dataset_kwargs.data_dir}
+        Finetuning Dataset: {FLAGS.config.dataset_kwargs.oxe_kwargs.data_mix}
+        Data dir: {FLAGS.config.dataset_kwargs.oxe_kwargs.data_dir}
         Task Modality: {FLAGS.config.modality}
         Finetuning Mode: {FLAGS.config.finetuning_mode}
 
@@ -87,6 +91,14 @@ def main(_):
     # Our model will be replicated across devices (we are only doing data parallelism, not model parallelism)
     replicated_sharding = NamedSharding(mesh, PartitionSpec())
 
+    def shard(batch):
+        return multihost_utils.host_local_array_to_global_array(
+            batch, mesh, PartitionSpec("batch")
+        )
+
+    # make sure each process loads different data
+    tf.random.set_seed(FLAGS.config.seed + jax.process_index())
+
     # prevent tensorflow from using GPU memory since it's only used for data loading
     tf.config.set_visible_devices([], "GPU")
 
@@ -107,7 +119,7 @@ def main(_):
     wandb.init(
         config=FLAGS.config.to_dict(),
         id=wandb_id,
-        name=name,
+        # name=name,
         mode="disabled" if FLAGS.debug else None,
         **FLAGS.config.wandb,
     )
@@ -154,21 +166,54 @@ def main(_):
         del batch["dataset_name"]
         return batch
 
-    dataset = make_single_dataset(
-        FLAGS.config.dataset_kwargs,
-        traj_transform_kwargs=FLAGS.config.traj_transform_kwargs,
-        frame_transform_kwargs=FLAGS.config.frame_transform_kwargs,
-        train=True,
-    )
-    train_data_iter = (
-        dataset.repeat()
-        .unbatch()
-        .shuffle(FLAGS.config.shuffle_buffer_size)
-        .batch(FLAGS.config.batch_size)
-        .iterator()
-    )
-    train_data_iter = map(process_batch, train_data_iter)
+    original = False
+    if original:
+        dataset = make_single_dataset(
+            FLAGS.config.dataset_kwargs,
+            traj_transform_kwargs=FLAGS.config.traj_transform_kwargs,
+            frame_transform_kwargs=FLAGS.config.frame_transform_kwargs,
+            train=True,
+        )
+        train_data_iter = (
+            dataset.repeat()
+            .unbatch()
+            .shuffle(FLAGS.config.shuffle_buffer_size)
+            .batch(FLAGS.config.batch_size)
+            .iterator()
+        )
+        train_data_iter = map(process_batch, train_data_iter)
+
+    else:
+        # load datasets
+        if "oxe_kwargs" in FLAGS.config.dataset_kwargs:
+            # create dataset_kwargs_list from oxe_kwargs
+            (
+                FLAGS.config.dataset_kwargs["dataset_kwargs_list"],
+                FLAGS.config.dataset_kwargs["sample_weights"],
+            ) = make_oxe_dataset_kwargs_and_weights(
+                **FLAGS.config.dataset_kwargs["oxe_kwargs"]
+            )
+            del FLAGS.config.dataset_kwargs["oxe_kwargs"]
+
+        FLAGS.config.dataset_kwargs.batch_size //= jax.process_count()
+        pprint(FLAGS.config.dataset_kwargs)
+        #  quit()
+        dataset = make_interleaved_dataset(**FLAGS.config.dataset_kwargs, train=True)
+
+        train_data_iter = map(
+            shard,
+            map(
+                process_batch,
+                dataset.iterator(prefetch=FLAGS.config.prefetch_num_batches),
+            ),
+        )
+
     example_batch = next(train_data_iter)
+
+    spec = lambda xtree: jax.tree.map(lambda arr: (arr.shape, str(arr.dtype)), xtree)
+    pprint(spec(example_batch))
+
+    print(dataset.statistics)
 
     #########
     #
@@ -184,6 +229,7 @@ def main(_):
         text_processor,
         rng=init_rng,
         dataset_statistics=dataset.dataset_statistics,
+        verbose=True,
     )
     merged_params = merge_params(model.params, pretrained_model.params)
     model = model.replace(params=merged_params)
@@ -243,7 +289,7 @@ def main(_):
         save_callback = SaveCallback(None)
         logging.warning("save_dir not passed in, not saving checkpoints")
 
-    example_batch_spec = jax.tree_map(
+    example_batch_spec = jax.tree.map(
         lambda arr: (arr.shape, str(arr.dtype)), example_batch
     )
     wandb.config.update(
@@ -298,32 +344,86 @@ def main(_):
         new_state = state.apply_gradients(grads=grads, rng=rng)
         return new_state, info
 
+    #
+    # for debug only
+    #
+    def loss_fn(params, batch, rng, train=True):
+        timer = Timer()
+        bound_module = model.module.bind({"params": params}, rngs={"dropout": rng})
+        timer.tick("crossformer")
+        transformer_embeddings = bound_module.crossformer_transformer(
+            batch["observation"],
+            batch["task"],
+            batch["observation"]["timestep_pad_mask"],
+            train=train,
+        )
+        timer.tock("crossformer")
+
+        action_loss, action_metrics = 0, {}
+        for head_name, head in bound_module.heads.items():
+            timer.tick(head_name)
+            head_loss, head_metrics = head.loss(
+                transformer_embeddings,  # action head knows to pull out the "action" readout_key
+                batch["action"],
+                batch["observation"]["timestep_pad_mask"],
+                batch["action_pad_mask"],
+                action_head_mask=batch["action_head_masks"][head_name],
+                train=train,
+            )
+
+            # weight loss by number of samples from each head
+            head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(
+                batch["action"]
+            )
+            action_loss += head_loss * head_sample_fraction * head.loss_weight
+            action_metrics[head_name] = head_metrics
+            timer.tock(head_name)
+
+        print(timer.get_average_times())
+        return action_loss, action_metrics
+
     #########
     #
     # Build validation callback
     #
     #########
 
-    if FLAGS.config.modality == "image_conditioned":
-        modes_to_evaluate = ["image_conditioned"]
-    elif FLAGS.config.modality == "text_conditioned":
-        modes_to_evaluate = ["text_conditioned"]
-    elif FLAGS.config.modality == "multimodal":
-        modes_to_evaluate = ["image_conditioned", "text_conditioned"]
+    if original:
+        if FLAGS.config.modality == "image_conditioned":
+            modes_to_evaluate = ["image_conditioned"]
+        elif FLAGS.config.modality == "text_conditioned":
+            modes_to_evaluate = ["text_conditioned"]
+        elif FLAGS.config.modality == "multimodal":
+            modes_to_evaluate = ["image_conditioned", "text_conditioned"]
+        else:
+            modes_to_evaluate = ["base"]
+
+        dataset_kwargs_list = [FLAGS.config.dataset_kwargs]
+
+        val_callback = ValidationCallback(
+            loss_fn=loss_fn,
+            process_batch_fn=process_batch,
+            text_processor=text_processor,
+            val_dataset_kwargs_list=dataset_kwargs_list,
+            dataset_kwargs=FLAGS.config,
+            modes_to_evaluate=modes_to_evaluate,
+            **FLAGS.config.val_kwargs,
+        )
+
     else:
-        modes_to_evaluate = ["base"]
-
-    dataset_kwargs_list = [FLAGS.config.dataset_kwargs]
-
-    val_callback = ValidationCallback(
-        loss_fn=loss_fn,
-        process_batch_fn=process_batch,
-        text_processor=text_processor,
-        val_dataset_kwargs_list=dataset_kwargs_list,
-        dataset_kwargs=FLAGS.config,
-        modes_to_evaluate=modes_to_evaluate,
-        **FLAGS.config.val_kwargs,
-    )
+        val_datasets_kwargs_list, _ = filter_eval_datasets(
+            FLAGS.config.dataset_kwargs["dataset_kwargs_list"],
+            FLAGS.config.dataset_kwargs["sample_weights"],
+            FLAGS.config.get("eval_datasets", ()),
+        )
+        val_callback = ValidationCallback(
+            loss_fn=loss_fn,
+            process_batch_fn=lambda batch: shard(process_batch(batch)),
+            text_processor=text_processor,
+            val_dataset_kwargs_list=val_datasets_kwargs_list,
+            dataset_kwargs=FLAGS.config.dataset_kwargs,
+            **FLAGS.config.val_kwargs.to_dict(),
+        )
 
     #########
     #
