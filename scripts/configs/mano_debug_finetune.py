@@ -92,13 +92,15 @@ def get_dataset_config(task_cond, window_size, action_horizon, mix="bafl"):
             data_mix=mix,
             data_dir="",
             # dont need the extra views
-            load_camera_views=("primary",), #  "high"), # , "nav", "left_wrist", "right_wrist"),
+            load_camera_views=(
+                "primary",
+            ),  #  "high"), # , "nav", "left_wrist", "right_wrist"),
             load_proprio=False,
             load_depth=False,
         ),
         traj_transform_kwargs=traj_transform_kwargs,
         frame_transform_kwargs=frame_transform_kwargs,
-        batch_size=512, # used over finetune batch size bc of make_interleaved
+        batch_size=512,  # used over finetune batch size bc of make_interleaved
         shuffle_buffer_size=50000,
         balance_weights=False,
         traj_transform_threads=48,
@@ -218,6 +220,17 @@ def get_config():
         model=dict(
             # observation_tokenizers=dict( new_primary=ModuleSpec.create( ImageTokenizer, obs_stack_keys=["image_primary"], task_stack_keys=["image_primary"], task_film_keys=["language_instruction"], encoder=ModuleSpec.create(ResNet26FILM),)),
             heads=dict(
+                bimanual=ModuleSpec.create(
+                    L1ActionHead,
+                    action_horizon=10,
+                    action_dim=BIMANUAL_ACTION_DIM,
+                    num_preds=BIMANUAL_ACTION_DIM,
+                    pool_strategy="pass",
+                    readout_key="readout_bimanual",
+                    clip_pred=False,
+                    loss_weight=1.0,
+                    constrain_loss_dims=True,
+                ),
                 mano=ModuleSpec.create(
                     L1ActionHead,
                     action_horizon=1,
@@ -231,7 +244,7 @@ def get_config():
                     constrain_loss_dims=True,
                 ),
             ),
-            readouts=dict(mano=1),
+            readouts=dict(mano=1, bimanual=10),
         )
     )
 
@@ -245,17 +258,30 @@ def get_config():
     max_steps = FieldReference(50000)
     window_size = FieldReference(default=1)
 
-    dataset_kwargs = get_dataset_config("multi", window_size, 100)
+    dataset_kwargs = get_dataset_config("multi", window_size, action_horizon=10)
     config = dict(
         update_config=UPDATE_CONFIG,  # uncomment this line to add new observation tokenizer and action head
+        config_delete_keys={
+            "model": {
+                "readouts": {
+                    "bimanual": None,
+                    "quadruped": None,
+                    "nav": None,
+                },
+                "heads": {
+                    "quadruped": None,
+                    "nav": None,
+                },
+            },
+        },
         pretrained_path="hf://rail-berkeley/crossformer",
         pretrained_step=placeholder(int),
-        batch_size=dataset_kwargs['batch_size'],  
+        batch_size=dataset_kwargs["batch_size"],
         shuffle_buffer_size=10000,
         num_steps=max_steps,
         log_interval=100,
-        eval_interval=1000,
-        save_interval=1000,
+        eval_interval=2000,
+        save_interval=2000,
         save_dir=placeholder(str),
         seed=42,
         wandb=dict(
