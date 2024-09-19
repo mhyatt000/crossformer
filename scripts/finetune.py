@@ -142,6 +142,7 @@ def main(_):
     ):
         for c_key in list(flat_config.keys()):
             if ".".join(c_key).startswith(".".join(d_key)):
+                print(f"Deleting {'.'.join(c_key)}")
                 del flat_config[c_key]
 
     config = ConfigDict(flax.traverse_util.unflatten_dict(flat_config))
@@ -196,8 +197,7 @@ def main(_):
             del FLAGS.config.dataset_kwargs["oxe_kwargs"]
 
         FLAGS.config.dataset_kwargs.batch_size //= jax.process_count()
-        pprint(FLAGS.config.dataset_kwargs)
-        #  quit()
+        # pprint(FLAGS.config.dataset_kwargs)
         dataset = make_interleaved_dataset(**FLAGS.config.dataset_kwargs, train=True)
 
         train_data_iter = map(
