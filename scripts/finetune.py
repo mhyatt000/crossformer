@@ -213,7 +213,7 @@ def main(_):
     spec = lambda xtree: jax.tree.map(lambda arr: (arr.shape, str(arr.dtype)), xtree)
     pprint(spec(example_batch))
 
-    print(dataset.statistics)
+    # print(dataset.statistics)
 
     #########
     #
