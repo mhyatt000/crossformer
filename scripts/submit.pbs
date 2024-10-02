@@ -1,7 +1,7 @@
 #!/bin/bash -l
 #PBS -l select=1:system=polaris
 #PBS -l place=scatter
-#PBS -l walltime=72:00:00
+#PBS -l walltime=35:00:00
 #PBS -l filesystems=home:grand
 #PBS -j oe
 #PBS -q preemptable
@@ -63,7 +63,9 @@ echo
 # For applications that internally handle binding MPI/OpenMP processes to GPUs
 # mpiexec -n ${NTOTRANKS} --ppn ${NRANKS_PER_NODE} --depth=${NDEPTH} --cpu-bind depth \
     # --env OMP_NUM_THREADS=${NTHREADS} -env OMP_PLACES=threads \
-python train.py --config configs/bafl_pretrain_config.py
+
+# python train.py --config configs/bafl_pretrain_config.py
+python finetune.py --config configs/mano_debug_finetune.py
 
 # For applications that need mpiexec to bind MPI ranks to GPUs
 #mpiexec -n ${NTOTRANKS} --ppn ${NRANKS_PER_NODE} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} -env OMP_PLACES=threads ./set_affinity_gpu_polaris.sh ./hello_affinity
