@@ -33,25 +33,103 @@ METRIC_WAYPOINT_SPACING = {
     "tartan_drive": 0.72,
 }
 
+"""
+from bafl.data.transform import SimpleTransform3DMANO
+import torch
+from torch.utils.data import default_collate
+
+
+class OakInkTransform(SimpleTransform3DMANO):
+
+    center_idx = 9
+    basis_param = {
+        "scale_jit_factor": 0.125,
+        "color_jit_factor": 0.3,  # 0.3
+        "rot_jit_factor": 30,
+        "rot_prob": 0.5,
+        "occlusion": True,
+        "occlusion_prob": 0.1,
+        "output_size": (224, 224),
+        "train": True,
+        "aug": True,
+    }
+
+    def __init__(self):
+        super().__init__(
+            center_idx=OakInkTransform.center_idx, **OakInkTransform.basis_param
+        )
+
+    def __call__(self, image, label, generator):
+        return super().__call__(image, label, generator)
+
+
+OI = OakInkTransform()
+
+
+import numpy as np
+"""
+
 
 def oakink_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     """Applies to Oak-Ink dataset."""
-    trajectory["observation"]["state"].pop("cam_intr")
-    trajectory["observation"]["state"].pop("mano_shape")
-    trajectory["observation"]["state"].pop("joints_vis")
+
+    obs = trajectory.pop("observation")
+
+    """
+    # apply the oakink transform
+    generator = torch.Generator()
+    gstate = generator.get_state()
+    results = []
+    for i in range(len(obs["image"])):
+        print(f'range: {len(obs["image"])}')
+        g = torch.Generator()
+        g.set_state(gstate)
+
+        o = {k: v[i] for k, v in obs.items()}
+        print(o.keys())
+        print({k: v.shape for k, v in o.items()})
+        # random crop on the center of the image
+        o["bbox_center"] = o['cam_center']
+        o["bbox_scale"] = min(np.array(o['raw_size']))
+
+        image = o.pop("image")
+        results.append(OI(image, o, generator=g))
+
+    results = default_collate(results)
+    obs.update(results)
+    obs = {k: np.array(v) for k, v in obs.items() if isinstance(v, torch.Tensor)}
+    """
 
     # flatten state keys into a single tensor
     state = tf.reshape(
-        tf.concat([tf.reshape(v, [tf.shape(v)[0], -1]) for v in trajectory["observation"]["state"].values()], axis=-1),
-        [-1, 111],
+        tf.concat(
+            [
+                tf.reshape(v, [tf.shape(v)[0], -1])
+                for v in [
+                    obs[f"{_v}"]
+                    # obs[f"target_{_v}"]
+                    for _v in ["joints_3d", "mano_pose", "cam_intr"]
+                ]
+            ],
+            axis=-1,
+        ),
+        [-1, 120],
     )
 
-    # roll the state by 1
-    actions = tf.roll(state, shift=-1, axis=0)
-    last = state[-2:-1] # if we are done then the absolute mesh is same as last
-    trajectory["action"] = tf.concat([actions[:-1], last], axis=0)
+    deltas = state[1:] - state[:-1]
+    deltas = tf.concat([deltas, tf.zeros_like(state[-1:])], axis=0)
+    actions = tf.concat([deltas[:, :-9], state[:, -9:]], axis=-1)  # camera is absolute
 
-    trajectory['observation']['proprio'] = state
+    # roll the state by 1
+    # actions = tf.roll(state, shift=-1, axis=0)
+    # last = state[-2:-1] # if we are done then the absolute mesh is same as last
+    # trajectory["action"] = tf.concat([actions[:-1], last], axis=0)
+    trajectory["action"] = actions
+
+    trajectory["observation"] = {
+        "image": obs["image"],
+        "proprio": state,
+    }
     return trajectory
 
 
@@ -598,7 +676,9 @@ def utokyo_xarm_pick_place_dataset_transform(
     return trajectory
 
 
-def utokyo_xarm_bimanual_dataset_transform( trajectory: Dict[str, Any]) -> Dict[str, Any]:
+def utokyo_xarm_bimanual_dataset_transform(
+    trajectory: Dict[str, Any]
+) -> Dict[str, Any]:
     trajectory["action"] = trajectory["action"][..., -7:]
     trajectory["observation"]["proprio"] = trajectory["observation"][
         "end_effector_pose"

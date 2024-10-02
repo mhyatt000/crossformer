@@ -487,6 +487,9 @@ def make_dataset_from_rlds(
             ),
             num_parallel_calls,
         )
+        logging.warning(
+            f"Dataset normalization turned off for {skip_norm_keys} --"
+        )
     else:
         logging.warning(
             "Dataset normalization turned off -- set skip_norm=False to apply normalization."

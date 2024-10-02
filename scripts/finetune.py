@@ -1,13 +1,14 @@
 import datetime
-from pprint import pprint
 from functools import partial
 import os
+from pprint import pprint
 
 from absl import app, flags, logging
 import flax
 from flax.traverse_util import flatten_dict
 import jax
 from jax.experimental import multihost_utils
+import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from ml_collections import config_flags, ConfigDict
 import optax
@@ -30,6 +31,7 @@ from crossformer.utils.train_utils import (
     Timer,
     TrainState,
 )
+from crossformer.viz.utils import SequenceViz
 import wandb
 
 try:
@@ -130,6 +132,7 @@ def main(_):
     #
     #########
 
+    # """
     pretrained_model = CrossFormerModel.load_pretrained(
         FLAGS.config.pretrained_path,
         step=FLAGS.config.pretrained_step,
@@ -149,12 +152,16 @@ def main(_):
     config.update(FLAGS.config.get("update_config", ConfigDict()))
     config = config.to_dict()
     check_config_diff(config, pretrained_model.config)
+    # """
 
     #########
     #
     # Setup Data Loader
     #
     #########
+
+    # only for debugging when model is not needed
+    # config = {"text_processor": None}
 
     # create text processor
     if config["text_processor"] is None:
@@ -197,6 +204,12 @@ def main(_):
             del FLAGS.config.dataset_kwargs["oxe_kwargs"]
 
         FLAGS.config.dataset_kwargs.batch_size //= jax.process_count()
+        for l in FLAGS.config.dataset_kwargs.dataset_kwargs_list:
+            l["skip_norm_keys"] = ["proprio_bimanual", "proprio_mano"]
+
+        print(
+            FLAGS.config.dataset_kwargs.dataset_kwargs_list[0].get("skip_norm_keys", [])
+        )
         # pprint(FLAGS.config.dataset_kwargs)
         dataset = make_interleaved_dataset(**FLAGS.config.dataset_kwargs, train=True)
 
@@ -210,8 +223,53 @@ def main(_):
 
     example_batch = next(train_data_iter)
 
+    """
+    {'action': ((8, 3, 25, 120), 'float32'),
+     'action_head_masks': {'bimanual': ((8,), 'bool'),
+                           'mano': ((8,), 'bool'),
+                           'nav': ((8,), 'bool'),
+                           'quadruped': ((8,), 'bool'),
+                           'single_arm': ((8,), 'bool')},
+     'action_pad_mask': ((8, 3, 25, 120), 'bool'),
+     'observation': {'image_primary': ((8, 3, 224, 224, 3), 'uint8'),
+                     'pad_mask_dict': {'image_primary': ((8, 3), 'bool'),
+                                       'proprio_bimanual': ((8, 3), 'bool'),
+                                       'proprio_mano': ((8, 3), 'bool'),
+                                       'proprio_quadruped': ((8, 3), 'bool'),
+                                       'timestep': ((8, 3), 'bool')},
+                     'proprio_bimanual': ((8, 3, 14), 'float32'),
+                     'proprio_mano': ((8, 3, 120), 'float32'),
+                     'proprio_quadruped': ((8, 3, 46), 'float32'),
+                     'task_completed': ((8, 3, 25), 'bool'),
+                     'timestep': ((8, 3), 'int32'),
+                     'timestep_pad_mask': ((8, 3), 'bool')},
+     'task': {'image_primary': ((8, 224, 224, 3), 'uint8'),
+              'language_instruction': ((8, 512), 'float32'),
+              'pad_mask_dict': {'image_primary': ((8,), 'bool'),
+                                'language_instruction': ((8,), 'bool'),
+                                'proprio_bimanual': ((8,), 'bool'),
+                                'proprio_mano': ((8,), 'bool'),
+                                'proprio_quadruped': ((8,), 'bool'),
+                                'timestep': ((8,), 'bool')},
+              'proprio_bimanual': ((8, 14), 'float32'),
+              'proprio_mano': ((8, 120), 'float32'),
+              'proprio_quadruped': ((8, 46), 'float32'),
+              'timestep': ((8,), 'int32')}}
+
+    x = {
+        "observation": {
+            "image_primary": ((8, 1, 256, 256, 3), "float32"),
+            "timestep_pad_mask": ((8, 1), "float32"),
+        },
+        "task": {"language_instruction": ((4, 512), "float32")},
+    }
+    """
+
     spec = lambda xtree: jax.tree.map(lambda arr: (arr.shape, str(arr.dtype)), xtree)
     pprint(spec(example_batch))
+
+    # s = SequenceViz.from_batch(example_batch, stats=dataset.dataset_statistics)
+    # s.wandb()
 
     # print(dataset.statistics)
 
@@ -319,6 +377,39 @@ def main(_):
         )
         return action_loss, action_metrics
 
+    #
+    # for debug only
+    #
+    def loss_fn(params, batch, rng, train=True):
+        bound_module = model.module.bind({"params": params}, rngs={"dropout": rng})
+        transformer_embeddings = bound_module.crossformer_transformer(
+            batch["observation"],
+            batch["task"],
+            batch["observation"]["timestep_pad_mask"],
+            train=train,
+        )
+
+        action_loss, action_metrics = 0, {}
+        for head_name, head in bound_module.heads.items():
+            head_loss, head_metrics = head.loss(
+                transformer_embeddings,  # action head knows to pull out the "action" readout_key
+                batch["action"],
+                batch["observation"]["timestep_pad_mask"],
+                batch["action_pad_mask"],
+                action_head_mask=batch["action_head_masks"][head_name],
+                train=train,
+            )
+
+            # weight loss by number of samples from each head
+            head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(
+                batch["action"]
+            )
+            action_loss += head_loss * head_sample_fraction * head.loss_weight
+            action_metrics[head_name] = head_metrics
+        action_metrics["total_loss"] = action_loss
+
+        return action_loss, action_metrics
+
     # Data parallelism
     # Model is replicated across devices, data is split across devices
     @partial(
@@ -344,24 +435,24 @@ def main(_):
         new_state = state.apply_gradients(grads=grads, rng=rng)
         return new_state, info
 
-    #
-    # for debug only
-    #
-    def loss_fn(params, batch, rng, train=True):
-        timer = Timer()
+    @partial(
+        jax.jit,
+        out_shardings=jax.sharding.PositionalSharding(jax.devices()).replicate(),
+    )
+    def _val_fn(params, batch, rng):
+        train = False
+
+        # loss calculations
         bound_module = model.module.bind({"params": params}, rngs={"dropout": rng})
-        timer.tick("crossformer")
         transformer_embeddings = bound_module.crossformer_transformer(
             batch["observation"],
             batch["task"],
             batch["observation"]["timestep_pad_mask"],
             train=train,
         )
-        timer.tock("crossformer")
 
         action_loss, action_metrics = 0, {}
         for head_name, head in bound_module.heads.items():
-            timer.tick(head_name)
             head_loss, head_metrics = head.loss(
                 transformer_embeddings,  # action head knows to pull out the "action" readout_key
                 batch["action"],
@@ -377,9 +468,31 @@ def main(_):
             )
             action_loss += head_loss * head_sample_fraction * head.loss_weight
             action_metrics[head_name] = head_metrics
-            timer.tock(head_name)
 
-        print(timer.get_average_times())
+        # eval metrics
+        mano_head = bound_module.heads["mano"]
+        deltas = mano_head.predict_action(
+            transformer_embeddings,
+            rng,
+            train=train,
+        )
+        action_metrics["deltas"] = deltas
+
+        return action_loss, action_metrics
+
+    def val_fn(params, batch, rng, train=False):
+        """
+        calls a child val function to do any operations with the model.
+        the visualization cannot be jitted (courtesy of wandb)
+        viz is not returned since ValidationCallback gets the mean of the metrics
+        """
+        action_loss, action_metrics = _val_fn(params, batch, rng)
+
+        deltas = action_metrics.pop("deltas")
+        batch["action"] = deltas  # plot with model deltas as actions
+        batch = jax.tree.map(lambda x: jnp.asarray(x), batch)
+        s = SequenceViz.from_batch(batch, stats=dataset.dataset_statistics).wandb()
+
         return action_loss, action_metrics
 
     #########
@@ -401,7 +514,7 @@ def main(_):
         dataset_kwargs_list = [FLAGS.config.dataset_kwargs]
 
         val_callback = ValidationCallback(
-            loss_fn=loss_fn,
+            loss_fn=val_fn,  #  loss_fn,
             process_batch_fn=process_batch,
             text_processor=text_processor,
             val_dataset_kwargs_list=dataset_kwargs_list,
@@ -417,13 +530,124 @@ def main(_):
             FLAGS.config.get("eval_datasets", ()),
         )
         val_callback = ValidationCallback(
-            loss_fn=loss_fn,
+            loss_fn=val_fn,  # loss_fn,
             process_batch_fn=lambda batch: shard(process_batch(batch)),
             text_processor=text_processor,
             val_dataset_kwargs_list=val_datasets_kwargs_list,
             dataset_kwargs=FLAGS.config.dataset_kwargs,
             **FLAGS.config.val_kwargs.to_dict(),
         )
+
+    ########
+    #
+    # SET UP MODEL ROLLOUTS (from improve & SIMPLER)
+    #
+    ########
+
+    def _model_step(params, batch, rng, train=False):
+        """for evaluation in env"""
+
+        # modified for crossformer from octo
+        print(spec(batch))
+
+        """
+        actions = model.sample_actions(
+            batch,
+            task,
+            model.dataset_statistics['bridge_dataset'],
+            head_name='single_arm',
+            rng=rng,
+        )[0, :, : 7]
+        """
+
+        bound_module = model.module.bind({"params": params}, rngs={"dropout": rng})
+        transformer_embeddings = bound_module.crossformer_transformer(
+            batch["observation"],
+            batch["task"],
+            batch["observation"]["timestep_pad_mask"],
+            train=train,
+        )
+        actions = bound_module.heads["single_arm"](
+            transformer_embeddings,  # doesnt need rng since its not diffusion
+            train=train,
+        )
+
+        return actions
+
+    @partial(
+        jax.jit,
+        # state is replicated, batch is data-parallel
+        in_shardings=(dp_sharding),
+        out_shardings=(replicated_sharding),
+        # allows jax to modify `state` in-place, saving a lot of memory
+        # donate_argnums=0,
+    )
+    def model_step(batch):
+        actions = _model_step(train_state.model.params, batch, train_state.rng)
+        # act_horizon is 4 for single_arm
+        # we act on the last obs horizon
+        actions = actions[: FLAGS.config.rollout_kwargs.num_envs, -1, :4, :]
+        return actions
+
+    import simpler_env as simpler
+    from simpler_utils import EvalCallback, mk_envs
+
+    tasks = [e for e in simpler.ENVIRONMENTS if "widowx" in e]
+    # replicates a few times
+    tasks = tasks
+    venv = mk_envs(tasks, FLAGS.config.rollout_kwargs.num_envs)
+    instructions = venv.env_method("get_language_instruction")
+
+    def transform(batch):
+        # zeros = jax.tree.map(lambda arr: jnp.zeros(arr), gapspec)
+        batch["observation"]["timestep_pad_mask"] = batch["observation"].pop("pad_mask")
+
+        zeros = jax.tree.map(
+            lambda arr: jnp.zeros(
+                (
+                    FLAGS.config.dataset_kwargs.batch_size
+                    - FLAGS.config.rollout_kwargs.num_envs,
+                    *arr.shape[1:],
+                )
+            ),
+            batch,
+        )
+        batch = jax.tree.map(lambda a, b: jnp.concatenate([a, b], axis=0), batch, zeros)
+
+        _instruct = instructions + [
+            ""
+            for _ in range(
+                FLAGS.config.dataset_kwargs.batch_size
+                - FLAGS.config.rollout_kwargs.num_envs
+            )
+        ]
+        batch["task"] = {"language_instruction": [i.encode("utf-8") for i in _instruct]}
+        batch["dataset_name"] = "bridge_dataset"  # dummy variable
+
+        batch = shard(process_batch(batch))
+        return batch
+
+    from improve.fm.oxes import OXESimplerInference, PolicyStepper
+
+    stepper = PolicyStepper(
+        model_type="func",
+        dataset_id="bridge_dataset",  # or google dataset
+        func=model_step,
+        transform=transform,
+    )
+
+    oxes = OXESimplerInference(
+        stepper,
+        batch_size=FLAGS.config.rollout_kwargs.num_envs,
+        image_size=224,
+    )
+    oxes.reset(instructions)
+
+    def og_step(obs):
+        raw, act = oxes.step(obs)
+        return act
+
+    eval_callback = EvalCallback(venv, og_step)
 
     #########
     #
@@ -456,12 +680,17 @@ def main(_):
                 {"training": update_info, "timer": timer.get_average_times()}, step=i
             )
 
-        if (i + 1) % FLAGS.config.eval_interval == 0:
+        if (i) % FLAGS.config.eval_interval == 0:  # eval on i=0 for comparison
             logging.info("Evaluating...")
 
             with timer("val"):
                 val_metrics = val_callback(train_state, i + 1)
+                SequenceViz.flush(i, limit=32)
                 wandb_log(val_metrics, step=i)
+
+            with timer("rollout"):
+                evals = eval_callback(i)
+                wandb_log({"eval": evals}, step=i)
 
         if (i + 1) % FLAGS.config.save_interval == 0 and save_dir is not None:
             logging.info("Saving checkpoint...")

@@ -46,6 +46,7 @@ import rlds_oakink
 
 BAFL_SOUP = [
     ("rlds_oakink", 1.0),
+    # ("bridge_dataset", 0.2),
     # ("berkeley_mvp_converted_externally_to_rlds", 0.1),
     ("nyu_rot_dataset_converted_externally_to_rlds", 0.1),
     ("ucsd_kitchen_dataset_converted_externally_to_rlds", 0.1),

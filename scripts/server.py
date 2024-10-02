@@ -72,7 +72,10 @@ class HttpServer:
     def __init__(self, paths):
         self.models = dict()
         for name, path, step in paths:
-            self.models[name] = CrossFormerModel.load_pretrained(path, step=step)
+            if isinstance(path, str):
+                self.models[name] = CrossFormerModel.load_pretrained(path, step=step)
+            elif isinstance(path, CrossFormerModel):
+                self.models[name] = path
 
         # settings for bimanual inference
         self.head_name = "bimanual"
