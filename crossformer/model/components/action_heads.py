@@ -8,7 +8,7 @@ from jax import Array
 import jax.numpy as jnp
 from jax.typing import ArrayLike
 import numpy as np
-from octo.model.components.diffusion import cosine_beta_schedule, create_diffusion_model
+from crossformer.model.components.diffusion import cosine_beta_schedule, create_diffusion_model
 
 from crossformer.model.components.base import TokenGroup
 from crossformer.model.components.transformer import MAPHead
