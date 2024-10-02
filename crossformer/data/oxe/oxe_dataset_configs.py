@@ -30,9 +30,7 @@ class ProprioEncoding(IntEnum):
     QUADRUPED = 6
 
     # single arm
-    MANO = 7  # Hand 3D Pose (21 x 3) +
-    # MANO Pose (16 x 3) +
-    # = 111 total
+    MANO = 7  # Hand 3D Pose (21 x 3) + MANO Pose (16 x 3) + cam (3x3) = 120 total
 
 
 class ActionEncoding(IntEnum):
@@ -48,9 +46,7 @@ class ActionEncoding(IntEnum):
     QUADRUPED = 6
 
     # single arm
-    MANO = 7  # Hand 3D Pose (21 x 3) +
-    # MANO Pose (16 x 3) +
-    # = 111 total
+    MANO = 7  # Hand 3D Pose (21 x 3) + MANO Pose (16 x 3) + cam (3x3) = 120 total
 
 
 # === Individual Dataset Configs ===
@@ -71,6 +67,8 @@ OXE_DATASET_CONFIGS = {
             "joints_3d",
             "joints_vis",
         ],
+        "proprio_obs_keys": {"mano": "proprio", "bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {"mano": 120, "bimanual": 14, "quadruped": 46},
         "proprio_encoding": ProprioEncoding.MANO,
         "action_encoding": ActionEncoding.MANO,
     },
@@ -304,6 +302,8 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "proprio_obs_keys": {"mano": None, "bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {"mano": 120, "bimanual": 14, "quadruped": 46},
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -406,6 +406,8 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "proprio_obs_keys": {"mano": None, "bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {"mano": 120, "bimanual": 14, "quadruped": 46},
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -418,6 +420,8 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "proprio_obs_keys": {"mano": None, "bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {"mano": 120, "bimanual": 14, "quadruped": 46},
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },

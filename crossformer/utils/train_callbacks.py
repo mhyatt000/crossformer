@@ -172,10 +172,10 @@ class ValidationCallback(Callback):
             val_iterator = map(self.process_batch_fn, val_iterator)
             self.val_iterators[single_dataset_kwargs["name"]] = val_iterator
 
-        @partial(
-            jax.jit,
-            out_shardings=jax.sharding.PositionalSharding(jax.devices()).replicate(),
-        )
+        # @partial(
+        # jax.jit,
+        # out_shardings=jax.sharding.PositionalSharding(jax.devices()).replicate(),
+        # )
         def eval_step(state: TrainState, batch: Data):
             loss_fn_partial = partial(
                 self.loss_fn,

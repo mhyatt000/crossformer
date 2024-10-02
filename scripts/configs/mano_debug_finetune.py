@@ -5,7 +5,7 @@ from ml_collections.config_dict import FieldReference, placeholder
 
 from crossformer.data.oxe.oxe_dataset_mixes import OXE_NAMED_MIXES
 from crossformer.data.utils.text_processing import UniversalSentenceEncoder
-from crossformer.model.components.action_heads import L1ActionHead
+from crossformer.model.components.action_heads import L1ActionHead, DiffusionActionHead
 from crossformer.model.components.tokenizers import ImageTokenizer, LowdimObsTokenizer
 from crossformer.model.components.transformer import common_transformer_sizes
 from crossformer.model.components.vit_encoders import ResNet26, ResNet26FILM
@@ -16,7 +16,7 @@ BIMANUAL_ACTION_DIM = 14
 SINGLE_ARM_ACTION_DIM = 7
 NAV_ACTION_DIM = 2
 QUADRUPED_ACTION_DIM = 12
-MANO_ACTION_DIM = 111
+MANO_ACTION_DIM = 120
 
 HEAD_TO_DATASET = {
     "mano": [
@@ -97,12 +97,12 @@ def get_dataset_config(task_cond, window_size, action_horizon, mix="bafl"):
             load_camera_views=(
                 "primary",
             ),  #  "high"), # , "nav", "left_wrist", "right_wrist"),
-            load_proprio=False,
+            load_proprio=True,
             load_depth=False,
         ),
         traj_transform_kwargs=traj_transform_kwargs,
         frame_transform_kwargs=frame_transform_kwargs,
-        batch_size=512,  # used over finetune batch size bc of make_interleaved
+        batch_size=16,  # used over finetune batch size bc of make_interleaved
         shuffle_buffer_size=50000,
         balance_weights=False,
         traj_transform_threads=48,
@@ -134,6 +134,7 @@ def get_augmentation_config(task_cond, window_size, action_horizon):
         subsample_length=100,
     )
 
+    """
     aloha_image_augment_kwargs = dict(
         random_resized_crop=dict(scale=[0.9, 1.0], ratio=[0.75, 4.0 / 3]),
         random_brightness=[0.1],
@@ -156,7 +157,23 @@ def get_augmentation_config(task_cond, window_size, action_horizon):
         random_saturation=[0.9, 1.1],
         random_hue=[0.05],
         augment_order=[
-            "random_resized_crop",
+            # "random_resized_crop",
+            "random_brightness",
+            "random_contrast",
+            "random_saturation",
+            "random_hue",
+        ],
+    )
+    """
+
+    oakink_image_augment_kwargs = dict(
+        # random_resized_crop=dict(scale=[0.8, 1.0], ratio=[0.9, 1.1]),
+        random_brightness=[0.1],
+        random_contrast=[0.9, 1.1],
+        random_saturation=[0.9, 1.1],
+        random_hue=[0.05],
+        augment_order=[
+            # "random_resized_crop",
             "random_brightness",
             "random_contrast",
             "random_saturation",
@@ -173,11 +190,11 @@ def get_augmentation_config(task_cond, window_size, action_horizon):
             "right_wrist": (224, 224),
         },
         image_augment_kwargs={
-            "primary": bridge_image_augment_kwargs,
-            "high": aloha_image_augment_kwargs,
-            "nav": bridge_image_augment_kwargs,
-            "left_wrist": aloha_image_augment_kwargs,
-            "right_wrist": aloha_image_augment_kwargs,
+            "primary": oakink_image_augment_kwargs,
+            # "high": aloha_image_augment_kwargs,
+            # "nav": bridge_image_augment_kwargs,
+            # "left_wrist": aloha_image_augment_kwargs,
+            # "right_wrist": aloha_image_augment_kwargs,
         },
         num_parallel_calls=200,
     )
@@ -206,7 +223,7 @@ def get_config():
         language_key="language_instruction",
         action_proprio_normalization_type="normal",
         # We want to avoid normalizing the gripper
-        action_normalization_mask=[True] * 111,
+        action_normalization_mask=[True] * 120,
         # standardize_fn is dynamically loaded from a file
         standardize_fn=ModuleSpec.create(
             "crossformer.data.oxe.oxe_standardization_transforms:oakink_dataset_transform",
@@ -226,7 +243,7 @@ def get_config():
                     L1ActionHead,
                     action_horizon=10,
                     action_dim=BIMANUAL_ACTION_DIM,
-                    num_preds=BIMANUAL_ACTION_DIM,
+                    # num_preds=BIMANUAL_ACTION_DIM,
                     pool_strategy="pass",
                     readout_key="readout_bimanual",
                     clip_pred=False,
@@ -234,19 +251,18 @@ def get_config():
                     constrain_loss_dims=True,
                 ),
                 mano=ModuleSpec.create(
-                    L1ActionHead,
-                    action_horizon=1,
+                    DiffusionActionHead,
+                    action_horizon=10,
                     action_dim=MANO_ACTION_DIM,
-                    num_preds=MANO_ACTION_DIM,
-                    pool_strategy="use_map",
-                    # pool_strategy="pass",
+                    # num_preds=MANO_ACTION_DIM,
+                    pool_strategy="mean",
                     readout_key="readout_mano",
                     clip_pred=False,
                     loss_weight=1.0,
                     constrain_loss_dims=True,
                 ),
             ),
-            readouts=dict(mano=1, bimanual=10),
+            readouts=dict(mano=10, bimanual=10),
         )
     )
 
@@ -257,17 +273,33 @@ def get_config():
     else:
         raise ValueError("Invalid mode")
 
-    max_steps = FieldReference(50000)
-    window_size = FieldReference(default=1)
+    max_steps = FieldReference(300_000)
 
-    dataset_kwargs = get_dataset_config("multi", window_size, action_horizon=10)
+    #
+    ### should this be higher??
+    # was 5 during pretraining
+    #
+    window_size = FieldReference(default=1)
+    window_size = 3
+
+    action_horizon = 10
+    dataset_kwargs = get_dataset_config(
+        "multi", window_size, action_horizon=action_horizon
+    )
     config = dict(
         update_config=UPDATE_CONFIG,  # uncomment this line to add new observation tokenizer and action head
+        skip_norm_keys=["proprio_bimanual, proprio_mano"],
         config_delete_keys={
             "model": {
                 "readouts": {
+                    "bimanual": 10,
+                    "quadruped": None,
+                    "nav": None,
+                },
+                "observation_tokenizers": {
                     "bimanual": None,
                     "quadruped": None,
+                    "high": None,
                     "nav": None,
                 },
                 "heads": {
@@ -282,7 +314,7 @@ def get_config():
         shuffle_buffer_size=10000,
         num_steps=max_steps,
         log_interval=100,
-        eval_interval=2000,
+        eval_interval=2000,  # 2000
         save_interval=2000,
         save_dir=os.path.expanduser(os.environ.get('BAFL_SAVE', os.path.expanduser('~'))),
         seed=42,
@@ -314,9 +346,12 @@ def get_config():
         ),
         val_kwargs=dict(
             val_shuffle_buffer_size=1000,
-            num_val_batches=16,
+            num_val_batches=1,  # 16
         ),
-        eval_datasets=(),
+        eval_datasets=("rlds_oakink"),
+        rollout_kwargs=dict(
+            num_envs=4,
+        ),
     )
 
     if task == "image_conditioned":
@@ -333,7 +368,7 @@ def get_config():
 
     traj_transform_kwargs = dict(
         window_size=window_size,
-        action_horizon=4,
+        action_horizon=action_horizon,  # was 4
         goal_relabeling_strategy=goal_relabeling_strategy,
         task_augment_strategy="delete_task_conditioning",
         task_augment_kwargs=dict(

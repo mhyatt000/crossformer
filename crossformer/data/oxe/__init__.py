@@ -60,7 +60,7 @@ def make_oxe_dataset_kwargs(
 
     # MANO
     elif dataset_kwargs["action_encoding"] is ActionEncoding.MANO:
-        dataset_kwargs["action_normalization_mask"] = [True] * 111
+        dataset_kwargs["action_normalization_mask"] = [True] * 111 + [False] * 9
 
     else:
         raise ValueError(
