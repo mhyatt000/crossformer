@@ -10,11 +10,8 @@ from crossformer.model.components.vit_encoders import ResNet26, ResNet26FILM
 from crossformer.utils.spec import ModuleSpec
 from crossformer.utils.train_utils import resnet_26_loader
 
-BIMANUAL_ACTION_DIM = 14
-SINGLE_ARM_ACTION_DIM = 7
-NAV_ACTION_DIM = 2
-QUADRUPED_ACTION_DIM = 12
-MANO_ACTION_DIM = 120
+from crossformer.data.oxe import ActionDim
+
 
 HEAD_TO_DATASET = {
     "mano": [
@@ -100,7 +97,7 @@ def get_dataset_config(task_cond, window_size, action_horizon, mix="bafl"):
         ),
         traj_transform_kwargs=traj_transform_kwargs,
         frame_transform_kwargs=frame_transform_kwargs,
-        batch_size=16,  # used over finetune batch size bc of make_interleaved
+        batch_size=512,  # used over finetune batch size bc of make_interleaved
         shuffle_buffer_size=50000,
         balance_weights=False,
         traj_transform_threads=48,
@@ -121,8 +118,8 @@ def get_augmentation_config(task_cond, window_size, action_horizon):
     traj_transform_kwargs = dict(
         window_size=window_size,
         action_horizon=action_horizon,
-        max_action_dim=MANO_ACTION_DIM,
-        max_proprio_dim=MANO_ACTION_DIM,
+        max_action_dim=ActionDim.BIMANUAL,
+        max_proprio_dim=ActionDim.BIMANUAL,
         head_to_dataset=HEAD_TO_DATASET,
         goal_relabeling_strategy="uniform",
         task_augment_strategy="delete_task_conditioning",
@@ -221,7 +218,7 @@ def get_config():
         language_key="language_instruction",
         action_proprio_normalization_type="normal",
         # We want to avoid normalizing the gripper
-        action_normalization_mask=[True] * 120,
+        action_normalization_mask=[True] * ActionDim.MANO_DEBUG,
         # standardize_fn is dynamically loaded from a file
         standardize_fn=ModuleSpec.create(
             "crossformer.data.oxe.oxe_standardization_transforms:oakink_dataset_transform",
@@ -239,9 +236,9 @@ def get_config():
             heads=dict(
                 bimanual=ModuleSpec.create(
                     L1ActionHead,
-                    action_horizon=10,
-                    action_dim=BIMANUAL_ACTION_DIM,
-                    # num_preds=BIMANUAL_ACTION_DIM,
+                    action_horizon=4,
+                    action_dim=ActionDim.BIMANUAL,
+                    # num_preds=ActionDim.BIMANUAL,
                     pool_strategy="pass",
                     readout_key="readout_bimanual",
                     clip_pred=False,
@@ -250,17 +247,18 @@ def get_config():
                 ),
                 mano=ModuleSpec.create(
                     DiffusionActionHead,
-                    action_horizon=10,
-                    action_dim=MANO_ACTION_DIM,
-                    # num_preds=MANO_ACTION_DIM,
+                    action_horizon=4,
+                    action_dim=ActionDim.MANO_DEBUG,
+                    # num_preds=ActionDim.MANO_DEBUG,
                     pool_strategy="mean",
                     readout_key="readout_mano",
                     clip_pred=False,
                     loss_weight=1.0,
                     constrain_loss_dims=True,
+                    diffusion_steps=5,
                 ),
             ),
-            readouts=dict(mano=10, bimanual=10),
+            readouts=dict(mano=4, bimanual=4),
         )
     )
 
@@ -271,16 +269,18 @@ def get_config():
     else:
         raise ValueError("Invalid mode")
 
-    max_steps = FieldReference(300_000)
+    max_steps = FieldReference(50_000)
+    grad_acc = None
+    max_steps = max_steps * (grad_acc or 1)
 
     #
     ### should this be higher??
     # was 5 during pretraining
     #
     window_size = FieldReference(default=1)
-    window_size = 3
+    # window_size = 3
 
-    action_horizon = 10
+    action_horizon = 4
     dataset_kwargs = get_dataset_config(
         "multi", window_size, action_horizon=action_horizon
     )
@@ -340,16 +340,19 @@ def get_config():
             weight_decay=0.01,
             clip_gradient=1.0,
             frozen_keys=frozen_keys,
-            grad_accumulation_steps=None,  # if you are using grad accumulation, you need to adjust max_steps accordingly
+            grad_accumulation_steps=grad_acc,  # if you are using grad accumulation, you need to adjust max_steps accordingly
         ),
         val_kwargs=dict(
             val_shuffle_buffer_size=1000,
             num_val_batches=1,  # 16
+            
         ),
         eval_datasets=("rlds_oakink"),
         rollout_kwargs=dict(
-            num_envs=4,
-        ),
+                num_envs=4,
+                use_rollout=False,
+            ),
+        debug=False
     )
 
     if task == "image_conditioned":

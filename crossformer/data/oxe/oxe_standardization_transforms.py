@@ -100,8 +100,11 @@ def oakink_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     obs = {k: np.array(v) for k, v in obs.items() if isinstance(v, torch.Tensor)}
     """
 
+    # xyz of palm
+    state = obs["joints_3d"][:,0]
+
     # flatten state keys into a single tensor
-    state = tf.reshape(
+    proprio = tf.reshape(
         tf.concat(
             [
                 tf.reshape(v, [tf.shape(v)[0], -1])
@@ -115,6 +118,7 @@ def oakink_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
         ),
         [-1, 120],
     )
+    
 
     deltas = state[1:] - state[:-1]
     deltas = tf.concat([deltas, tf.zeros_like(state[-1:])], axis=0)
@@ -128,7 +132,7 @@ def oakink_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 
     trajectory["observation"] = {
         "image": obs["image"],
-        "proprio": state,
+        "proprio": proprio,
     }
     return trajectory
 

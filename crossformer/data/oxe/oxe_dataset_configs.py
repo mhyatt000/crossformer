@@ -49,6 +49,34 @@ class ActionEncoding(IntEnum):
     MANO = 7  # Hand 3D Pose (21 x 3) + MANO Pose (16 x 3) + cam (3x3) = 120 total
 
 
+class ActionDim(IntEnum):
+
+    # OTHER
+    NAV_2D = 2
+    JOINT_POS_BIMANUAL_NAV = 14
+    QUADRUPED = 12
+
+    # MAIN
+    SINGLE = 7
+    BIMANUAL = 14
+    MANO = 120
+
+    MANO_DEBUG = 3
+
+
+class ProprioDim(IntEnum):
+
+    POS_EULER = 7
+    POS_QUAT = 8
+    JOINT = 7
+    BIMANUAL = 14
+    POS_NAV = 3
+    QUADRUPED = 46
+
+    MANO = 120
+    MANO_DEBUG = 3
+
+
 # === Individual Dataset Configs ===
 OXE_DATASET_CONFIGS = {
     "rlds_oakink": {  # OAK INK Dataset
@@ -68,7 +96,11 @@ OXE_DATASET_CONFIGS = {
             "joints_vis",
         ],
         "proprio_obs_keys": {"mano": "proprio", "bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"mano": 120, "bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "mano": ProprioDim.MANO,
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.MANO,
         "action_encoding": ActionEncoding.MANO,
     },
@@ -85,7 +117,10 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.POS_QUAT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -99,7 +134,10 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.POS_QUAT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -115,7 +153,10 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -135,7 +176,10 @@ OXE_DATASET_CONFIGS = {
             "wrist": "depth_gripper",
         },
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -150,7 +194,10 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
@@ -166,7 +213,10 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
@@ -182,7 +232,10 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.EEF_POS,
@@ -197,7 +250,10 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.NONE,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -211,7 +267,10 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.NONE,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -226,7 +285,10 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.EEF_POS,
@@ -242,7 +304,10 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "depth_obs_keys": {"primary": "depth", "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_QUAT,
         "action_encoding": ActionEncoding.EEF_POS,
@@ -256,7 +321,10 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.EEF_POS,
@@ -270,7 +338,10 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
@@ -303,7 +374,11 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"mano": None, "bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"mano": 120, "bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "mano": ProprioDim.MANO,
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -318,7 +393,10 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
@@ -334,7 +412,10 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.EEF_POS,
@@ -348,7 +429,10 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "depth_obs_keys": {
             "primary": "depth",
             "secondary": "depth_additional_view",
@@ -382,7 +466,10 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_QUAT,
         "action_encoding": ActionEncoding.EEF_POS,
@@ -407,7 +494,11 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"mano": None, "bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"mano": 120, "bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "mano": ProprioDim.MANO,
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -421,7 +512,11 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"mano": None, "bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"mano": 120, "bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "mano": ProprioDim.MANO,
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -436,7 +531,10 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_QUAT,
         "action_encoding": ActionEncoding.EEF_POS,
@@ -452,7 +550,10 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_QUAT,
         "action_encoding": ActionEncoding.EEF_POS,
@@ -466,7 +567,10 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
@@ -573,7 +677,10 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
@@ -611,7 +718,10 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.EEF_POS,
@@ -633,7 +743,10 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.EEF_POS,
@@ -649,7 +762,10 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.EEF_POS,
@@ -679,7 +795,10 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
@@ -694,7 +813,10 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None},
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.POS_NAV,
         "action_encoding": ActionEncoding.NAV_2D,
         "override_traj_transform_kwargs": {
@@ -782,7 +904,10 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"bimanual": None, "quadruped": "proprio"},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.QUADRUPED,
         "action_encoding": ActionEncoding.QUADRUPED,
         "override_traj_transform_kwargs": {
@@ -799,7 +924,10 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"bimanual": None, "quadruped": "proprio"},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.QUADRUPED,
         "action_encoding": ActionEncoding.QUADRUPED,
         "override_traj_transform_kwargs": {
@@ -816,7 +944,10 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"bimanual": None, "quadruped": "proprio"},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.QUADRUPED,
         "action_encoding": ActionEncoding.QUADRUPED,
         "override_traj_transform_kwargs": {
@@ -834,7 +965,10 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
         "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
     },
@@ -848,7 +982,10 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
         "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
     },
@@ -862,7 +999,10 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
         "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
     },
@@ -876,7 +1016,10 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
         "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
     },
@@ -890,7 +1033,10 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
         "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
     },
@@ -904,7 +1050,10 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
         "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
     },
@@ -918,7 +1067,10 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
         "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
     },
@@ -932,7 +1084,10 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
         "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
     },
@@ -948,7 +1103,10 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
         "filter_functions": [
@@ -967,7 +1125,10 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -983,7 +1144,10 @@ OXE_DATASET_CONFIGS = {
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {"bimanual": 14, "quadruped": 46},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },

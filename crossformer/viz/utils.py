@@ -8,7 +8,7 @@ from typing import Callable, Tuple
 # from manotorch.manolayer import ManoLayer
 # from oikit.oi_image.oi_image import OakInkImageSequence
 # from oikit.oi_image.utils import persp_project
-from _oikit import (  # OpenDRRenderer,
+from crossformer.viz._oikit import (  # OpenDRRenderer,
     caption_view,
     edge_color_hand,
     edge_list_hand,
@@ -232,10 +232,10 @@ class SequenceViz:
 
     videos = []
 
-    def __init__(self, imgs, joints, deltas, cam):
+    def __init__(self, imgs, joints, actions, cam):
         self.imgs = imgs
         self.joints = joints
-        self.deltas = deltas
+        self.actions = actions
         self.cam = cam
         self.nstep = len(imgs) if len(imgs.shape) == 4 else len(imgs[0])
         self.task = None
@@ -243,6 +243,7 @@ class SequenceViz:
         self.scaler = scaleto(480, min)
         self.batched = False  # by default
         self.resolution = 2
+        self.use_delta = True
 
     @staticmethod
     def from_batch(batch, stats):
@@ -258,7 +259,7 @@ class SequenceViz:
         s = SequenceViz(
             imgs=np.array(batch["observation"]["image_primary"]),
             joints=joints,
-            deltas=actions,
+            actions=actions,
             cam=cam_intr,
         )
         s.task = [None] * len(s.imgs)
@@ -272,7 +273,7 @@ class SequenceViz:
         deltas = np.concatenate([deltas, np.zeros_like(joints[-1:])], axis=0)
         return deltas
 
-    def _wandb(self, imgs, joints, deltas, cams, task=None):
+    def _wandb(self, imgs, joints, actions, cams, task=None):
         """returns an gif for wandb logging"""
 
         frames = []
@@ -285,8 +286,8 @@ class SequenceViz:
 
             # task = s["language_instruction"].numpy().decode("utf-8")
 
-            # print(deltas.shape)
-            # print(deltas[i].shape)
+            # print(actions.shape)
+            # print(actions[i].shape)
             # print('enter for')
             # bs,window,horizon,dims .. we are selecting window from this sample
             j2d = persp_project(joints[i].reshape(21, 3), cams[i].reshape(3, 3))
@@ -294,17 +295,23 @@ class SequenceViz:
                 image, j2d, hand_joint_mask=None, hcolor=horizon_colors[0]
             )
 
-            dw = deltas[i]
-            for h, dh in enumerate(dw):
-                if (i + h) % self.resolution:
-                    continue
-                # if i + h < self.nstep:
-                # # print(f"plotting for horizon step {i+h}")
+            a_w = actions[i]
+            for h, dh in enumerate(a_w):
+                # if (i + h) % self.resolution:
+                    # continue
 
-                # print("deltas", dw[: i + h+1].shape)
-                j = joints[i] + dw[: i + h + 1].sum(axis=0)
-                # print("delta sum", dw[: i + h+1].sum(axis=0).shape)
-                # print("joints", j.shape)
+                if self.use_delta:
+                    act = a_w[:h + 1].sum(axis=0)
+
+                    # if only predicting the palm
+                    if joints[i].shape[-1] > act.shape[-1]:
+                        nrep = joints[i].shape[-1] // act.shape[-1]
+                        # pad act with zeros to the dim of joints[i]
+                        act = np.stack([act] * nrep, axis=-1)
+                    j = joints[i] + act
+                else:
+                    j = a_w[h]
+
                 cam = cams[i]
 
                 j2d = persp_project(j.reshape(21, 3), cam.reshape(3, 3))
@@ -325,14 +332,14 @@ class SequenceViz:
                 video = self._wandb(
                     self.imgs[i],
                     self.joints[i],
-                    self.deltas[i],
+                    self.actions[i],
                     self.cam[i],
                     task=self.task[i],
                 )
                 SequenceViz.videos.append(video)
         else:
             video = self._wandb(
-                self.imgs, self.joints, self.deltas, self.cam, task=self.task
+                self.imgs, self.joints, self.actions, self.cam, task=self.task
             )
             SequenceViz.videos.append(video)
 
