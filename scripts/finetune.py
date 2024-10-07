@@ -132,27 +132,26 @@ def main(_):
     #
     #########
 
-    # """
-    pretrained_model = CrossFormerModel.load_pretrained(
-        FLAGS.config.pretrained_path,
-        step=FLAGS.config.pretrained_step,
-    )
-    flat_config = flax.traverse_util.flatten_dict(
-        pretrained_model.config, keep_empty_nodes=True
-    )
-    for d_key in flax.traverse_util.flatten_dict(
-        FLAGS.config.get("config_delete_keys", ConfigDict()).to_dict()
-    ):
-        for c_key in list(flat_config.keys()):
-            if ".".join(c_key).startswith(".".join(d_key)):
-                print(f"Deleting {'.'.join(c_key)}")
-                del flat_config[c_key]
+    if not FLAGS.config.debug:
+        pretrained_model = CrossFormerModel.load_pretrained(
+            FLAGS.config.pretrained_path,
+            step=FLAGS.config.pretrained_step,
+        )
+        flat_config = flax.traverse_util.flatten_dict(
+            pretrained_model.config, keep_empty_nodes=True
+        )
+        for d_key in flax.traverse_util.flatten_dict(
+            FLAGS.config.get("config_delete_keys", ConfigDict()).to_dict()
+        ):
+            for c_key in list(flat_config.keys()):
+                if ".".join(c_key).startswith(".".join(d_key)):
+                    print(f"Deleting {'.'.join(c_key)}")
+                    del flat_config[c_key]
 
-    config = ConfigDict(flax.traverse_util.unflatten_dict(flat_config))
-    config.update(FLAGS.config.get("update_config", ConfigDict()))
-    config = config.to_dict()
-    check_config_diff(config, pretrained_model.config)
-    # """
+        config = ConfigDict(flax.traverse_util.unflatten_dict(flat_config))
+        config.update(FLAGS.config.get("update_config", ConfigDict()))
+        config = config.to_dict()
+        check_config_diff(config, pretrained_model.config)
 
     #########
     #
@@ -160,8 +159,8 @@ def main(_):
     #
     #########
 
-    # only for debugging when model is not needed
-    # config = {"text_processor": None}
+    if FLAGS.config.debug: # only for debugging when model is not needed
+        config = {"text_processor": None}
 
     # create text processor
     if config["text_processor"] is None:
@@ -589,14 +588,16 @@ def main(_):
         actions = actions[: FLAGS.config.rollout_kwargs.num_envs, -1, :4, :]
         return actions
 
-    import simpler_env as simpler
-    from simpler_utils import EvalCallback, mk_envs
+    use_rollout = FLAGS.config.rollout_kwargs.use_rollout
+    if use_rollout:
+        import simpler_env as simpler
+        from simpler_utils import EvalCallback, mk_envs
 
-    tasks = [e for e in simpler.ENVIRONMENTS if "widowx" in e]
-    # replicates a few times
-    tasks = tasks
-    venv = mk_envs(tasks, FLAGS.config.rollout_kwargs.num_envs)
-    instructions = venv.env_method("get_language_instruction")
+        tasks = [e for e in simpler.ENVIRONMENTS if "widowx" in e]
+        # replicates a few times
+        tasks = tasks
+        venv = mk_envs(tasks, FLAGS.config.rollout_kwargs.num_envs)
+        instructions = venv.env_method("get_language_instruction")
 
     def transform(batch):
         # zeros = jax.tree.map(lambda arr: jnp.zeros(arr), gapspec)
@@ -627,27 +628,28 @@ def main(_):
         batch = shard(process_batch(batch))
         return batch
 
-    from improve.fm.oxes import OXESimplerInference, PolicyStepper
+    if use_rollout:
+        from improve.fm.oxes import OXESimplerInference, PolicyStepper
 
-    stepper = PolicyStepper(
-        model_type="func",
-        dataset_id="bridge_dataset",  # or google dataset
-        func=model_step,
-        transform=transform,
-    )
+        stepper = PolicyStepper(
+            model_type="func",
+            dataset_id="bridge_dataset",  # or google dataset
+            func=model_step,
+            transform=transform,
+        )
 
-    oxes = OXESimplerInference(
-        stepper,
-        batch_size=FLAGS.config.rollout_kwargs.num_envs,
-        image_size=224,
-    )
-    oxes.reset(instructions)
+        oxes = OXESimplerInference(
+            stepper,
+            batch_size=FLAGS.config.rollout_kwargs.num_envs,
+            image_size=224,
+        )
+        oxes.reset(instructions)
 
-    def og_step(obs):
-        raw, act = oxes.step(obs)
-        return act
+        def og_step(obs):
+            raw, act = oxes.step(obs)
+            return act
 
-    eval_callback = EvalCallback(venv, og_step)
+        eval_callback = EvalCallback(venv, og_step)
 
     #########
     #
@@ -688,9 +690,10 @@ def main(_):
                 SequenceViz.flush(i, limit=32)
                 wandb_log(val_metrics, step=i)
 
-            with timer("rollout"):
-                evals = eval_callback(i)
-                wandb_log({"eval": evals}, step=i)
+            if use_rollout:
+                with timer("rollout"):
+                    evals = eval_callback(i)
+                    wandb_log({"eval": evals}, step=i)
 
         if (i + 1) % FLAGS.config.save_interval == 0 and save_dir is not None:
             logging.info("Saving checkpoint...")

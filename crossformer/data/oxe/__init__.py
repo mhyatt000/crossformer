@@ -2,7 +2,12 @@ import copy
 import logging
 from typing import Any, Dict, List, Sequence, Tuple, Union
 
-from crossformer.data.oxe.oxe_dataset_configs import ActionEncoding, OXE_DATASET_CONFIGS
+from crossformer.data.oxe.oxe_dataset_configs import (
+    ActionDim,
+    ActionEncoding,
+    OXE_DATASET_CONFIGS,
+    ProprioDim,
+)
 from crossformer.data.oxe.oxe_dataset_mixes import OXE_NAMED_MIXES
 from crossformer.data.oxe.oxe_standardization_transforms import (
     OXE_STANDARDIZATION_TRANSFORMS,
@@ -60,7 +65,8 @@ def make_oxe_dataset_kwargs(
 
     # MANO
     elif dataset_kwargs["action_encoding"] is ActionEncoding.MANO:
-        dataset_kwargs["action_normalization_mask"] = [True] * 111 + [False] * 9
+        # dataset_kwargs["action_normalization_mask"] = [True] * (ActionDim.MANO-9) + [False] * 9
+        dataset_kwargs["action_normalization_mask"] = [True] * ActionDim.MANO_DEBUG
 
     else:
         raise ValueError(
