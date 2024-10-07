@@ -66,7 +66,7 @@ echo
 
 # python train.py --config configs/bafl_pretrain_config.py
 export BAFL_SAVE='/grand/EVITA'
-python finetune.py --config configs/experiments/oct3_w-1.py
+python finetune.py --config configs/experiments/oct3_w-5.py
 
 # For applications that need mpiexec to bind MPI ranks to GPUs
 #mpiexec -n ${NTOTRANKS} --ppn ${NRANKS_PER_NODE} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} -env OMP_PLACES=threads ./set_affinity_gpu_polaris.sh ./hello_affinity
