@@ -304,17 +304,18 @@ class SequenceViz:
                     act = a_w[:h + 1].sum(axis=0)
 
                     # if only predicting the palm
-                    if joints[i].shape[-1] > act.shape[-1]:
-                        nrep = joints[i].shape[-1] // act.shape[-1]
+                    # if joints[i].shape[-1] > act.shape[-1]:
+                        # nrep = joints[i].shape[-1] // act.shape[-1]
                         # pad act with zeros to the dim of joints[i]
-                        act = np.stack([act] * nrep, axis=-1)
+                        # act = np.stack([act] * nrep, axis=-1).reshape(-1)
+
                     j = joints[i] + act
                 else:
                     j = a_w[h]
 
-                cam = cams[i]
+                cam = cams[i].reshape(3, 3)
 
-                j2d = persp_project(j.reshape(21, 3), cam.reshape(3, 3))
+                j2d = persp_project(j.reshape(21, 3), cam)
                 draw_wireframe_hand(
                     image, j2d, hand_joint_mask=None, hcolor=horizon_colors[i + h]
                 )

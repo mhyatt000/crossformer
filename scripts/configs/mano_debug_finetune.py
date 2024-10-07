@@ -118,8 +118,8 @@ def get_augmentation_config(task_cond, window_size, action_horizon):
     traj_transform_kwargs = dict(
         window_size=window_size,
         action_horizon=action_horizon,
-        max_action_dim=ActionDim.BIMANUAL,
-        max_proprio_dim=ActionDim.BIMANUAL,
+        max_action_dim=ActionDim.MANO_DEBUG,
+        max_proprio_dim=ActionDim.MANO_DEBUG,
         head_to_dataset=HEAD_TO_DATASET,
         goal_relabeling_strategy="uniform",
         task_augment_strategy="delete_task_conditioning",

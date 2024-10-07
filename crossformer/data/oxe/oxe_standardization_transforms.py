@@ -101,7 +101,7 @@ def oakink_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     """
 
     # xyz of palm
-    state = obs["joints_3d"][:,0]
+    state = tf.reshape(obs["joints_3d"],[-1,63])
 
     # flatten state keys into a single tensor
     proprio = tf.reshape(
@@ -122,7 +122,9 @@ def oakink_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 
     deltas = state[1:] - state[:-1]
     deltas = tf.concat([deltas, tf.zeros_like(state[-1:])], axis=0)
-    actions = tf.concat([deltas[:, :-9], state[:, -9:]], axis=-1)  # camera is absolute
+
+    actions = deltas
+    # actions = tf.concat([deltas[:, :-9], state[:, -9:]], axis=-1)  # camera is absolute
 
     # roll the state by 1
     # actions = tf.roll(state, shift=-1, axis=0)

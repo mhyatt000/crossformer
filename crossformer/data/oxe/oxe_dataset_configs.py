@@ -61,7 +61,7 @@ class ActionDim(IntEnum):
     BIMANUAL = 14
     MANO = 120
 
-    MANO_DEBUG = 3
+    MANO_DEBUG = 63
 
 
 class ProprioDim(IntEnum):
@@ -74,7 +74,7 @@ class ProprioDim(IntEnum):
     QUADRUPED = 46
 
     MANO = 120
-    MANO_DEBUG = 3
+    MANO_DEBUG = 63
 
 
 # === Individual Dataset Configs ===
