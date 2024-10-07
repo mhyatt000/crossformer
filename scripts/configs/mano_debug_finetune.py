@@ -1,4 +1,6 @@
 from ml_collections import ConfigDict
+import os
+import os.path as osp
 from ml_collections.config_dict import FieldReference, placeholder
 
 from crossformer.data.oxe.oxe_dataset_mixes import OXE_NAMED_MIXES
@@ -87,7 +89,7 @@ def get_dataset_config(task_cond, window_size, action_horizon, mix="bafl"):
     return dict(
         oxe_kwargs=dict(
             data_mix=mix,
-            data_dir="",
+            data_dir=os.environ.get('BAFL_DATA', os.path.join(os.path.expanduser("~"),"tensorflow_datasets")),
             # dont need the extra views
             load_camera_views=(
                 "primary",
@@ -212,7 +214,7 @@ def get_config():
     # fill this in to configure data loading for your dataset.
     FINETUNING_KWARGS = dict(
         name="bridge_dataset",
-        data_dir="",
+        # data_dir="",
         image_obs_keys={"primary": "image_0"},
         proprio_obs_keys={},
         language_key="language_instruction",
@@ -314,7 +316,7 @@ def get_config():
         log_interval=100,
         eval_interval=2000,  # 2000
         save_interval=2000,
-        save_dir=placeholder(str),
+        save_dir=os.path.expanduser(os.environ.get('BAFL_SAVE', os.path.expanduser('~'))),
         seed=42,
         wandb=dict(
             project="crossformer_finetune",

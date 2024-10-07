@@ -1,4 +1,5 @@
 from ml_collections import ConfigDict
+import os.path as osp
 import os
 from ml_collections.config_dict import FieldReference, placeholder
 
@@ -87,9 +88,9 @@ def get_config():
             pretrained_step=placeholder(int),
             #
             seed=42,
-            save_dir=os.environ.get('BAFL_SAVE', os.path.expanduser('~')),
+            save_dir=os.path.expanduser(os.environ.get('BAFL_SAVE', os.path.expanduser('~'))),
             num_steps=300000*(grad_acc or 1),
-            save_dir=os.path.expanduser("~"),
+            # save_dir=os.path.expanduser("~"),
             model=get_model_config("detr"),
             window_size=window_size,
             dataset_kwargs=get_dataset_config("multi", window_size, 100),
