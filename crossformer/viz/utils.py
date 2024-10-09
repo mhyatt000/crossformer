@@ -5,6 +5,14 @@ import json
 import os
 from typing import Callable, Tuple
 
+import cv2
+import jax
+import jax.numpy as jnp
+import numpy as np
+import tensorflow as tf
+from termcolor import cprint
+from tqdm import tqdm
+
 # from manotorch.manolayer import ManoLayer
 # from oikit.oi_image.oi_image import OakInkImageSequence
 # from oikit.oi_image.utils import persp_project
@@ -16,14 +24,6 @@ from crossformer.viz._oikit import (  # OpenDRRenderer,
     vert_color_hand,
     vert_type_hand,
 )
-import cv2
-import jax
-import jax.numpy as jnp
-import numpy as np
-import tensorflow as tf
-from termcolor import cprint
-from tqdm import tqdm
-
 import wandb
 
 
@@ -43,11 +43,14 @@ def imgs2gif(imgs, gif_path, fps=10):
 import matplotlib.pyplot as plt
 
 # Get the magma colormap
-cmap = plt.get_cmap("magma")
+cmap = plt.get_cmap("plasma")
 colors_middle_50 = [cmap(i / 19 + 5 / 19) for i in range(10)]  # Middle 50% range
 colors_middle_75 = [cmap(i / 19 + 2.5 / 19) for i in range(25)]  # Middle 75% range
 colors_all = np.array([cmap(i / 9) for i in range(10)])
-horizon_colors = colors_middle_75
+horizon_colors = np.array(colors_middle_75)
+
+cmap = plt.get_cmap("Reds")
+reds = np.array([cmap(5 + i / 10) for i in range(5)], dtype=np.float32)
 
 
 def scaleto(n: int, mode: Callable):
@@ -170,6 +173,20 @@ def draw_wireframe_hand(img, hand_joint_arr, hand_joint_mask, hcolor=horizon_col
     )
 
 
+def draw(img, points, color=horizon_colors[0], size=1):
+
+    parent = points[0]
+    color = [int(x * 255) for x in color[:3]]
+    for point in points[1:]:
+        cv2.line(
+            img,
+            parent.astype(np.int32),
+            point.astype(np.int32),
+            color=color,
+            thickness=1,
+        )
+
+
 """
 def viz_a_seq( oi_seq: OakInkImageSequence, draw_mode="wireframe", render=None, hand_faces=None):
 
@@ -228,14 +245,18 @@ def denormalize(thing, stats, ds_key="rlds_oakink", key="action"):
     return thing
 
 
+from crossformer.data.oxe import ActionDim
+
+
 class SequenceViz:
 
     videos = []
 
-    def __init__(self, imgs, joints, actions, cam):
+    def __init__(self, imgs, joints, actions, preds, cam):
         self.imgs = imgs
         self.joints = joints
         self.actions = actions
+        self.preds = preds
         self.cam = cam
         self.nstep = len(imgs) if len(imgs.shape) == 4 else len(imgs[0])
         self.task = None
@@ -250,6 +271,11 @@ class SequenceViz:
 
         proprio = np.array(batch["observation"]["proprio_mano"])
 
+        preds = (
+            denormalize(np.array(batch["predict"]), stats=stats)[:, :, :, : 21 * 3]
+            if "predict" in batch
+            else None
+        )
         actions = denormalize(np.array(batch["action"]), stats=stats)[
             :, :, :, : 21 * 3
         ]  # h dim
@@ -260,6 +286,7 @@ class SequenceViz:
             imgs=np.array(batch["observation"]["image_primary"]),
             joints=joints,
             actions=actions,
+            preds=preds,
             cam=cam_intr,
         )
         s.task = [None] * len(s.imgs)
@@ -273,7 +300,7 @@ class SequenceViz:
         deltas = np.concatenate([deltas, np.zeros_like(joints[-1:])], axis=0)
         return deltas
 
-    def _wandb(self, imgs, joints, actions, cams, task=None):
+    def _wandb(self, imgs, joints, preds, actions, cams, task=None):
         """returns an gif for wandb logging"""
 
         frames = []
@@ -286,39 +313,51 @@ class SequenceViz:
 
             # task = s["language_instruction"].numpy().decode("utf-8")
 
-            # print(actions.shape)
-            # print(actions[i].shape)
-            # print('enter for')
-            # bs,window,horizon,dims .. we are selecting window from this sample
             j2d = persp_project(joints[i].reshape(21, 3), cams[i].reshape(3, 3))
             draw_wireframe_hand(
                 image, j2d, hand_joint_mask=None, hcolor=horizon_colors[0]
             )
 
-            a_w = actions[i]
-            for h, dh in enumerate(a_w):
+            ji = joints[i].reshape(21, 3)
+            if preds[i][0].reshape(-1).shape[0] == ActionDim.DMANO_PFING:
+                ji = np.array([ji[x] for x in [0, 4, 8, 12, 16, 20]]).reshape(-1)
+            else:
+                ji = ji.reshape(-1)
+
+            cam = cams[i].reshape(3, 3)
+
+            ### ground truth
+            aframe = actions[i]
+            for h, dh in enumerate(aframe):
                 # if (i + h) % self.resolution:
-                    # continue
+                # continue
 
                 if self.use_delta:
-                    act = a_w[:h + 1].sum(axis=0)
+                    act = aframe[: h + 1].sum(axis=0)
 
-                    # if only predicting the palm
-                    # if joints[i].shape[-1] > act.shape[-1]:
-                        # nrep = joints[i].shape[-1] // act.shape[-1]
-                        # pad act with zeros to the dim of joints[i]
-                        # act = np.stack([act] * nrep, axis=-1).reshape(-1)
-
-                    j = joints[i] + act
+                    j = ji + act.reshape(-1)
+                    j = j.reshape(-1, 3)  # 3, 6, 21
                 else:
-                    j = a_w[h]
+                    j = aframe[h]
 
-                cam = cams[i].reshape(3, 3)
+                j2d = persp_project(j, cam)
+                draw(image, j2d, color=reds[-1])
+                # draw_wireframe_hand( image, j2d, hand_joint_mask=None, hcolor=horizon_colors[i + h])
 
-                j2d = persp_project(j.reshape(21, 3), cam)
-                draw_wireframe_hand(
-                    image, j2d, hand_joint_mask=None, hcolor=horizon_colors[i + h]
-                )
+            ### predictions
+            pframe = preds[i]
+            for h, p in enumerate(pframe):
+
+                if self.use_delta:
+                    act = pframe[: h + 1].sum(axis=0)
+                    j = ji + act.reshape(-1)
+                    j = j.reshape(-1, 3)  # 3, 6, 21
+                else:
+                    j = pframe[h]
+
+                j2d = persp_project(j, cam)
+                draw(image, j2d, color=horizon_colors[i + h])
+                # draw_wireframe_hand( image, j2d, hand_joint_mask=None, hcolor=horizon_colors[i + h])
 
             # image = caption_view(image, caption=f"::{task}")
             frames.append(image)
@@ -333,6 +372,7 @@ class SequenceViz:
                 video = self._wandb(
                     self.imgs[i],
                     self.joints[i],
+                    self.preds[i],
                     self.actions[i],
                     self.cam[i],
                     task=self.task[i],
@@ -347,57 +387,3 @@ class SequenceViz:
     def flush(i, limit=32):
         wandb.log({f"videos/mesh.vid": SequenceViz.videos[:limit]}, step=i)
         SequenceViz.videos = []
-
-
-def from_rlds():
-
-    ds = tfds.load("rlds_oakink", split="train", shuffle_files=True)
-
-    for example in tqdm(ds.take(10)):
-
-        imgs = []
-        ns = len(example["steps"])
-        steps = [s for s in example["steps"]]
-
-        joints = tf.constant(
-            [s["observation"]["state"]["joints_3d"].numpy() for s in steps]
-        )
-
-        deltas = joints[1:] - joints[:-1]
-        deltas = tf.concat([deltas, tf.zeros_like(joints[-1:])], axis=0)
-
-        # Verify that joints[i] + deltas[i] matches joints[i+1]
-        # for i in range(len(joints) - 1):
-        # # print(f"Checking joint {i}:")
-        # # print(f"Delta: {deltas[i]}")
-        # # print(f"Joint {i}: {joints[i]}")
-        # # print(f"Joint {i+1}: {joints[i+1]}")
-
-        # Assertion to check if the sum of joints[i] and deltas[i] equals joints[i+1]
-        # print( (joints[i] + deltas[i] == joints[i + 1]).numpy().all())
-        # , f"Assertion failed at index {i}"
-
-        for i, s in enumerate(steps):
-            image = s["observation"]["image"].numpy()
-            image = scaler(image)
-            task = s["language_instruction"].numpy().decode("utf-8")
-
-            for h, color in enumerate(horizon_colors):
-                if i + h < ns:
-
-                    future = steps[i + h]
-                    j = joints[0].numpy() + deltas[: i + h].numpy().sum(axis=0)
-                    cam = future["observation"]["state"]["cam_intr"].numpy()
-
-                    size = image.shape[:2]
-
-                    joints_2d = persp_project(j, cam)
-                    draw_wireframe_hand(
-                        image, joints_2d, hand_joint_mask=None, hcolor=horizon_colors[h]
-                    )
-
-            image = caption_view(image, caption=f"::{task}")
-            imgs.append(image)
-
-        imgs2gif(imgs, f"tempf/{task}.gif", fps=10)
-    return

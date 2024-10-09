@@ -101,7 +101,9 @@ def oakink_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     """
 
     # xyz of palm
-    state = tf.reshape(obs["joints_3d"],[-1,63])
+    j = obs["joints_3d"]
+    j = [j[:,x] for x in [0,4,8,12,16,20]]
+    state = tf.reshape(j,[-1,18])
 
     # flatten state keys into a single tensor
     proprio = tf.reshape(

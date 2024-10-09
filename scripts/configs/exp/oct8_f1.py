@@ -250,7 +250,7 @@ def get_config():
                     constrain_loss_dims=True,
                 ),
                 mano=ModuleSpec.create(
-                    DiffusionActionHead,
+                    L1ActionHead,
                     action_horizon=4,
                     action_dim=ActionDim.DMANO_PFING,
                     # num_preds=ActionDim.DMANO_PFING,
@@ -259,8 +259,7 @@ def get_config():
                     clip_pred=False,
                     loss_weight=1.0,
                     constrain_loss_dims=True,
-                    diffusion_steps=5,
-                ),
+                ), # diffusion_steps=5,
             ),
             readouts=dict(mano=4, bimanual=4),
         )
@@ -273,7 +272,7 @@ def get_config():
     else:
         raise ValueError("Invalid mode")
 
-    max_steps = FieldReference(50_000)
+    max_steps = FieldReference(300_000)
     grad_acc = None
     max_steps = max_steps * (grad_acc or 1)
 

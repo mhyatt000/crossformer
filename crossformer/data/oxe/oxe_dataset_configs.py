@@ -61,7 +61,11 @@ class ActionDim(IntEnum):
     BIMANUAL = 14
     MANO = 120
 
-    MANO_DEBUG = 63
+    # DEBUG
+    DMANO_PALM = 3
+    DMANO_PFING = 18  # 3 palm & 15 finger params
+    DMANO_PPOSE = 51  # 3 palm & 48 pose params
+    DMANO_XYZ = 63
 
 
 class ProprioDim(IntEnum):
@@ -74,7 +78,13 @@ class ProprioDim(IntEnum):
     QUADRUPED = 46
 
     MANO = 120
-    MANO_DEBUG = 63
+
+    # DEBUG
+    DMANO_PALM = 3
+    DMANO_PFING = 18  # 3 palm & 15 finger params
+    DMANO_PPOSE = 51  # 3 palm & 48 pose params
+    DMANO_XYZ = 63
+
 
 
 # === Individual Dataset Configs ===

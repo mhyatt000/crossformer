@@ -216,7 +216,7 @@ class ContinuousActionHead(nn.Module, ActionHead):
     ) -> jax.Array:
         """Convenience methods for predicting actions for the final timestep in the window."""
         # only get the last timestep in the window
-        mean = self(transformer_outputs, train=train)[:, -1]
+        mean = self(transformer_outputs, train=train) # [:, -1]
         return jnp.broadcast_to(mean, sample_shape + mean.shape)
 
 

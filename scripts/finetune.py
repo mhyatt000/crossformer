@@ -472,8 +472,8 @@ def main(_):
         mano_head = bound_module.heads["mano"]
         deltas = mano_head.predict_action(
             transformer_embeddings,
-            rng,
             train=train,
+            rng=rng,
         )
         action_metrics["deltas"] = deltas
 
@@ -488,9 +488,10 @@ def main(_):
         action_loss, action_metrics = _val_fn(params, batch, rng)
 
         deltas = action_metrics.pop("deltas")
-        batch["action"] = deltas  # plot with model deltas as actions
+        batch["predict"] = deltas  # plot with model deltas as actions
         batch = jax.tree.map(lambda x: jnp.asarray(x), batch)
         s = SequenceViz.from_batch(batch, stats=dataset.dataset_statistics).wandb()
+        
 
         return action_loss, action_metrics
 
