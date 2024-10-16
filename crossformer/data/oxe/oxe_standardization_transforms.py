@@ -14,6 +14,7 @@ step = {
 
 from typing import Any, Dict
 
+import jax
 import tensorflow as tf
 
 from crossformer.data.utils.data_utils import (
@@ -39,7 +40,7 @@ import torch
 from torch.utils.data import default_collate
 
 
-class OakInkTransform(SimpleTransform3DMANO):
+    class OakInkTransform(SimpleTransform3DMANO):
 
     center_idx = 9
     basis_param = {
@@ -70,8 +71,25 @@ import numpy as np
 """
 
 
+def xgym_single_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+
+    obs = trajectory.pop("observation")
+    images = obs.pop("image")
+    obs.pop("proprio")
+    trajectory["observation"] = {
+        "image": images['camera_0']
+        # "proprio": proprio,
+    }
+    return trajectory
+
+    return trajectory
+
+
 def oakink_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     """Applies to Oak-Ink dataset."""
+
+    # take every 3rd frame... 30FPS => 10FPS
+    # trajectory = jax.tree.map(lambda x: x[::3], trajectory)
 
     obs = trajectory.pop("observation")
 
@@ -102,8 +120,8 @@ def oakink_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 
     # xyz of palm
     j = obs["joints_3d"]
-    j = [j[:,x] for x in [0,4,8,12,16,20]]
-    state = tf.reshape(j,[-1,18])
+    j = [j[:, x] for x in [0, 4, 8, 12, 16, 20]]
+    state = tf.reshape(j, [-1, 18])
 
     # flatten state keys into a single tensor
     proprio = tf.reshape(
@@ -120,7 +138,6 @@ def oakink_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
         ),
         [-1, 120],
     )
-    
 
     deltas = state[1:] - state[:-1]
     deltas = tf.concat([deltas, tf.zeros_like(state[-1:])], axis=0)
@@ -1175,6 +1192,7 @@ def droid_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 
 
 OXE_STANDARDIZATION_TRANSFORMS = {
+    "xgym_single": xgym_single_dataset_transform,
     "rlds_oakink": oakink_dataset_transform,
     #
     "bridge_dataset": bridge_dataset_transform,

@@ -14,7 +14,6 @@ from crossformer.model.components.vit_encoders import ResNet26, ResNet26FILM
 from crossformer.utils.spec import ModuleSpec
 from crossformer.utils.train_utils import resnet_26_loader
 
-
 def get_dataset_config(task_cond, window_size, action_horizon, mix="bafl"):
     traj_transform_kwargs, frame_transform_kwargs = get_augmentation_config(
         task_cond, window_size, action_horizon
@@ -180,18 +179,6 @@ def get_config():
         model=dict(
             # observation_tokenizers=dict( new_primary=ModuleSpec.create( ImageTokenizer, obs_stack_keys=["image_primary"], task_stack_keys=["image_primary"], task_film_keys=["language_instruction"], encoder=ModuleSpec.create(ResNet26FILM),)),
             heads=dict(
-                single_arm=ModuleSpec.create(
-                    DiffusionActionHead,
-                    action_horizon=4,
-                    action_dim=ActionDim.SINGLE,
-                    # num_preds=ActionDim.
-                    pool_strategy="mean",  # isnt there another/better strategy
-                    readout_key="readout_single_arm",
-                    clip_pred=False,
-                    loss_weight=1.0,
-                    constrain_loss_dims=True,
-                    diffusion_steps=50,
-                ),
                 bimanual=ModuleSpec.create(
                     L1ActionHead,
                     action_horizon=4,
@@ -214,9 +201,9 @@ def get_config():
                     loss_weight=1.0,
                     constrain_loss_dims=True,
                     diffusion_steps=5,
-                ),
+                ), 
             ),
-            readouts=dict(single_arm=4, mano=4, bimanual=4),
+            readouts=dict(mano=4, bimanual=4),
         )
     )
 
@@ -261,7 +248,6 @@ def get_config():
                     "bimanual": 4,
                     "quadruped": None,
                     "nav": None,
-                    "single_arm": 4,
                 },
                 "observation_tokenizers": {
                     "bimanual": None,
@@ -270,7 +256,6 @@ def get_config():
                     "nav": None,
                 },
                 "heads": {
-                    "single_arm": "diffusion",
                     "quadruped": None,
                     "nav": None,
                 },
@@ -311,7 +296,7 @@ def get_config():
             val_shuffle_buffer_size=1000,
             num_val_batches=1,  # 16
         ),
-        eval_datasets=("rlds_oakink", "xgym_single"),
+        eval_datasets=("rlds_oakink"),
         rollout_kwargs=dict(
             num_envs=4,
             use_rollout=False,

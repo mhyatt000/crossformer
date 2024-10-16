@@ -8,7 +8,7 @@ from crossformer.data.oxe.oxe_dataset_configs import (
     OXE_DATASET_CONFIGS,
     ProprioDim,
 )
-from crossformer.data.oxe.oxe_dataset_mixes import OXE_NAMED_MIXES
+from crossformer.data.oxe.oxe_dataset_mixes import OXE_NAMED_MIXES, HEAD_TO_DATASET
 from crossformer.data.oxe.oxe_standardization_transforms import (
     OXE_STANDARDIZATION_TRANSFORMS,
 )

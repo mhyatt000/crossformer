@@ -4,7 +4,7 @@ import os.path as osp
 from ml_collections import ConfigDict
 from ml_collections.config_dict import FieldReference, placeholder
 
-from crossformer.data.oxe import ActionDim
+from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
 from crossformer.data.oxe.oxe_dataset_mixes import OXE_NAMED_MIXES
 from crossformer.data.utils.text_processing import UniversalSentenceEncoder
 from crossformer.model.components.action_heads import DiffusionActionHead, L1ActionHead
@@ -13,65 +13,6 @@ from crossformer.model.components.transformer import common_transformer_sizes
 from crossformer.model.components.vit_encoders import ResNet26, ResNet26FILM
 from crossformer.utils.spec import ModuleSpec
 from crossformer.utils.train_utils import resnet_26_loader
-
-HEAD_TO_DATASET = {
-    "mano": [
-        "rlds_oakink",
-    ],
-    # 'binamo': [ ],
-    # 'smplx': [ ],
-    "nav": ["omnimimic_gnm_dataset"],
-    "single_arm": [
-        "berkeley_mvp_converted_externally_to_rlds",
-        "nyu_rot_dataset_converted_externally_to_rlds",
-        "ucsd_kitchen_dataset_converted_externally_to_rlds",
-        "ucsd_pick_and_place_dataset_converted_externally_to_rlds",
-        "utokyo_xarm_bimanual_converted_externally_to_rlds",
-        "utokyo_xarm_pick_and_place_converted_externally_to_rlds",
-        #
-        "bridge_dataset",
-        "fractal20220817_data",
-        "kuka",
-        "taco_play",
-        "taco_extra",
-        "jaco_play",
-        "berkeley_cable_routing",
-        "roboturk",
-        "nyu_door_opening_surprising_effectiveness",
-        "viola",
-        "berkeley_autolab_ur5",
-        "toto",
-        "language_table",
-        "stanford_hydra_dataset_converted_externally_to_rlds",
-        "austin_buds_dataset_converted_externally_to_rlds",
-        "nyu_franka_play_dataset_converted_externally_to_rlds",
-        "furniture_bench_dataset_converted_externally_to_rlds",
-        "austin_sailor_dataset_converted_externally_to_rlds",
-        "austin_sirius_dataset_converted_externally_to_rlds",
-        "bc_z",
-        "dlr_edan_shared_control_converted_externally_to_rlds",
-        "iamlab_cmu_pickup_insert_converted_externally_to_rlds",
-        "utaustin_mutex",
-        "berkeley_fanuc_manipulation",
-        "cmu_stretch",
-        "droid",
-        "droid_wipe",
-        "droid_flip_pot_upright",
-    ],
-    "bimanual": [
-        "aloha_pen_uncap_diverse_dataset",
-        "aloha_new_sushi_dataset",
-        "aloha_dough_cut_dataset",
-        "aloha_lucy_dataset",
-        "aloha_drawer_dataset",
-        "aloha_pick_place_dataset",
-        "aloha_static_dataset",
-        "aloha_sushi_cut_full_dataset",
-        "aloha_new_sushi_dataset,",
-    ],
-    "quadruped": ["go1_real_dataset", "a1", "go1"],
-}
-
 
 def get_dataset_config(task_cond, window_size, action_horizon, mix="bafl"):
     traj_transform_kwargs, frame_transform_kwargs = get_augmentation_config(

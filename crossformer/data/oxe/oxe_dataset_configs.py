@@ -89,6 +89,25 @@ class ProprioDim(IntEnum):
 
 # === Individual Dataset Configs ===
 OXE_DATASET_CONFIGS = {
+    "xgym_single": {  
+        "image_obs_keys": {
+            "primary": "image",
+            "high": None,
+            "nav": None,
+            "left_wrist": 'wrist',
+            "right_wrist": None,
+        },
+        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "state_obs_keys": [ ],
+        "proprio_obs_keys": {"mano":None, "bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "mano": ProprioDim.MANO,
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "proprio_encoding": ProprioEncoding.POS_EULER, # roll-pitch-yaw + gripper open/close
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
     "rlds_oakink": {  # OAK INK Dataset
         "image_obs_keys": {
             "primary": "image",
@@ -162,8 +181,9 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
-        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
+        "proprio_obs_keys": {"mano":None, "bimanual": None, "quadruped": None},
         "proprio_obs_dims": {
+            "mano": ProprioDim.MANO,
             "bimanual": ProprioDim.BIMANUAL,
             "quadruped": ProprioDim.QUADRUPED,
         },
@@ -639,6 +659,12 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
         },
         "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "proprio_obs_keys": {"mano":None, "bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "mano": ProprioDim.MANO,
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
         "proprio_encoding": ProprioEncoding.POS_QUAT,
         "action_encoding": ActionEncoding.JOINT_POS,
     },
