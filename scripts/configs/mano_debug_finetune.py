@@ -227,7 +227,7 @@ def get_config():
     else:
         raise ValueError("Invalid mode")
 
-    max_steps = FieldReference(300_000)
+    max_steps = FieldReference(50_000)
     grad_acc = None
     max_steps = max_steps * (grad_acc or 1)
 
@@ -240,7 +240,7 @@ def get_config():
 
     action_horizon = 4
     dataset_kwargs = get_dataset_config(
-        "multi", window_size, action_horizon=action_horizon
+        "multi", window_size, action_horizon=action_horizon , mix="xgym"
     )
     config = dict(
         pretrained_path="hf://rail-berkeley/crossformer",

@@ -8,7 +8,7 @@ HEAD_TO_DATASET = {
     # 'smplx': [ ],
     "nav": ["omnimimic_gnm_dataset"],
     "single_arm": [
-        'xgym_single',
+        "xgym_single",
         #
         "berkeley_mvp_converted_externally_to_rlds",
         "nyu_rot_dataset_converted_externally_to_rlds",
@@ -59,7 +59,6 @@ HEAD_TO_DATASET = {
     ],
     "quadruped": ["go1_real_dataset", "a1", "go1"],
 }
-
 
 
 OXE_MAGIC_SOUP_BALANCED = [
@@ -119,11 +118,16 @@ BAFL_SOUP = [
     # ("utokyo_xarm_pick_and_place_converted_externally_to_rlds", 0.2),
     ("xgym_single", 1.0),
     # ("xgym_mano", 1.0),
-] # + allweight(OXE_MAGIC_SOUP_BALANCED, 0.01)
+]  # + allweight(OXE_MAGIC_SOUP_BALANCED, 0.01)
 
+
+XGYM = [
+    ("xgym_single", 1.0),
+]
 
 OXE_NAMED_MIXES = {
     "cross_embodiment": CROSS_EMBODIMENT,
-    'bafl': BAFL_SOUP,
-    'bridge': [('bridge_dataset', 1.0)],
+    "bafl": BAFL_SOUP,
+    "bridge": [("bridge_dataset", 1.0)],
+    "xgym": XGYM,
 }

@@ -159,7 +159,7 @@ def main(_):
     #
     #########
 
-    if FLAGS.config.debug: # only for debugging when model is not needed
+    if FLAGS.config.debug:  # only for debugging when model is not needed
         config = {"text_processor": None}
 
     # create text processor
@@ -490,8 +490,9 @@ def main(_):
         deltas = action_metrics.pop("deltas")
         batch["predict"] = deltas  # plot with model deltas as actions
         batch = jax.tree.map(lambda x: jnp.asarray(x), batch)
+
+        use_mano = [FLAGS.config.dataset_kwargs["dataset_kwargs_list"][i]["action_encoding"] == "mano" for i in range(len(FLAGS.config.dataset_kwargs["dataset_kwargs_list"])]
         s = SequenceViz.from_batch(batch, stats=dataset.dataset_statistics).wandb()
-        
 
         return action_loss, action_metrics
 
