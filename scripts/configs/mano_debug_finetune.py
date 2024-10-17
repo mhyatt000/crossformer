@@ -190,7 +190,7 @@ def get_config():
                     clip_pred=False,
                     loss_weight=1.0,
                     constrain_loss_dims=True,
-                    diffusion_steps=50,
+                    diffusion_steps=20,
                 ),
                 bimanual=ModuleSpec.create(
                     L1ActionHead,

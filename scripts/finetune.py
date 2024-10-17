@@ -15,6 +15,7 @@ import optax
 import tensorflow as tf
 import tqdm
 
+from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
 from crossformer.data.dataset import make_interleaved_dataset, make_single_dataset
 from crossformer.data.oxe import make_oxe_dataset_kwargs_and_weights
 from crossformer.model.crossformer_model import CrossFormerModel
@@ -491,8 +492,14 @@ def main(_):
         batch["predict"] = deltas  # plot with model deltas as actions
         batch = jax.tree.map(lambda x: jnp.asarray(x), batch)
 
-        use_mano = [FLAGS.config.dataset_kwargs["dataset_kwargs_list"][i]["action_encoding"] == "mano" for i in range(len(FLAGS.config.dataset_kwargs["dataset_kwargs_list"])]
-        s = SequenceViz.from_batch(batch, stats=dataset.dataset_statistics).wandb()
+        use_mano = any(
+            [
+                x["name"] in HEAD_TO_DATASET['mano'] 
+                for x in FLAGS.config.dataset_kwargs["dataset_kwargs_list"]
+            ]
+        )
+        if use_mano:
+            s = SequenceViz.from_batch(batch, stats=dataset.dataset_statistics).wandb()
 
         return action_loss, action_metrics
 
