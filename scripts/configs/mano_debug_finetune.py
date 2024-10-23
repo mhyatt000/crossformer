@@ -36,7 +36,7 @@ def get_dataset_config(task_cond, window_size, action_horizon, mix="bafl"):
             ),
             # dont need the extra views
             load_camera_views=(
-                "primary",
+                "primary", "left_wrist"
             ),  #  "high"), # , "nav", "left_wrist", "right_wrist"),
             load_proprio=True,
             load_depth=False,
@@ -311,7 +311,7 @@ def get_config():
             val_shuffle_buffer_size=1000,
             num_val_batches=1,  # 16
         ),
-        eval_datasets=("rlds_oakink", "xgym_single"),
+        eval_datasets=("rlds_oakink", "xgym_lift_single"),
         rollout_kwargs=dict(
             num_envs=4,
             use_rollout=False,

@@ -76,10 +76,7 @@ def xgym_single_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     obs = trajectory.pop("observation")
     images = obs.pop("image")
     obs.pop("proprio")
-    trajectory["observation"] = {
-        "image": images['camera_0']
-        # "proprio": proprio,
-    }
+    trajectory["observation"] = images
     return trajectory
 
     return trajectory
@@ -1193,6 +1190,7 @@ def droid_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 
 OXE_STANDARDIZATION_TRANSFORMS = {
     "xgym_single": xgym_single_dataset_transform,
+    "xgym_lift_single": xgym_single_dataset_transform,
     "rlds_oakink": oakink_dataset_transform,
     #
     "bridge_dataset": bridge_dataset_transform,

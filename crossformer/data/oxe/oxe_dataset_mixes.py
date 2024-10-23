@@ -9,6 +9,7 @@ HEAD_TO_DATASET = {
     "nav": ["omnimimic_gnm_dataset"],
     "single_arm": [
         "xgym_single",
+        "xgym_lift_single",
         #
         "berkeley_mvp_converted_externally_to_rlds",
         "nyu_rot_dataset_converted_externally_to_rlds",
@@ -117,12 +118,13 @@ BAFL_SOUP = [
     # ("utokyo_xarm_bimanual_converted_externally_to_rlds", 0.2),
     # ("utokyo_xarm_pick_and_place_converted_externally_to_rlds", 0.2),
     ("xgym_single", 1.0),
+    ("xgym_lift_single", 1.0),
     # ("xgym_mano", 1.0),
 ]  # + allweight(OXE_MAGIC_SOUP_BALANCED, 0.01)
 
 
 XGYM = [
-    ("xgym_single", 1.0),
+    ("xgym_lift_single", 1.0),
 ]
 
 OXE_NAMED_MIXES = {
