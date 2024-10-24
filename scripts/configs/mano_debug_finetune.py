@@ -1,4 +1,5 @@
 import os
+import tensorflow as tf
 import os.path as osp
 
 from ml_collections import ConfigDict
@@ -46,8 +47,8 @@ def get_dataset_config(task_cond, window_size, action_horizon, mix="bafl"):
         batch_size=512,  # used over finetune batch size bc of make_interleaved
         shuffle_buffer_size=50_000,
         balance_weights=False,
-        traj_transform_threads=48,
-        traj_read_threads=48,
+        traj_transform_threads=tf.data.AUTOTUNE,
+        traj_read_threads=tf.data.AUTOTUNE,
     )
 
 
@@ -238,7 +239,6 @@ def get_config():
     window_size = FieldReference(default=1)
     # window_size = 3
 
-    import tensorflow as tf
 
     action_horizon = 4
     dataset_kwargs = get_dataset_config(

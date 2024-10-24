@@ -216,7 +216,6 @@ def main(_):
         # pprint(FLAGS.config.dataset_kwargs)
         dataset = make_interleaved_dataset(**FLAGS.config.dataset_kwargs, train=True)
 
-        """
         train_data_iter = map(
             shard,
             map(
@@ -237,6 +236,7 @@ def main(_):
                 num_parallel_calls=tf.data.AUTOTUNE,
             )
         )
+        """
 
     example_batch = next(train_data_iter)
 
