@@ -223,53 +223,8 @@ def main(_):
 
     example_batch = next(train_data_iter)
 
-    """
-    {'action': ((8, 3, 25, 120), 'float32'),
-     'action_head_masks': {'bimanual': ((8,), 'bool'),
-                           'mano': ((8,), 'bool'),
-                           'nav': ((8,), 'bool'),
-                           'quadruped': ((8,), 'bool'),
-                           'single_arm': ((8,), 'bool')},
-     'action_pad_mask': ((8, 3, 25, 120), 'bool'),
-     'observation': {'image_primary': ((8, 3, 224, 224, 3), 'uint8'),
-                     'pad_mask_dict': {'image_primary': ((8, 3), 'bool'),
-                                       'proprio_bimanual': ((8, 3), 'bool'),
-                                       'proprio_mano': ((8, 3), 'bool'),
-                                       'proprio_quadruped': ((8, 3), 'bool'),
-                                       'timestep': ((8, 3), 'bool')},
-                     'proprio_bimanual': ((8, 3, 14), 'float32'),
-                     'proprio_mano': ((8, 3, 120), 'float32'),
-                     'proprio_quadruped': ((8, 3, 46), 'float32'),
-                     'task_completed': ((8, 3, 25), 'bool'),
-                     'timestep': ((8, 3), 'int32'),
-                     'timestep_pad_mask': ((8, 3), 'bool')},
-     'task': {'image_primary': ((8, 224, 224, 3), 'uint8'),
-              'language_instruction': ((8, 512), 'float32'),
-              'pad_mask_dict': {'image_primary': ((8,), 'bool'),
-                                'language_instruction': ((8,), 'bool'),
-                                'proprio_bimanual': ((8,), 'bool'),
-                                'proprio_mano': ((8,), 'bool'),
-                                'proprio_quadruped': ((8,), 'bool'),
-                                'timestep': ((8,), 'bool')},
-              'proprio_bimanual': ((8, 14), 'float32'),
-              'proprio_mano': ((8, 120), 'float32'),
-              'proprio_quadruped': ((8, 46), 'float32'),
-              'timestep': ((8,), 'int32')}}
-
-    x = {
-        "observation": {
-            "image_primary": ((8, 1, 256, 256, 3), "float32"),
-            "timestep_pad_mask": ((8, 1), "float32"),
-        },
-        "task": {"language_instruction": ((4, 512), "float32")},
-    }
-    """
-
     spec = lambda xtree: jax.tree.map(lambda arr: (arr.shape, str(arr.dtype)), xtree)
     pprint(spec(example_batch))
-
-    # s = SequenceViz.from_batch(example_batch, stats=dataset.dataset_statistics)
-    # s.wandb()
 
     # print(dataset.statistics)
 
@@ -360,26 +315,6 @@ def main(_):
     #
     #########
 
-    def loss_fn(params, batch, rng, train=True):
-        bound_module = model.module.bind({"params": params}, rngs={"dropout": rng})
-        transformer_embeddings = bound_module.crossformer_transformer(
-            batch["observation"],
-            batch["task"],
-            batch["observation"]["timestep_pad_mask"],
-            train=train,
-        )
-        action_loss, action_metrics = bound_module.heads[FLAGS.config.head_name].loss(
-            transformer_embeddings,
-            batch["action"],
-            batch["observation"]["timestep_pad_mask"],
-            batch["action_pad_mask"],
-            train=train,
-        )
-        return action_loss, action_metrics
-
-    #
-    # for debug only
-    #
     def loss_fn(params, batch, rng, train=True):
         bound_module = model.module.bind({"params": params}, rngs={"dropout": rng})
         transformer_embeddings = bound_module.crossformer_transformer(

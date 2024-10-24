@@ -637,7 +637,7 @@ def make_interleaved_dataset(
         dataset = dataset.batch(batch_size)
 
     # this seems to reduce memory usage without affecting speed
-    dataset = dataset.with_ram_budget(1)
+    dataset = dataset.with_ram_budget(tf.data.AUTOTUNE)
 
     dataset = dataset.ignore_errors(log_warning=True)
 

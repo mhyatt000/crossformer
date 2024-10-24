@@ -238,6 +238,8 @@ def get_config():
     window_size = FieldReference(default=1)
     # window_size = 3
 
+    import tensorflow as tf
+
     action_horizon = 4
     dataset_kwargs = get_dataset_config(
         "multi", window_size, action_horizon=action_horizon , mix="xgym"
@@ -288,7 +290,7 @@ def get_config():
         seed=42,
         # dataset_kwargs=FINETUNING_KWARGS,
         dataset_kwargs=dataset_kwargs,
-        prefetch_num_batches=2,
+        prefetch_num_batches=tf.data.AUTOTUNE,
         modality=task,
         finetuning_mode=mode,
         head_name=head_name,
@@ -316,7 +318,7 @@ def get_config():
             num_envs=4,
             use_rollout=False,
         ),
-        debug=False,
+        debug=True,
     )
 
     if task == "image_conditioned":
