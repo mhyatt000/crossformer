@@ -15,9 +15,12 @@ import optax
 import tensorflow as tf
 import tqdm
 
-from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
 from crossformer.data.dataset import make_interleaved_dataset, make_single_dataset
-from crossformer.data.oxe import make_oxe_dataset_kwargs_and_weights
+from crossformer.data.oxe import (
+    ActionDim,
+    HEAD_TO_DATASET,
+    make_oxe_dataset_kwargs_and_weights,
+)
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec
@@ -213,12 +216,26 @@ def main(_):
         # pprint(FLAGS.config.dataset_kwargs)
         dataset = make_interleaved_dataset(**FLAGS.config.dataset_kwargs, train=True)
 
+        """
         train_data_iter = map(
             shard,
             map(
                 process_batch,
                 dataset.iterator(prefetch=FLAGS.config.prefetch_num_batches),
             ),
+        )
+        """
+
+        train_data_iter = (
+            train_data_iter.iterator(prefetch=FLAGS.config.prefetch_num_batches)
+            .map(
+                process_batch,
+                num_parallel_calls=tf.data.AUTOTUNE,
+            )
+            .map(
+                shard,
+                num_parallel_calls=tf.data.AUTOTUNE,
+            )
         )
 
     example_batch = next(train_data_iter)
@@ -429,7 +446,7 @@ def main(_):
 
         use_mano = any(
             [
-                x["name"] in HEAD_TO_DATASET['mano'] 
+                x["name"] in HEAD_TO_DATASET["mano"]
                 for x in FLAGS.config.dataset_kwargs["dataset_kwargs_list"]
             ]
         )
