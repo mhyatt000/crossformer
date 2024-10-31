@@ -75,11 +75,17 @@ def xgym_single_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 
     obs = trajectory.pop("observation")
     images = obs.pop("image")
+
+    images.pop('camera_0')
+    images.pop('camera_1')
+    images['camera_0'] = images.pop('camera_2')
+
     obs.pop("proprio")
     trajectory["observation"] = images
     return trajectory
 
     return trajectory
+
 
 
 def oakink_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:

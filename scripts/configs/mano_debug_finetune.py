@@ -1,9 +1,9 @@
 import os
-import tensorflow as tf
 import os.path as osp
 
 from ml_collections import ConfigDict
 from ml_collections.config_dict import FieldReference, placeholder
+import tensorflow as tf
 
 from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
 from crossformer.data.oxe.oxe_dataset_mixes import OXE_NAMED_MIXES
@@ -37,7 +37,8 @@ def get_dataset_config(task_cond, window_size, action_horizon, mix="bafl"):
             ),
             # dont need the extra views
             load_camera_views=(
-                "primary", "left_wrist"
+                "primary",
+                "left_wrist",
             ),  #  "high"), # , "nav", "left_wrist", "right_wrist"),
             load_proprio=True,
             load_depth=False,
@@ -47,8 +48,8 @@ def get_dataset_config(task_cond, window_size, action_horizon, mix="bafl"):
         batch_size=512,  # used over finetune batch size bc of make_interleaved
         shuffle_buffer_size=50_000,
         balance_weights=False,
-        traj_transform_threads=tf.data.AUTOTUNE,
-        traj_read_threads=tf.data.AUTOTUNE,
+        traj_transform_threads=48,
+        traj_read_threads=48,
     )
 
 
@@ -239,10 +240,9 @@ def get_config():
     window_size = FieldReference(default=1)
     # window_size = 3
 
-
     action_horizon = 4
     dataset_kwargs = get_dataset_config(
-        "multi", window_size, action_horizon=action_horizon , mix="xgym"
+        "multi", window_size, action_horizon=action_horizon, mix="xgym"
     )
     config = dict(
         pretrained_path="hf://rail-berkeley/crossformer",
@@ -290,7 +290,7 @@ def get_config():
         seed=42,
         # dataset_kwargs=FINETUNING_KWARGS,
         dataset_kwargs=dataset_kwargs,
-        prefetch_num_batches=tf.data.AUTOTUNE,
+        prefetch_num_batches=64,
         modality=task,
         finetuning_mode=mode,
         head_name=head_name,
@@ -318,7 +318,7 @@ def get_config():
             num_envs=4,
             use_rollout=False,
         ),
-        debug=True,
+        debug=False,
     )
 
     if task == "image_conditioned":
@@ -368,9 +368,8 @@ def get_config():
         ),
     )
     # If the default data loading speed is too slow, try these:
-    config["frame_transform_threads"] = (
-        16  # for the most CPU-intensive ops (decoding, resizing, augmenting)
-    )
+    # for the most CPU-intensive ops (decoding, resizing, augmenting)
+    config["frame_transform_threads"] = 32
 
     config["traj_transform_kwargs"] = traj_transform_kwargs
     config["frame_transform_kwargs"] = frame_transform_kwargs
