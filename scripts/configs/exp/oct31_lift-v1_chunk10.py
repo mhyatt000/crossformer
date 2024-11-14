@@ -66,8 +66,8 @@ def get_augmentation_config(task_cond, window_size, action_horizon):
     traj_transform_kwargs = dict(
         window_size=window_size,
         action_horizon=action_horizon,
-        max_action_dim=ActionDim.BIMANUAL,
-        max_proprio_dim=ActionDim.BIMANUAL,
+        max_action_dim=ActionDim.DMANO_PFING,
+        max_proprio_dim=ActionDim.DMANO_PFING,
         head_to_dataset=HEAD_TO_DATASET,
         goal_relabeling_strategy="uniform",
         task_augment_strategy="delete_task_conditioning",
@@ -77,8 +77,24 @@ def get_augmentation_config(task_cond, window_size, action_horizon):
         subsample_length=100,
     )
 
+    """
     aloha_image_augment_kwargs = dict(
-            # random_resized_crop=dict(scale=[0.9, 1.0], ratio=[0.75, 4.0 / 3]),
+        random_resized_crop=dict(scale=[0.9, 1.0], ratio=[0.75, 4.0 / 3]),
+        random_brightness=[0.1],
+        random_contrast=[0.9, 1.1],
+        random_saturation=[0.9, 1.1],
+        random_hue=[0.05],
+        augment_order=[
+            "random_resized_crop",
+            "random_brightness",
+            "random_contrast",
+            "random_saturation",
+            "random_hue",
+        ],
+    )
+
+    bridge_image_augment_kwargs = dict(
+        random_resized_crop=dict(scale=[0.8, 1.0], ratio=[0.9, 1.1]),
         random_brightness=[0.1],
         random_contrast=[0.9, 1.1],
         random_saturation=[0.9, 1.1],
@@ -91,9 +107,10 @@ def get_augmentation_config(task_cond, window_size, action_horizon):
             "random_hue",
         ],
     )
+    """
 
-    bridge_image_augment_kwargs = dict(
-            # random_resized_crop=dict(scale=[0.8, 1.0], ratio=[0.9, 1.1]),
+    oakink_image_augment_kwargs = dict(
+        # random_resized_crop=dict(scale=[0.8, 1.0], ratio=[0.9, 1.1]),
         random_brightness=[0.1],
         random_contrast=[0.9, 1.1],
         random_saturation=[0.9, 1.1],
@@ -116,11 +133,11 @@ def get_augmentation_config(task_cond, window_size, action_horizon):
             "right_wrist": (224, 224),
         },
         image_augment_kwargs={
-            "primary": bridge_image_augment_kwargs,
-            "high": aloha_image_augment_kwargs,
-            "nav": bridge_image_augment_kwargs,
-            "left_wrist": aloha_image_augment_kwargs,
-            "right_wrist": aloha_image_augment_kwargs,
+            "primary": oakink_image_augment_kwargs,
+            # "high": aloha_image_augment_kwargs,
+            # "nav": bridge_image_augment_kwargs,
+            # "left_wrist": aloha_image_augment_kwargs,
+            # "right_wrist": aloha_image_augment_kwargs,
         },
         num_parallel_calls=200,
     )
@@ -140,6 +157,26 @@ def get_config():
     assert task in ["image_conditioned", "language_conditioned", "multimodal"]
     assert mode in ["full", "head_only"]
 
+    # fill this in to configure data loading for your dataset.
+    FINETUNING_KWARGS = dict(
+        name="bridge_dataset",
+        # data_dir="",
+        image_obs_keys={"primary": "image_0"},
+        proprio_obs_keys={},
+        language_key="language_instruction",
+        action_proprio_normalization_type="normal",
+        # We want to avoid normalizing the gripper
+        action_normalization_mask=[True] * ActionDim.DMANO_PFING,
+        # standardize_fn is dynamically loaded from a file
+        standardize_fn=ModuleSpec.create(
+            "crossformer.data.oxe.oxe_standardization_transforms:oakink_dataset_transform",
+            # "crossformer.data.oxe.oxe_standardization_transforms:bridge_dataset_transform",
+        ),
+        # If the default data loading speed is too slow, try these:
+        # "num_parallel_reads": 8,  # for reading from disk / GCS
+        # "num_parallel_calls": 16,  # for initial dataset construction
+    )
+
     # an example of how to add a new observation tokenizer and action head
     UPDATE_CONFIG = dict(
         model=dict(
@@ -147,7 +184,7 @@ def get_config():
             heads=dict(
                 single_arm=ModuleSpec.create(
                     DiffusionActionHead,
-                    action_horizon=4,
+                    action_horizon=10,
                     action_dim=ActionDim.SINGLE,
                     # num_preds=ActionDim.
                     pool_strategy="mean",  # isnt there another/better strategy
@@ -171,8 +208,8 @@ def get_config():
                 mano=ModuleSpec.create(
                     DiffusionActionHead,
                     action_horizon=4,
-                    action_dim=ActionDim.DMANO_PALM,
-                    # num_preds=ActionDim.DMANO_PALM,
+                    action_dim=ActionDim.DMANO_PFING,
+                    # num_preds=ActionDim.DMANO_PFING,
                     pool_strategy="mean",
                     readout_key="readout_mano",
                     clip_pred=False,
@@ -276,7 +313,7 @@ def get_config():
             val_shuffle_buffer_size=1000,
             num_val_batches=1,  # 16
         ),
-        eval_datasets=("rlds_oakink", "xgym_lift_single", "xgym_lift_mano"),
+        eval_datasets=("rlds_oakink", "xgym_lift_single"),
         rollout_kwargs=dict(
             num_envs=4,
             use_rollout=False,
@@ -284,4 +321,56 @@ def get_config():
         debug=False,
     )
 
+    if task == "image_conditioned":
+        goal_relabeling_strategy = "uniform"
+        keep_image_prob = 1.0
+    elif task == "language_conditioned":
+        goal_relabeling_strategy = None
+        keep_image_prob = 0.0
+    elif task == "multimodal":
+        goal_relabeling_strategy = "uniform"
+        keep_image_prob = 0.5
+    else:
+        raise ValueError("Invalid modality")
+
+    traj_transform_kwargs = dict(
+        window_size=window_size,
+        action_horizon=action_horizon,  # was 4
+        goal_relabeling_strategy=goal_relabeling_strategy,
+        task_augment_strategy="delete_task_conditioning",
+        task_augment_kwargs=dict(
+            keep_image_prob=keep_image_prob,
+        ),
+        # If the default data loading speed is too slow, try these:
+        # num_parallel_calls=16,  # for less CPU-intensive ops
+    )
+    workspace_augment_kwargs = dict(
+        random_resized_crop=dict(scale=[0.8, 1.0], ratio=[0.9, 1.1]),
+        random_brightness=[0.1],
+        random_contrast=[0.9, 1.1],
+        random_saturation=[0.9, 1.1],
+        random_hue=[0.05],
+        augment_order=[
+            "random_resized_crop",
+            "random_brightness",
+            "random_contrast",
+            "random_saturation",
+            "random_hue",
+        ],
+    )
+
+    frame_transform_kwargs = dict(
+        resize_size={
+            "primary": (224, 224),  # workspace (3rd person) camera is at 224x224
+        },
+        image_augment_kwargs=dict(
+            primary=workspace_augment_kwargs,
+        ),
+    )
+    # If the default data loading speed is too slow, try these:
+    # for the most CPU-intensive ops (decoding, resizing, augmenting)
+    config["frame_transform_threads"] = 32
+
+    config["traj_transform_kwargs"] = traj_transform_kwargs
+    config["frame_transform_kwargs"] = frame_transform_kwargs
     return ConfigDict(config)

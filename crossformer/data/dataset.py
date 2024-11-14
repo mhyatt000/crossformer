@@ -448,7 +448,7 @@ def make_dataset_from_rlds(
             len(action_normalization_mask)
             != dataset_statistics["action"]["mean"].shape[-1]
         ):
-            raise ValueError(
+            raise ValueError(f"{name}: "
                 f"Length of skip_normalization_mask ({len(action_normalization_mask)}) "
                 f"does not match action dimension ({dataset_statistics['action']['mean'].shape[-1]})."
             )

@@ -71,21 +71,54 @@ import numpy as np
 """
 
 
+from jax.scipy.spatial.transform import Rotation
+import numpy as np
+
+
+def xgym_mano_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+
+    obs = trajectory.pop("observation")
+    images = obs.pop("frame")
+
+    # obs.pop("proprio")
+    trajectory["observation"] = {'image':images}
+
+    # DMANO_PALM = 6
+    j = obs["keypoints_3d"][:, 0]  # palm
+    # rot = Rotation.from_matrix(obs["mano"]["global_orient"][:, 0])  # w,1,3,3
+    # rot = rot.as_euler("xyz", degrees=False)
+
+    def mat2euler(mat):
+        """helper to avoid np problems with tf symbolic/eager tensors"""
+        rot = Rotation.from_matrix(mat)
+        return rot.as_euler("xyz", degrees=False)
+
+    rot = obs["mano"]["global_orient"][:, 0]
+    rot = tf.numpy_function(mat2euler, [rot], tf.float32)
+
+    state = tf.concat([j, rot], axis=-1)  # w,6
+    deltas = state[1:] - state[:-1]
+    deltas = tf.concat([deltas, tf.zeros_like(state[-1:])], axis=0)
+    actions = deltas
+    trajectory["action"] = actions
+
+    return trajectory
+
+
 def xgym_single_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 
     obs = trajectory.pop("observation")
     images = obs.pop("image")
 
-    images.pop('camera_0')
-    images.pop('camera_1')
-    images['camera_0'] = images.pop('camera_2')
+    images.pop("camera_0")
+    images.pop("camera_1")
+    images["camera_0"] = images.pop("camera_2")
 
     obs.pop("proprio")
     trajectory["observation"] = images
     return trajectory
 
     return trajectory
-
 
 
 def oakink_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
@@ -1195,6 +1228,7 @@ def droid_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 
 
 OXE_STANDARDIZATION_TRANSFORMS = {
+    "xgym_lift_mano": xgym_mano_dataset_transform,
     "xgym_single": xgym_single_dataset_transform,
     "xgym_lift_single": xgym_single_dataset_transform,
     "rlds_oakink": oakink_dataset_transform,

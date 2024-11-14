@@ -62,7 +62,7 @@ class ActionDim(IntEnum):
     MANO = 120
 
     # DEBUG
-    DMANO_PALM = 3
+    DMANO_PALM = 6    # xyz&rot
     DMANO_PFING = 18  # 3 palm & 15 finger params
     DMANO_PPOSE = 51  # 3 palm & 48 pose params
     DMANO_XYZ = 63
@@ -80,7 +80,7 @@ class ProprioDim(IntEnum):
     MANO = 120
 
     # DEBUG
-    DMANO_PALM = 3
+    DMANO_PALM = 6    # xyz&rot
     DMANO_PFING = 18  # 3 palm & 15 finger params
     DMANO_PPOSE = 51  # 3 palm & 48 pose params
     DMANO_XYZ = 63
@@ -109,36 +109,38 @@ xgym = {
     "action_encoding": ActionEncoding.EEF_POS,
 }
 
+mano = {
+    "image_obs_keys": {
+        "primary": "image",
+        "high": None,
+        "nav": None,
+        "left_wrist": None,
+        "right_wrist": None,
+    },
+    "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+    "state_obs_keys": [
+        "cam_intr",
+        "mano_pose",
+        "mano_shape",
+        "joints_3d",
+        "joints_vis",
+    ],
+    "proprio_obs_keys": {"mano":None, "bimanual": None, "quadruped": None},
+    "proprio_obs_dims": {
+        "mano": ProprioDim.MANO, # what is significant about this?
+        "bimanual": ProprioDim.BIMANUAL,
+        "quadruped": ProprioDim.QUADRUPED,
+    },
+    "proprio_encoding": ProprioEncoding.MANO,
+    "action_encoding": ActionEncoding.MANO,
+}
 
 # === Individual Dataset Configs ===
 OXE_DATASET_CONFIGS = {
+    'xgym_lift_mano': mano,
     "xgym_lift_single": xgym,
     "xgym_single": xgym,
-    "rlds_oakink": {  # OAK INK Dataset
-        "image_obs_keys": {
-            "primary": "image",
-            "high": None,
-            "nav": None,
-            "left_wrist": None,
-            "right_wrist": None,
-        },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
-        "state_obs_keys": [
-            "cam_intr",
-            "mano_pose",
-            "mano_shape",
-            "joints_3d",
-            "joints_vis",
-        ],
-        "proprio_obs_keys": {"mano": "proprio", "bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {
-            "mano": ProprioDim.MANO,
-            "bimanual": ProprioDim.BIMANUAL,
-            "quadruped": ProprioDim.QUADRUPED,
-        },
-        "proprio_encoding": ProprioEncoding.MANO,
-        "action_encoding": ActionEncoding.MANO,
-    },
+    "rlds_oakink": mano, # OAK INK Dataset
     #
     #
     #

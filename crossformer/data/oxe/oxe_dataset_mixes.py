@@ -3,6 +3,7 @@
 HEAD_TO_DATASET = {
     "mano": [
         "rlds_oakink",
+        "xgym_lift_mano",
     ],
     # 'binamo': [ ],
     # 'smplx': [ ],
@@ -105,6 +106,7 @@ CROSS_EMBODIMENT = [
 
 
 import rlds_oakink
+from xgym import rlds
 
 allweight = lambda arr, w: [(name, weight * w) for name, weight in arr]
 
@@ -117,14 +119,14 @@ BAFL_SOUP = [
     ("ucsd_pick_and_place_dataset_converted_externally_to_rlds", 0.2),
     # ("utokyo_xarm_bimanual_converted_externally_to_rlds", 0.2),
     # ("utokyo_xarm_pick_and_place_converted_externally_to_rlds", 0.2),
-    ("xgym_single", 1.0),
+    # ("xgym_single", 1.0),
     ("xgym_lift_single", 1.0),
-    # ("xgym_mano", 1.0),
+    ("xgym_lift_mano", 1.0),
 ]  # + allweight(OXE_MAGIC_SOUP_BALANCED, 0.01)
-
 
 XGYM = [
     ("xgym_lift_single", 1.0),
+    ("xgym_lift_mano", 1.0),
 ]
 
 OXE_NAMED_MIXES = {

@@ -324,6 +324,7 @@ class CrossFormerModel:
         )
         step = step if step is not None else checkpointer.latest_step()
 
+        """
         import os
         import orbax.checkpoint as ocp
         if True:
@@ -345,7 +346,8 @@ class CrossFormerModel:
             )
 
         else:
-            params = checkpointer.restore(step, params_shape)
+        """
+        params = checkpointer.restore(step, params_shape)
 
 
         if config["text_processor"] is not None:
