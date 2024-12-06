@@ -91,15 +91,16 @@ proprio = {}
 
 xgym = {
     "image_obs_keys": {
-        "primary": "camera_0",
-        "high": None,
+        "primary": "worm",
+        "high": 'overhead',
+        "side": "side",
         "nav": None,
         "left_wrist": "wrist",
         "right_wrist": None,
     },
     "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
     "state_obs_keys": [],
-    "proprio_obs_keys": {"mano": None, "bimanual": None, "quadruped": None},
+    "proprio_obs_keys": {'single': 'proprio', "mano": None, "bimanual": None, "quadruped": None},
     "proprio_obs_dims": {
         "mano": ProprioDim.MANO,
         "bimanual": ProprioDim.BIMANUAL,
@@ -139,6 +140,11 @@ mano = {
 OXE_DATASET_CONFIGS = {
     'xgym_lift_mano': mano,
     "xgym_lift_single": xgym,
+    "xgym_duck_single": xgym,
+    "xgym_stack_single": xgym,
+    "xgym_play_single": xgym,
+    "xgym_lift_single:2.0.0": xgym,
+    "xgym_lift_single:1.0.1": xgym,
     "xgym_single": xgym,
     "rlds_oakink": mano, # OAK INK Dataset
     #
