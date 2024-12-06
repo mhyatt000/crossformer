@@ -75,13 +75,14 @@ from jax.scipy.spatial.transform import Rotation
 import numpy as np
 
 
+import random
+
 def xgym_mano_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 
     obs = trajectory.pop("observation")
-    images = obs.pop("frame")
+    trajectory["observation"] = {'image':obs.pop("frame")}
 
     # obs.pop("proprio")
-    trajectory["observation"] = {'image':images}
 
     # DMANO_PALM = 6
     j = obs["keypoints_3d"][:, 0]  # palm
@@ -108,16 +109,10 @@ def xgym_mano_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 def xgym_single_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 
     obs = trajectory.pop("observation")
-    images = obs.pop("image")
+    images = obs.pop("image") 
 
-    images.pop("camera_0")
-    images.pop("camera_1")
-    images["camera_0"] = images.pop("camera_2")
-
-    obs.pop("proprio")
-    trajectory["observation"] = images
-    return trajectory
-
+    proprio = obs.pop("proprio")['position']
+    trajectory["observation"] = {**images, 'proprio':proprio}
     return trajectory
 
 
@@ -1231,6 +1226,11 @@ OXE_STANDARDIZATION_TRANSFORMS = {
     "xgym_lift_mano": xgym_mano_dataset_transform,
     "xgym_single": xgym_single_dataset_transform,
     "xgym_lift_single": xgym_single_dataset_transform,
+    "xgym_duck_single": xgym_single_dataset_transform,
+    "xgym_stack_single": xgym_single_dataset_transform,
+    "xgym_play_single": xgym_single_dataset_transform,
+    "xgym_lift_single:1.0.1": xgym_single_dataset_transform,
+    "xgym_lift_single:2.0.0": xgym_single_dataset_transform,
     "rlds_oakink": oakink_dataset_transform,
     #
     "bridge_dataset": bridge_dataset_transform,

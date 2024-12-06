@@ -450,6 +450,8 @@ def main(_):
                 for x in FLAGS.config.dataset_kwargs["dataset_kwargs_list"]
             ]
         )
+
+        use_mano = False
         if use_mano:
             s = SequenceViz.from_batch(batch, stats=dataset.dataset_statistics).wandb()
 

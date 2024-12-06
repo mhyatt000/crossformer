@@ -9,8 +9,9 @@ HEAD_TO_DATASET = {
     # 'smplx': [ ],
     "nav": ["omnimimic_gnm_dataset"],
     "single_arm": [
-        "xgym_single",
         "xgym_lift_single",
+        "xgym_stack_single",
+        "xgym_duck_single",
         #
         "berkeley_mvp_converted_externally_to_rlds",
         "nyu_rot_dataset_converted_externally_to_rlds",
@@ -105,13 +106,11 @@ CROSS_EMBODIMENT = [
 ] + [(name, weight * 0.85) for name, weight in CROSS_EMBODIMENT_TARGET]
 
 
-import rlds_oakink
-from xgym import rlds
+# import rlds_oakink
 
 allweight = lambda arr, w: [(name, weight * w) for name, weight in arr]
 
-BAFL_SOUP = [
-    ("rlds_oakink", 1.0),
+XARM_EXT = [
     ("bridge_dataset", 0.2),
     ("berkeley_mvp_converted_externally_to_rlds", 0.2),
     ("nyu_rot_dataset_converted_externally_to_rlds", 0.2),
@@ -119,19 +118,32 @@ BAFL_SOUP = [
     ("ucsd_pick_and_place_dataset_converted_externally_to_rlds", 0.2),
     # ("utokyo_xarm_bimanual_converted_externally_to_rlds", 0.2),
     # ("utokyo_xarm_pick_and_place_converted_externally_to_rlds", 0.2),
-    # ("xgym_single", 1.0),
-    ("xgym_lift_single", 1.0),
-    ("xgym_lift_mano", 1.0),
 ]  # + allweight(OXE_MAGIC_SOUP_BALANCED, 0.01)
 
-XGYM = [
-    ("xgym_lift_single", 1.0),
-    ("xgym_lift_mano", 1.0),
+XGYM_SINGLE = [ 
+    ("xgym_duck_single", 1.0) ,
+    ("xgym_lift_single", 1.0) ,
+    ("xgym_stack_single", 1.0) ,
 ]
+
+
+# XGYM_ALL = [
+    # ("xgym_lift_single", 1.0),
+    # ("xgym_lift_mano", 1.0),
+# ]
+
+
+
+MANO = [("rlds_oakink", 1.0)]
+
+# BAFL_SOUP = allweight(MANO, 0.25) + allweight(XARM_EXT, 0.25) + allweight(XGYM_ALL, 0.5)
+
 
 OXE_NAMED_MIXES = {
     "cross_embodiment": CROSS_EMBODIMENT,
-    "bafl": BAFL_SOUP,
+    # "bafl": BAFL_SOUP,
     "bridge": [("bridge_dataset", 1.0)],
-    "xgym": XGYM,
-}
+    # "xgym": XGYM_ALL,
+    'xs': XGYM_SINGLE,
+    **{k: [(k, 1.0)] for k in sum(list(HEAD_TO_DATASET.values()),[])},
+}  
