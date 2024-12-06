@@ -64,7 +64,7 @@ class ActionDim(IntEnum):
     # DEBUG
     DMANO_PALM = 6    # xyz&rot
     DMANO_PFING = 18  # 3 palm & 15 finger params
-    DMANO_PPOSE = 51  # 3 palm & 48 pose params
+    DMANO_PALM_POSE = 51  # xyz palm & 48 pose params
     DMANO_XYZ = 63
 
 
