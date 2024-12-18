@@ -8,7 +8,7 @@ from crossformer.data.oxe.oxe_dataset_configs import (
     OXE_DATASET_CONFIGS,
     ProprioDim,
 )
-from crossformer.data.oxe.oxe_dataset_mixes import OXE_NAMED_MIXES
+from crossformer.data.oxe.oxe_dataset_mixes import OXE_NAMED_MIXES, HEAD_TO_DATASET
 from crossformer.data.oxe.oxe_standardization_transforms import (
     OXE_STANDARDIZATION_TRANSFORMS,
 )
@@ -66,7 +66,7 @@ def make_oxe_dataset_kwargs(
     # MANO
     elif dataset_kwargs["action_encoding"] is ActionEncoding.MANO:
         # dataset_kwargs["action_normalization_mask"] = [True] * (ActionDim.MANO-9) + [False] * 9
-        dataset_kwargs["action_normalization_mask"] = [True] * ActionDim.DMANO_PFING
+        dataset_kwargs["action_normalization_mask"] = [True] * ActionDim.DMANO_PALM
 
     else:
         raise ValueError(

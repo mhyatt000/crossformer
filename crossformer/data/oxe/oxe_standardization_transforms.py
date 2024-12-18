@@ -14,6 +14,7 @@ step = {
 
 from typing import Any, Dict
 
+import jax
 import tensorflow as tf
 
 from crossformer.data.utils.data_utils import (
@@ -39,7 +40,7 @@ import torch
 from torch.utils.data import default_collate
 
 
-class OakInkTransform(SimpleTransform3DMANO):
+    class OakInkTransform(SimpleTransform3DMANO):
 
     center_idx = 9
     basis_param = {
@@ -70,8 +71,56 @@ import numpy as np
 """
 
 
+from jax.scipy.spatial.transform import Rotation
+import numpy as np
+
+
+import random
+
+def xgym_mano_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+
+    obs = trajectory.pop("observation")
+    trajectory["observation"] = {'image':obs.pop("frame")}
+
+    # obs.pop("proprio")
+
+    # DMANO_PALM = 6
+    j = obs["keypoints_3d"][:, 0]  # palm
+    # rot = Rotation.from_matrix(obs["mano"]["global_orient"][:, 0])  # w,1,3,3
+    # rot = rot.as_euler("xyz", degrees=False)
+
+    def mat2euler(mat):
+        """helper to avoid np problems with tf symbolic/eager tensors"""
+        rot = Rotation.from_matrix(mat)
+        return rot.as_euler("xyz", degrees=False)
+
+    rot = obs["mano"]["global_orient"][:, 0]
+    rot = tf.numpy_function(mat2euler, [rot], tf.float32)
+
+    state = tf.concat([j, rot], axis=-1)  # w,6
+    deltas = state[1:] - state[:-1]
+    deltas = tf.concat([deltas, tf.zeros_like(state[-1:])], axis=0)
+    actions = deltas
+    trajectory["action"] = actions
+
+    return trajectory
+
+
+def xgym_single_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+
+    obs = trajectory.pop("observation")
+    images = obs.pop("image") 
+
+    proprio = obs.pop("proprio")['position']
+    trajectory["observation"] = {**images, 'proprio':proprio}
+    return trajectory
+
+
 def oakink_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     """Applies to Oak-Ink dataset."""
+
+    # take every 3rd frame... 30FPS => 10FPS
+    # trajectory = jax.tree.map(lambda x: x[::3], trajectory)
 
     obs = trajectory.pop("observation")
 
@@ -102,8 +151,8 @@ def oakink_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 
     # xyz of palm
     j = obs["joints_3d"]
-    j = [j[:,x] for x in [0,4,8,12,16,20]]
-    state = tf.reshape(j,[-1,18])
+    j = [j[:, x] for x in [0, 4, 8, 12, 16, 20]]
+    state = tf.reshape(j, [-1, 18])
 
     # flatten state keys into a single tensor
     proprio = tf.reshape(
@@ -120,7 +169,6 @@ def oakink_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
         ),
         [-1, 120],
     )
-    
 
     deltas = state[1:] - state[:-1]
     deltas = tf.concat([deltas, tf.zeros_like(state[-1:])], axis=0)
@@ -1175,6 +1223,14 @@ def droid_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 
 
 OXE_STANDARDIZATION_TRANSFORMS = {
+    "xgym_lift_mano": xgym_mano_dataset_transform,
+    "xgym_single": xgym_single_dataset_transform,
+    "xgym_lift_single": xgym_single_dataset_transform,
+    "xgym_duck_single": xgym_single_dataset_transform,
+    "xgym_stack_single": xgym_single_dataset_transform,
+    "xgym_play_single": xgym_single_dataset_transform,
+    "xgym_lift_single:1.0.1": xgym_single_dataset_transform,
+    "xgym_lift_single:2.0.0": xgym_single_dataset_transform,
     "rlds_oakink": oakink_dataset_transform,
     #
     "bridge_dataset": bridge_dataset_transform,

@@ -325,6 +325,30 @@ class CrossFormerModel:
         checkpointer = orbax.checkpoint.CheckpointManager(
         checkpoint_path, orbax.checkpoint.PyTreeCheckpointer()
         step = step if step is not None else checkpointer.latest_step()
+
+        """
+        import os
+        import orbax.checkpoint as ocp
+        if True:
+            try:
+                os.remove(f"{checkpoint_path}/{step}/default/_sharding")
+            except:
+                pass
+
+            manager = ocp.CheckpointManager(checkpoint_path, ocp.PyTreeCheckpointer())
+
+            structure = manager.item_metadata(step)
+            params = manager.restore(
+                step,
+                restore_kwargs={
+                    "restore_args": jax.tree_map(
+                        lambda _: ocp.RestoreArgs(restore_type=np.ndarray), structure
+                    )
+                },
+            )
+
+        else:
+        """
         params = checkpointer.restore(step, params_shape)
         """
 
@@ -359,6 +383,7 @@ class CrossFormerModel:
             step = step if step is not None else checkpointer.latest_step()
             params = checkpointer.restore(step, params_shape)
         """
+
 
         if config["text_processor"] is not None:
             text_processor = ModuleSpec.instantiate(config["text_processor"])()

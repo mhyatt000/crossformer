@@ -1,5 +1,69 @@
 """Defines dataset mixtures and weights for the Open X-Embodiment Datasets."""
 
+HEAD_TO_DATASET = {
+    "mano": [
+        "rlds_oakink",
+        "xgym_lift_mano",
+    ],
+    # 'binamo': [ ],
+    # 'smplx': [ ],
+    "nav": ["omnimimic_gnm_dataset"],
+    "single_arm": [
+        "xgym_lift_single",
+        "xgym_stack_single",
+        "xgym_duck_single",
+        #
+        "berkeley_mvp_converted_externally_to_rlds",
+        "nyu_rot_dataset_converted_externally_to_rlds",
+        "ucsd_kitchen_dataset_converted_externally_to_rlds",
+        "ucsd_pick_and_place_dataset_converted_externally_to_rlds",
+        "utokyo_xarm_bimanual_converted_externally_to_rlds",
+        "utokyo_xarm_pick_and_place_converted_externally_to_rlds",
+        #
+        "bridge_dataset",
+        "fractal20220817_data",
+        "kuka",
+        "taco_play",
+        "taco_extra",
+        "jaco_play",
+        "berkeley_cable_routing",
+        "roboturk",
+        "nyu_door_opening_surprising_effectiveness",
+        "viola",
+        "berkeley_autolab_ur5",
+        "toto",
+        "language_table",
+        "stanford_hydra_dataset_converted_externally_to_rlds",
+        "austin_buds_dataset_converted_externally_to_rlds",
+        "nyu_franka_play_dataset_converted_externally_to_rlds",
+        "furniture_bench_dataset_converted_externally_to_rlds",
+        "austin_sailor_dataset_converted_externally_to_rlds",
+        "austin_sirius_dataset_converted_externally_to_rlds",
+        "bc_z",
+        "dlr_edan_shared_control_converted_externally_to_rlds",
+        "iamlab_cmu_pickup_insert_converted_externally_to_rlds",
+        "utaustin_mutex",
+        "berkeley_fanuc_manipulation",
+        "cmu_stretch",
+        "droid",
+        "droid_wipe",
+        "droid_flip_pot_upright",
+    ],
+    "bimanual": [
+        "aloha_pen_uncap_diverse_dataset",
+        "aloha_new_sushi_dataset",
+        "aloha_dough_cut_dataset",
+        "aloha_lucy_dataset",
+        "aloha_drawer_dataset",
+        "aloha_pick_place_dataset",
+        "aloha_static_dataset",
+        "aloha_sushi_cut_full_dataset",
+        "aloha_new_sushi_dataset,",
+    ],
+    "quadruped": ["go1_real_dataset", "a1", "go1"],
+}
+
+
 OXE_MAGIC_SOUP_BALANCED = [
     ("kuka", 0.14503701874493363),
     ("taco_play", 0.06657998827701668),
@@ -42,22 +106,44 @@ CROSS_EMBODIMENT = [
 ] + [(name, weight * 0.85) for name, weight in CROSS_EMBODIMENT_TARGET]
 
 
-import rlds_oakink
+# import rlds_oakink
 
-BAFL_SOUP = [
-    ("rlds_oakink", 1.0),
-    # ("bridge_dataset", 0.2),
-    # ("berkeley_mvp_converted_externally_to_rlds", 0.1),
-    ("nyu_rot_dataset_converted_externally_to_rlds", 0.1),
-    ("ucsd_kitchen_dataset_converted_externally_to_rlds", 0.1),
-    ("ucsd_pick_and_place_dataset_converted_externally_to_rlds", 0.1),
-    # ("utokyo_xarm_bimanual_converted_externally_to_rlds", 0.1),
-    # ("utokyo_xarm_pick_and_place_converted_externally_to_rlds", 0.1),
+allweight = lambda arr, w: [(name, weight * w) for name, weight in arr]
+
+XARM_EXT = [
+    ("bridge_dataset", 0.2),
+    ("berkeley_mvp_converted_externally_to_rlds", 0.2),
+    ("nyu_rot_dataset_converted_externally_to_rlds", 0.2),
+    ("ucsd_kitchen_dataset_converted_externally_to_rlds", 0.2),
+    ("ucsd_pick_and_place_dataset_converted_externally_to_rlds", 0.2),
+    # ("utokyo_xarm_bimanual_converted_externally_to_rlds", 0.2),
+    # ("utokyo_xarm_pick_and_place_converted_externally_to_rlds", 0.2),
+]  # + allweight(OXE_MAGIC_SOUP_BALANCED, 0.01)
+
+XGYM_SINGLE = [ 
+    ("xgym_duck_single", 1.0) ,
+    ("xgym_lift_single", 1.0) ,
+    ("xgym_stack_single", 1.0) ,
 ]
+
+
+# XGYM_ALL = [
+    # ("xgym_lift_single", 1.0),
+    # ("xgym_lift_mano", 1.0),
+# ]
+
+
+
+MANO = [("rlds_oakink", 1.0)]
+
+# BAFL_SOUP = allweight(MANO, 0.25) + allweight(XARM_EXT, 0.25) + allweight(XGYM_ALL, 0.5)
 
 
 OXE_NAMED_MIXES = {
     "cross_embodiment": CROSS_EMBODIMENT,
-    'bafl': BAFL_SOUP,
-    'bridge': [('bridge_dataset', 1.0)],
-}
+    # "bafl": BAFL_SOUP,
+    "bridge": [("bridge_dataset", 1.0)],
+    # "xgym": XGYM_ALL,
+    'xs': XGYM_SINGLE,
+    **{k: [(k, 1.0)] for k in sum(list(HEAD_TO_DATASET.values()),[])},
+}  

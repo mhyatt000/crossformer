@@ -3,6 +3,7 @@ import os.path as osp
 
 from ml_collections import ConfigDict
 from ml_collections.config_dict import FieldReference, placeholder
+import tensorflow as tf
 
 from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
 from crossformer.data.oxe.oxe_dataset_mixes import OXE_NAMED_MIXES
@@ -13,6 +14,7 @@ from crossformer.model.components.transformer import common_transformer_sizes
 from crossformer.model.components.vit_encoders import ResNet26, ResNet26FILM
 from crossformer.utils.spec import ModuleSpec
 from crossformer.utils.train_utils import resnet_26_loader
+
 
 def get_dataset_config(task_cond, window_size, action_horizon, mix="bafl"):
     traj_transform_kwargs, frame_transform_kwargs = get_augmentation_config(
@@ -36,14 +38,15 @@ def get_dataset_config(task_cond, window_size, action_horizon, mix="bafl"):
             # dont need the extra views
             load_camera_views=(
                 "primary",
-            ),  #  "high"), # , "nav", "left_wrist", "right_wrist"),
+                "left_wrist",
+                "high"), # , "nav", "left_wrist", "right_wrist"),
             load_proprio=True,
             load_depth=False,
         ),
         traj_transform_kwargs=traj_transform_kwargs,
         frame_transform_kwargs=frame_transform_kwargs,
         batch_size=512,  # used over finetune batch size bc of make_interleaved
-        shuffle_buffer_size=50000,
+        shuffle_buffer_size=50_000,
         balance_weights=False,
         traj_transform_threads=48,
         traj_read_threads=48,
@@ -74,7 +77,6 @@ def get_augmentation_config(task_cond, window_size, action_horizon):
         subsample_length=100,
     )
 
-    """
     aloha_image_augment_kwargs = dict(
         random_resized_crop=dict(scale=[0.9, 1.0], ratio=[0.75, 4.0 / 3]),
         random_brightness=[0.1],
@@ -97,23 +99,7 @@ def get_augmentation_config(task_cond, window_size, action_horizon):
         random_saturation=[0.9, 1.1],
         random_hue=[0.05],
         augment_order=[
-            # "random_resized_crop",
-            "random_brightness",
-            "random_contrast",
-            "random_saturation",
-            "random_hue",
-        ],
-    )
-    """
-
-    oakink_image_augment_kwargs = dict(
-        # random_resized_crop=dict(scale=[0.8, 1.0], ratio=[0.9, 1.1]),
-        random_brightness=[0.1],
-        random_contrast=[0.9, 1.1],
-        random_saturation=[0.9, 1.1],
-        random_hue=[0.05],
-        augment_order=[
-            # "random_resized_crop",
+            "random_resized_crop",
             "random_brightness",
             "random_contrast",
             "random_saturation",
@@ -130,11 +116,11 @@ def get_augmentation_config(task_cond, window_size, action_horizon):
             "right_wrist": (224, 224),
         },
         image_augment_kwargs={
-            "primary": oakink_image_augment_kwargs,
-            # "high": aloha_image_augment_kwargs,
-            # "nav": bridge_image_augment_kwargs,
-            # "left_wrist": aloha_image_augment_kwargs,
-            # "right_wrist": aloha_image_augment_kwargs,
+            "primary": bridge_image_augment_kwargs ,
+            "high": aloha_image_augment_kwargs,
+            "nav": bridge_image_augment_kwargs,
+            "left_wrist": aloha_image_augment_kwargs,
+            "right_wrist": aloha_image_augment_kwargs,
         },
         num_parallel_calls=200,
     )
@@ -174,11 +160,34 @@ def get_config():
         # "num_parallel_calls": 16,  # for initial dataset construction
     )
 
+    # borrowed from pretrain cfg
+    # token_embedding_size, transformer_kwargs = common_transformer_sizes( transformer_size)
+    # encoder = ModuleSpec.create(ResNet26FILM)
+
     # an example of how to add a new observation tokenizer and action head
     UPDATE_CONFIG = dict(
         model=dict(
             # observation_tokenizers=dict( new_primary=ModuleSpec.create( ImageTokenizer, obs_stack_keys=["image_primary"], task_stack_keys=["image_primary"], task_film_keys=["language_instruction"], encoder=ModuleSpec.create(ResNet26FILM),)),
+            observation_tokenizers=dict(
+                single=ModuleSpec.create(
+                    LowdimObsTokenizer,
+                    obs_keys=["proprio_single"],
+                    dropout_rate=0.2,
+                ),
+            ),
             heads=dict(
+                single_arm=ModuleSpec.create(
+                    DiffusionActionHead,
+                    action_horizon=4,
+                    action_dim=ActionDim.SINGLE,
+                    # num_preds=ActionDim.
+                    pool_strategy="mean",  # isnt there another/better strategy
+                    readout_key="readout_single_arm",
+                    clip_pred=False,
+                    loss_weight=1.0,
+                    constrain_loss_dims=True,
+                    diffusion_steps=20,
+                ),
                 bimanual=ModuleSpec.create(
                     L1ActionHead,
                     action_horizon=4,
@@ -191,7 +200,7 @@ def get_config():
                     constrain_loss_dims=True,
                 ),
                 mano=ModuleSpec.create(
-                    L1ActionHead,
+                    DiffusionActionHead,
                     action_horizon=4,
                     action_dim=ActionDim.DMANO_PFING,
                     # num_preds=ActionDim.DMANO_PFING,
@@ -200,9 +209,10 @@ def get_config():
                     clip_pred=False,
                     loss_weight=1.0,
                     constrain_loss_dims=True,
-                ), # diffusion_steps=5,
+                    diffusion_steps=5,
+                ),
             ),
-            readouts=dict(mano=4, bimanual=4),
+            readouts=dict(single_arm=4, mano=4, bimanual=4),
         )
     )
 
@@ -226,7 +236,7 @@ def get_config():
 
     action_horizon = 4
     dataset_kwargs = get_dataset_config(
-        "multi", window_size, action_horizon=action_horizon
+        "multi", window_size, action_horizon=action_horizon, mix="xgym"
     )
     config = dict(
         pretrained_path="hf://rail-berkeley/crossformer",
@@ -244,9 +254,10 @@ def get_config():
         config_delete_keys={
             "model": {
                 "readouts": {
-                    "bimanual": 10,
+                    "bimanual": 4,
                     "quadruped": None,
                     "nav": None,
+                    "single_arm": 4,
                 },
                 "observation_tokenizers": {
                     "bimanual": None,
@@ -255,6 +266,7 @@ def get_config():
                     "nav": None,
                 },
                 "heads": {
+                    "single_arm": "diffusion",
                     "quadruped": None,
                     "nav": None,
                 },
@@ -272,7 +284,7 @@ def get_config():
         seed=42,
         # dataset_kwargs=FINETUNING_KWARGS,
         dataset_kwargs=dataset_kwargs,
-        prefetch_num_batches=2,
+        prefetch_num_batches=64,
         modality=task,
         finetuning_mode=mode,
         head_name=head_name,
@@ -295,7 +307,7 @@ def get_config():
             val_shuffle_buffer_size=1000,
             num_val_batches=1,  # 16
         ),
-        eval_datasets=("rlds_oakink"),
+        eval_datasets=("rlds_oakink", "xgym_lift_single"),
         rollout_kwargs=dict(
             num_envs=4,
             use_rollout=False,
@@ -350,9 +362,8 @@ def get_config():
         ),
     )
     # If the default data loading speed is too slow, try these:
-    config["frame_transform_threads"] = (
-        16  # for the most CPU-intensive ops (decoding, resizing, augmenting)
-    )
+    # for the most CPU-intensive ops (decoding, resizing, augmenting)
+    config["frame_transform_threads"] = 32
 
     config["traj_transform_kwargs"] = traj_transform_kwargs
     config["frame_transform_kwargs"] = frame_transform_kwargs

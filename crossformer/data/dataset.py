@@ -403,6 +403,7 @@ def make_dataset_from_rlds(
     def is_nonzero_length(traj):
         return tf.shape(traj["action"])[0] > 0
 
+
     builder = tfds.builder(name, data_dir=data_dir)
 
     # load or compute dataset statistics
@@ -447,7 +448,7 @@ def make_dataset_from_rlds(
             len(action_normalization_mask)
             != dataset_statistics["action"]["mean"].shape[-1]
         ):
-            raise ValueError(
+            raise ValueError(f"{name}: "
                 f"Length of skip_normalization_mask ({len(action_normalization_mask)}) "
                 f"does not match action dimension ({dataset_statistics['action']['mean'].shape[-1]})."
             )
@@ -636,7 +637,7 @@ def make_interleaved_dataset(
         dataset = dataset.batch(batch_size)
 
     # this seems to reduce memory usage without affecting speed
-    dataset = dataset.with_ram_budget(1)
+    dataset = dataset.with_ram_budget(tf.data.AUTOTUNE)
 
     dataset = dataset.ignore_errors(log_warning=True)
 

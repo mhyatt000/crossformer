@@ -191,7 +191,7 @@ def get_config():
                     constrain_loss_dims=True,
                 ),
                 mano=ModuleSpec.create(
-                    L1ActionHead,
+                    DiffusionActionHead,
                     action_horizon=4,
                     action_dim=ActionDim.DMANO_PFING,
                     # num_preds=ActionDim.DMANO_PFING,
@@ -200,7 +200,8 @@ def get_config():
                     clip_pred=False,
                     loss_weight=1.0,
                     constrain_loss_dims=True,
-                ), # diffusion_steps=5,
+                    diffusion_steps=5,
+                ), 
             ),
             readouts=dict(mano=4, bimanual=4),
         )
@@ -244,7 +245,7 @@ def get_config():
         config_delete_keys={
             "model": {
                 "readouts": {
-                    "bimanual": 10,
+                    "bimanual": 4,
                     "quadruped": None,
                     "nav": None,
                 },
