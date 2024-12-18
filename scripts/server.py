@@ -25,15 +25,20 @@ action = loads(
 )
 """
 
+import os
+import os.path as osp
 
 import json_numpy
 
 json_numpy.patch()
 from collections import deque
+from dataclasses import dataclass, field
+from pathlib import Path
 import time
 import traceback
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Union
 
+import draccus
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 import jax
@@ -68,23 +73,40 @@ def stack_and_pad(history: deque, num_obs: int):
     return full_obs
 
 
+@dataclass
+class ServerCN:
+
+    models: Union[str, list]  # comma separated models in name:id:step format
+    weights: Union[str, Path] = Path(
+        os.environ.get("BAFL_SAVE", ".")
+    ).expanduser()  # path to BAFL_SAVE or weights dir
+
+    host: str = "0.0.0.0"  # host to run on
+    port: int = 8001  # port to run on
+
+    def __post_init__(self):
+
+        assert self.models, "Please provide a model"
+        if isinstance(self.models, str):
+            self.models = [m.split(":") for m in self.models.split(",")]
+
+
 class HttpServer:
-    def __init__(self, paths):
+    def __init__(self, paths, cfg: Optional[ServerCN] = None):
+        self.cfg = cfg
+
         self.models = dict()
         for name, path, step in paths:
-            if isinstance(path, str):
-                self.models[name] = CrossFormerModel.load_pretrained(path, step=step)
-            elif isinstance(path, CrossFormerModel):
-                self.models[name] = path
-
-        # settings for bimanual inference
-        self.head_name = "bimanual"
-        self.dataset_name = "aloha_pen_uncap_diverse_dataset"
-        self.action_dim = 14
-        self.pred_horizon = 100
+            self.models[name] = CrossFormerModel.load_pretrained(path, step=step)
+        self.head_name = "single_arm"
+        self.dataset_name = "xgym_stack_single"
+        # self.dataset_name = "xgym_duck_single"
+        self.action_dim = 7
+        self.pred_horizon = 4
         self.exp_weight = 0
-        self.horizon = 5
-        self.text = None
+        self.horizon = 1  # 5
+        self.text = "pick up the red block"
+        # self.text = "put the ducks in the bowl"
         self.task = None
         self.rng = jax.random.PRNGKey(0)
 
@@ -100,11 +122,14 @@ class HttpServer:
             payload = {
                 "observation": {
                     "proprio_bimanual": np.zeros((14,)),
+                    "proprio_single": np.zeros((7,)),
+                    "image_primary": np.zeros((224, 224, 3)),
                     "image_high": np.zeros((224, 224, 3)),
+                    "image_side": np.zeros((224, 224, 3)),
                     "image_left_wrist": np.zeros((224, 224, 3)),
-                    "image_right_wrist": np.zeros((224, 224, 3)),
+                    # "image_right_wrist": np.zeros((224, 224, 3)),
                 },
-                "modality": "l",
+                "modality": "l",  # l for language or v for vision
                 "ensemble": True,
                 "model": name,
                 "dataset_name": self.dataset_name,
@@ -116,7 +141,7 @@ class HttpServer:
 
         self.reset_history()
 
-    def run(self, port=8000, host="0.0.0.0"):
+    def run(self, port=8001, host="0.0.0.0"):
         self.app = FastAPI()
         self.app.post("/query")(self.sample_actions)
         self.app.post("/reset")(self.reset)
@@ -153,6 +178,7 @@ class HttpServer:
             for key in obs:
                 if "image" in key:
                     obs[key] = resize(obs[key])
+                # NOTE... single proprio might fail if not processed accordingly
                 # normalize proprioception expect for bimanual proprioception
                 if "proprio" in key and not key == "proprio_bimanual":
                     proprio_normalization_statistics = self.models[
@@ -167,7 +193,7 @@ class HttpServer:
             obs = stack_and_pad(self.history, self.num_obs)
 
             # add batch dim
-            obs = jax.tree_map(lambda x: x[None], obs)
+            obs = jax.tree.map(lambda x: x[None], obs)
 
             unnormalization_statistics = self.models[model_name].dataset_statistics[
                 self.dataset_name
@@ -183,10 +209,12 @@ class HttpServer:
             )[0, :, : self.action_dim]
 
             actions = np.array(actions)
+            actions = actions[
+                -1
+            ]  # @mhyatt patch since model returns for all windows now
 
             # whether to temporally ensemble the action predictions or return the full chunk
             if not payload.get("ensemble", True):
-                print(actions)
                 return json_response(actions)
 
             self.act_history.append(actions[: self.pred_horizon])
@@ -208,30 +236,31 @@ class HttpServer:
             # compute the weighted average across all predictions for this timestep
             action = np.sum(weights[:, None] * curr_act_preds, axis=0)
 
-            print(action)
             return json_response(action)
         except:
             print(traceback.format_exc())
             return "error"
 
 
-def main():
-    import argparse
+@draccus.wrap()
+def main(cfg: ServerCN):
 
     tf.config.set_visible_devices([], "GPU")
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--host", help="Host to run on", default="0.0.0.0", type=str)
-    parser.add_argument("--port", help="Port to run on", default=8000, type=int)
-    args = parser.parse_args()
+    cfg.models = [(n, str(cfg.weights / id), s) for n, id, s in cfg.models]
 
-    # name, path, step
-    paths = [
-        ("crossformer", "hf://rail-berkeley/crossformer", None),
-    ]
+    # DEPRICATE name, path, step
+    # root = osp.expanduser("~/data/bafl") # for carina
+    # paths = [
+    # ("crossformer", "hf://rail-berkeley/crossformer", None),
+    # v3
+    # ("bafl", osp.join(root, "experiment_20241203_193649"), 14_000), # v3-lift
+    # ("bafl", osp.join(root, "experiment_20241204_141047"), 150_000), # v3-lift
+    # ("bafl", osp.join(root, "experiment_20241211_173647"), 290_000),  # v3-lift
+    # ]
 
-    server = HttpServer(paths)
-    server.run(args.port, args.host)
+    server = HttpServer(cfg.models, cfg=cfg)
+    server.run(cfg.port, cfg.host)
 
 
 if __name__ == "__main__":
