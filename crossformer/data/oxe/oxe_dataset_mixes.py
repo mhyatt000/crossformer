@@ -4,6 +4,7 @@ HEAD_TO_DATASET = {
     "mano": [
         "rlds_oakink",
         "xgym_lift_mano",
+        "xgym_stack_mano",
     ],
     # 'binamo': [ ],
     # 'smplx': [ ],
@@ -120,18 +121,20 @@ XARM_EXT = [
     # ("utokyo_xarm_pick_and_place_converted_externally_to_rlds", 0.2),
 ]  # + allweight(OXE_MAGIC_SOUP_BALANCED, 0.01)
 
-XGYM_SINGLE = [ 
-    ("xgym_duck_single", 1.0) ,
-    ("xgym_lift_single", 1.0) ,
-    ("xgym_stack_single", 1.0) ,
+XGYM_SINGLE = [
+    ("xgym_duck_single", 1.0),
+    ("xgym_lift_single", 1.0),
+    ("xgym_stack_single", 1.0),
 ]
 
 
-# XGYM_ALL = [
-    # ("xgym_lift_single", 1.0),
-    # ("xgym_lift_mano", 1.0),
-# ]
-
+XGYM_ALL = [
+    ("xgym_duck_single", 1.0),
+    ("xgym_lift_single", 1.0),
+    ("xgym_stack_single", 1.0),
+    #
+    ("xgym_lift_mano", 1.0),
+]
 
 
 MANO = [("rlds_oakink", 1.0)]
@@ -143,7 +146,10 @@ OXE_NAMED_MIXES = {
     "cross_embodiment": CROSS_EMBODIMENT,
     # "bafl": BAFL_SOUP,
     "bridge": [("bridge_dataset", 1.0)],
-    # "xgym": XGYM_ALL,
-    'xs': XGYM_SINGLE,
-    **{k: [(k, 1.0)] for k in sum(list(HEAD_TO_DATASET.values()),[])},
-}  
+    # 
+    "x": XGYM_ALL,
+    "xs": XGYM_SINGLE,
+    "xstack": [("xgym_stack_single", 1.0), ("xgym_stack_mano", 1.0)],
+    # 
+    **{k: [(k, 1.0)] for k in sum(list(HEAD_TO_DATASET.values()), [])},
+}

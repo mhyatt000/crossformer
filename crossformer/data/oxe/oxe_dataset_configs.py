@@ -62,10 +62,12 @@ class ActionDim(IntEnum):
     MANO = 120
 
     # DEBUG
-    DMANO_PALM = 6    # xyz&rot
-    DMANO_PFING = 18  # 3 palm & 15 finger params
-    DMANO_PPOSE = 51  # 3 palm & 48 pose params
-    DMANO_XYZ = 63
+    DMANO_6 = 6  # xyz&rot
+    DMANO_7 = 7  # xyz&rot grip
+    # DMANO_18 = 18  # 3 palm & 15 finger params
+    DMANO_51 = 51  # 3 palm & 48 pose params
+    DMANO_52 = 52  #
+    # DMANO_XYZ = 63
 
 
 class ProprioDim(IntEnum):
@@ -77,14 +79,13 @@ class ProprioDim(IntEnum):
     POS_NAV = 3
     QUADRUPED = 46
 
-    MANO = 120
+    # +1 to account for focal length which is needed for perspective mat
+    DMANO_6 = ActionDim.DMANO_6 + 1
+    DMANO_7 = ActionDim.DMANO_7 + 1
+    DMANO_51 = ActionDim.DMANO_51 + 1
+    DMANO_52 = ActionDim.DMANO_52 + 1
 
-    # DEBUG
-    DMANO_PALM = 6    # xyz&rot
-    DMANO_PFING = 18  # 3 palm & 15 finger params
-    DMANO_PPOSE = 51  # 3 palm & 48 pose params
-    DMANO_XYZ = 63
-
+    MANO = DMANO_7 # current setting
 
 # clean up data spec
 proprio = {}
@@ -92,7 +93,7 @@ proprio = {}
 xgym = {
     "image_obs_keys": {
         "primary": "worm",
-        "high": 'overhead',
+        "high": "overhead",
         "side": "side",
         "nav": None,
         "left_wrist": "wrist",
@@ -100,9 +101,15 @@ xgym = {
     },
     "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
     "state_obs_keys": [],
-    "proprio_obs_keys": {'single': 'proprio', "mano": None, "bimanual": None, "quadruped": None},
+    "proprio_obs_keys": {
+        "single": "proprio",
+        "mano": None,
+        "bimanual": None,
+        "quadruped": None,
+    },
     "proprio_obs_dims": {
         "mano": ProprioDim.MANO,
+        "single": ProprioDim.POS_EULER,
         "bimanual": ProprioDim.BIMANUAL,
         "quadruped": ProprioDim.QUADRUPED,
     },
@@ -110,10 +117,15 @@ xgym = {
     "action_encoding": ActionEncoding.EEF_POS,
 }
 
+#
+# TODO use some sort of metaclass to handle this cleanly?
+# it is a very complicated setup
+
 mano = {
     "image_obs_keys": {
         "primary": "image",
         "high": None,
+        "side": None,
         "nav": None,
         "left_wrist": None,
         "right_wrist": None,
@@ -126,9 +138,17 @@ mano = {
         "joints_3d",
         "joints_vis",
     ],
-    "proprio_obs_keys": {"mano":None, "bimanual": None, "quadruped": None},
+    "proprio_obs_keys": {
+        "single": None,
+        "mano": 'proprio',
+        "bimanual": None,
+        "quadruped": None,
+    },
+    # what is significant about this? 
+    # re: i think its needed for datasets where there is no proprio so they can fill zeros
     "proprio_obs_dims": {
-        "mano": ProprioDim.MANO, # what is significant about this?
+        "mano": ProprioDim.MANO,
+        "single": ProprioDim.POS_EULER,
         "bimanual": ProprioDim.BIMANUAL,
         "quadruped": ProprioDim.QUADRUPED,
     },
@@ -138,15 +158,17 @@ mano = {
 
 # === Individual Dataset Configs ===
 OXE_DATASET_CONFIGS = {
-    'xgym_lift_mano': mano,
+    "xgym_lift_mano": mano,
+    "xgym_stack_mano": mano,
+    "xgym_stack_mano": mano,
+    "xgym_duck_mano": mano,
+    "xgym_duck_mano": mano,
     "xgym_lift_single": xgym,
     "xgym_duck_single": xgym,
     "xgym_stack_single": xgym,
     "xgym_play_single": xgym,
-    "xgym_lift_single:2.0.0": xgym,
-    "xgym_lift_single:1.0.1": xgym,
     "xgym_single": xgym,
-    "rlds_oakink": mano, # OAK INK Dataset
+    # "rlds_oakink": mano,  # OAK INK Dataset
     #
     #
     #
