@@ -38,14 +38,17 @@ def get_dataset_config(task_cond, window_size, action_horizon, mix="bafl"):
             # dont need the extra views
             load_camera_views=(
                 "primary",
+                'side',
+                'high',
                 "left_wrist",
-            ),  #  "high"), # , "nav", "left_wrist", "right_wrist"),
+                ),
+                # , "nav", "left_wrist", "right_wrist"),
             load_proprio=True,
             load_depth=False,
         ),
         traj_transform_kwargs=traj_transform_kwargs,
         frame_transform_kwargs=frame_transform_kwargs,
-        batch_size=512,  # used over finetune batch size bc of make_interleaved
+        batch_size=256,  # used over finetune batch size bc of make_interleaved
         shuffle_buffer_size=50_000,
         balance_weights=False,
         traj_transform_threads=48,
@@ -66,8 +69,8 @@ def get_augmentation_config(task_cond, window_size, action_horizon):
     traj_transform_kwargs = dict(
         window_size=window_size,
         action_horizon=action_horizon,
-        max_action_dim=ActionDim.DMANO_PFING,
-        max_proprio_dim=ActionDim.DMANO_PFING,
+        max_action_dim=ActionDim.BIMANUAL,
+        max_proprio_dim=ActionDim.BIMANUAL,
         head_to_dataset=HEAD_TO_DATASET,
         goal_relabeling_strategy="uniform",
         task_augment_strategy="delete_task_conditioning",
@@ -77,7 +80,6 @@ def get_augmentation_config(task_cond, window_size, action_horizon):
         subsample_length=100,
     )
 
-    """
     aloha_image_augment_kwargs = dict(
         random_resized_crop=dict(scale=[0.9, 1.0], ratio=[0.75, 4.0 / 3]),
         random_brightness=[0.1],
@@ -85,7 +87,7 @@ def get_augmentation_config(task_cond, window_size, action_horizon):
         random_saturation=[0.9, 1.1],
         random_hue=[0.05],
         augment_order=[
-            "random_resized_crop",
+            # "random_resized_crop",
             "random_brightness",
             "random_contrast",
             "random_saturation",
@@ -107,37 +109,23 @@ def get_augmentation_config(task_cond, window_size, action_horizon):
             "random_hue",
         ],
     )
-    """
-
-    oakink_image_augment_kwargs = dict(
-        # random_resized_crop=dict(scale=[0.8, 1.0], ratio=[0.9, 1.1]),
-        random_brightness=[0.1],
-        random_contrast=[0.9, 1.1],
-        random_saturation=[0.9, 1.1],
-        random_hue=[0.05],
-        augment_order=[
-            # "random_resized_crop",
-            "random_brightness",
-            "random_contrast",
-            "random_saturation",
-            "random_hue",
-        ],
-    )
 
     frame_transform_kwargs = dict(
         resize_size={
             "primary": (224, 224),
+            "side": (224, 224),
             "high": (224, 224),
             "nav": (224, 224),
             "left_wrist": (224, 224),
             "right_wrist": (224, 224),
         },
         image_augment_kwargs={
-            "primary": oakink_image_augment_kwargs,
-            # "high": aloha_image_augment_kwargs,
-            # "nav": bridge_image_augment_kwargs,
-            # "left_wrist": aloha_image_augment_kwargs,
-            # "right_wrist": aloha_image_augment_kwargs,
+            "primary": bridge_image_augment_kwargs ,
+            'side': bridge_image_augment_kwargs ,
+            "high": aloha_image_augment_kwargs,
+            "nav": bridge_image_augment_kwargs,
+            "left_wrist": aloha_image_augment_kwargs,
+            "right_wrist": aloha_image_augment_kwargs,
         },
         num_parallel_calls=200,
     )
@@ -157,36 +145,33 @@ def get_config():
     assert task in ["image_conditioned", "language_conditioned", "multimodal"]
     assert mode in ["full", "head_only"]
 
-    # fill this in to configure data loading for your dataset.
-    FINETUNING_KWARGS = dict(
-        name="bridge_dataset",
-        # data_dir="",
-        image_obs_keys={"primary": "image_0"},
-        proprio_obs_keys={},
-        language_key="language_instruction",
-        action_proprio_normalization_type="normal",
-        # We want to avoid normalizing the gripper
-        action_normalization_mask=[True] * ActionDim.DMANO_PFING,
-        # standardize_fn is dynamically loaded from a file
-        standardize_fn=ModuleSpec.create(
-            "crossformer.data.oxe.oxe_standardization_transforms:oakink_dataset_transform",
-            # "crossformer.data.oxe.oxe_standardization_transforms:bridge_dataset_transform",
-        ),
-        # If the default data loading speed is too slow, try these:
-        # "num_parallel_reads": 8,  # for reading from disk / GCS
-        # "num_parallel_calls": 16,  # for initial dataset construction
-    )
+    # borrowed from pretrain cfg
+    # token_embedding_size, transformer_kwargs = common_transformer_sizes( transformer_size)
+    # encoder = ModuleSpec.create(ResNet26FILM)
 
     # an example of how to add a new observation tokenizer and action head
     UPDATE_CONFIG = dict(
         model=dict(
-            # observation_tokenizers=dict( new_primary=ModuleSpec.create( ImageTokenizer, obs_stack_keys=["image_primary"], task_stack_keys=["image_primary"], task_film_keys=["language_instruction"], encoder=ModuleSpec.create(ResNet26FILM),)),
+            observation_tokenizers=dict(
+                side=ModuleSpec.create( 
+                    ImageTokenizer, 
+                      obs_stack_keys=["image_side"], 
+                      task_stack_keys=["image_side"], 
+                      task_film_keys=["language_instruction"], 
+                      encoder=ModuleSpec.create(ResNet26FILM),
+                ),
+                single=ModuleSpec.create(
+                    LowdimObsTokenizer,
+                    obs_keys=["proprio_single"],
+                    dropout_rate=0.2,
+                ),
+            ),
             heads=dict(
                 single_arm=ModuleSpec.create(
                     DiffusionActionHead,
-                    action_horizon=10,
+                    action_horizon=4,
                     action_dim=ActionDim.SINGLE,
-                    # num_preds=ActionDim.
+                    num_preds=ActionDim.SINGLE,
                     pool_strategy="mean",  # isnt there another/better strategy
                     readout_key="readout_single_arm",
                     clip_pred=False,
@@ -208,14 +193,13 @@ def get_config():
                 mano=ModuleSpec.create(
                     DiffusionActionHead,
                     action_horizon=4,
-                    action_dim=ActionDim.DMANO_PFING,
-                    # num_preds=ActionDim.DMANO_PFING,
+                    action_dim=ActionDim.DMANO_7,
                     pool_strategy="mean",
                     readout_key="readout_mano",
                     clip_pred=False,
                     loss_weight=1.0,
                     constrain_loss_dims=True,
-                    diffusion_steps=5,
+                    diffusion_steps=20, # new... was 5
                 ),
             ),
             readouts=dict(single_arm=4, mano=4, bimanual=4),
@@ -229,7 +213,7 @@ def get_config():
     else:
         raise ValueError("Invalid mode")
 
-    max_steps = FieldReference(50_000)
+    max_steps = FieldReference(500_000)
     grad_acc = None
     max_steps = max_steps * (grad_acc or 1)
 
@@ -242,7 +226,7 @@ def get_config():
 
     action_horizon = 4
     dataset_kwargs = get_dataset_config(
-        "multi", window_size, action_horizon=action_horizon, mix="xgym"
+        "multi", window_size, action_horizon=action_horizon, mix="xstack"
     )
     config = dict(
         pretrained_path="hf://rail-berkeley/crossformer",
@@ -268,7 +252,7 @@ def get_config():
                 "observation_tokenizers": {
                     "bimanual": None,
                     "quadruped": None,
-                    "high": None,
+                    # "high": None,
                     "nav": None,
                 },
                 "heads": {
@@ -282,7 +266,7 @@ def get_config():
         shuffle_buffer_size=10000,
         num_steps=max_steps,
         log_interval=100,
-        eval_interval=2000,  # 2000
+        eval_interval=2000,  
         save_interval=2000,
         save_dir=os.path.expanduser(
             os.environ.get("BAFL_SAVE", os.path.expanduser("~"))
@@ -313,7 +297,7 @@ def get_config():
             val_shuffle_buffer_size=1000,
             num_val_batches=1,  # 16
         ),
-        eval_datasets=("rlds_oakink", "xgym_lift_single"),
+        eval_datasets=("xgym_stack_single", "xgym_stack_mano"),
         rollout_kwargs=dict(
             num_envs=4,
             use_rollout=False,
