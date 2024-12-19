@@ -1,9 +1,9 @@
-
 from pathlib import Path
 
 BASE = Path(__file__).parent.parent
 
-MANO_DIR = BASE / "_DATA/data/"
+HOME = Path.home()
+MANO_DIR = HOME / "_DATA/data/"
 MANO_CFG = {
     # "data_dir": MANO_DIR,
     "model_path": MANO_DIR / "mano",
