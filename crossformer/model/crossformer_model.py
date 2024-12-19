@@ -215,9 +215,11 @@ class CrossFormerModel:
             sample_shape=sample_shape,
             rng=rng,
             temperature=temperature,
-            embodiment_action_dim=len(unnormalization_statistics["mean"])
-            if unnormalization_statistics is not None
-            else None,
+            embodiment_action_dim=(
+                len(unnormalization_statistics["mean"])
+                if unnormalization_statistics is not None
+                else None
+            ),
         )
         if unnormalization_statistics is not None:
             if normalization_type == NormalizationType.NORMAL:
@@ -318,10 +320,10 @@ class CrossFormerModel:
             partial(module.init, train=False), jax.random.PRNGKey(0), *init_args
         )["params"]
 
+        """ original
         # restore params, checking to make sure the shape matches
         checkpointer = orbax.checkpoint.CheckpointManager(
-            checkpoint_path, orbax.checkpoint.PyTreeCheckpointer()
-        )
+        checkpoint_path, orbax.checkpoint.PyTreeCheckpointer()
         step = step if step is not None else checkpointer.latest_step()
 
         """
@@ -348,6 +350,39 @@ class CrossFormerModel:
         else:
         """
         params = checkpointer.restore(step, params_shape)
+        """
+
+        # use new orbax API for flexible restore
+        # beware rough edges
+        from orbax import checkpoint as ocp
+
+        target = jax.tree_util.tree_map(jnp.zeros_like, params_shape)
+        sharding = jax.sharding.NamedSharding(
+            jax.sharding.Mesh(jax.devices(), ('model',)),
+            jax.sharding.PartitionSpec(
+                None,
+            ),
+        )
+        doshard = lambda x: jax.device_put(x, sharding)
+        spec = lambda x: (x.shape, x.dtype)
+        target = jax.tree.map(doshard, target)
+        abstract = jax.tree.map( ocp.utils.to_shape_dtype_struct, target)
+
+        manager = ocp.CheckpointManager(checkpoint_path, ocp.StandardCheckpointer())
+        # structure = manager.item_metadata(step)
+        # target = jax.tree_util.tree_map(lambda x: np.zeros(x.shape), structure)
+        params = manager.restore(step, args=ocp.args.StandardRestore(abstract))
+
+        """ this is original from crossformer... has problem with 4gpu->2gpu server
+        original=False
+        if original:
+            # restore params, checking to make sure the shape matches
+            checkpointer = orbax.checkpoint.CheckpointManager(
+                checkpoint_path, orbax.checkpoint.PyTreeCheckpointer()
+            )
+            step = step if step is not None else checkpointer.latest_step()
+            params = checkpointer.restore(step, params_shape)
+        """
 
 
         if config["text_processor"] is not None:

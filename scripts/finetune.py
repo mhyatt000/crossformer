@@ -24,7 +24,11 @@ from crossformer.data.oxe import (
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec
-from crossformer.utils.train_callbacks import SaveCallback, ValidationCallback
+from crossformer.utils.train_callbacks import (
+    SaveCallback,
+    ValidationCallback,
+    VisCallback,
+)
 from crossformer.utils.train_utils import (
     check_config_diff,
     create_optimizer,
@@ -35,7 +39,8 @@ from crossformer.utils.train_utils import (
     Timer,
     TrainState,
 )
-from crossformer.viz.utils import SequenceViz
+
+# from crossformer.viz.utils import SequenceViz
 import wandb
 
 try:
@@ -387,12 +392,15 @@ def main(_):
         new_state = state.apply_gradients(grads=grads, rng=rng)
         return new_state, info
 
-    @partial(
-        jax.jit,
-        out_shardings=jax.sharding.PositionalSharding(jax.devices()).replicate(),
-    )
-    def _val_fn(params, batch, rng):
-        train = False
+    # @partial(
+    # jax.jit,
+    # in_shardings=[replicated_sharding, dp_sharding],
+    # )
+    def val_fn(params, batch, rng, train=False):
+        #
+        # TODO fix to become part of loss_fn
+        # if not train then get mano deltas else none
+        #
 
         # loss calculations
         bound_module = model.module.bind({"params": params}, rngs={"dropout": rng})
@@ -428,33 +436,7 @@ def main(_):
             train=train,
             rng=rng,
         )
-        action_metrics["deltas"] = deltas
-
-        return action_loss, action_metrics
-
-    def val_fn(params, batch, rng, train=False):
-        """
-        calls a child val function to do any operations with the model.
-        the visualization cannot be jitted (courtesy of wandb)
-        viz is not returned since ValidationCallback gets the mean of the metrics
-        """
-        action_loss, action_metrics = _val_fn(params, batch, rng)
-
-        deltas = action_metrics.pop("deltas")
-        batch["predict"] = deltas  # plot with model deltas as actions
-        batch = jax.tree.map(lambda x: jnp.asarray(x), batch)
-
-        use_mano = any(
-            [
-                x["name"] in HEAD_TO_DATASET["mano"]
-                for x in FLAGS.config.dataset_kwargs["dataset_kwargs_list"]
-            ]
-        )
-
-        use_mano = False
-        if use_mano:
-            s = SequenceViz.from_batch(batch, stats=dataset.dataset_statistics).wandb()
-
+        action_metrics["vis"] = {"deltas": deltas}
         return action_loss, action_metrics
 
     #########
@@ -463,42 +445,20 @@ def main(_):
     #
     #########
 
-    if original:
-        if FLAGS.config.modality == "image_conditioned":
-            modes_to_evaluate = ["image_conditioned"]
-        elif FLAGS.config.modality == "text_conditioned":
-            modes_to_evaluate = ["text_conditioned"]
-        elif FLAGS.config.modality == "multimodal":
-            modes_to_evaluate = ["image_conditioned", "text_conditioned"]
-        else:
-            modes_to_evaluate = ["base"]
-
-        dataset_kwargs_list = [FLAGS.config.dataset_kwargs]
-
-        val_callback = ValidationCallback(
-            loss_fn=val_fn,  #  loss_fn,
-            process_batch_fn=process_batch,
-            text_processor=text_processor,
-            val_dataset_kwargs_list=dataset_kwargs_list,
-            dataset_kwargs=FLAGS.config,
-            modes_to_evaluate=modes_to_evaluate,
-            **FLAGS.config.val_kwargs,
-        )
-
-    else:
-        val_datasets_kwargs_list, _ = filter_eval_datasets(
-            FLAGS.config.dataset_kwargs["dataset_kwargs_list"],
-            FLAGS.config.dataset_kwargs["sample_weights"],
-            FLAGS.config.get("eval_datasets", ()),
-        )
-        val_callback = ValidationCallback(
-            loss_fn=val_fn,  # loss_fn,
-            process_batch_fn=lambda batch: shard(process_batch(batch)),
-            text_processor=text_processor,
-            val_dataset_kwargs_list=val_datasets_kwargs_list,
-            dataset_kwargs=FLAGS.config.dataset_kwargs,
-            **FLAGS.config.val_kwargs.to_dict(),
-        )
+    val_datasets_kwargs_list, _ = filter_eval_datasets(
+        FLAGS.config.dataset_kwargs["dataset_kwargs_list"],
+        FLAGS.config.dataset_kwargs["sample_weights"],
+        FLAGS.config.get("eval_datasets", ()),
+    )
+    val_callback = VisCallback(
+        loss_fn=val_fn,  # loss_fn,
+        process_batch_fn=lambda batch: shard(process_batch(batch)),
+        text_processor=text_processor,
+        val_dataset_kwargs_list=val_datasets_kwargs_list,
+        dataset_kwargs=FLAGS.config.dataset_kwargs,
+        stats = dataset.dataset_statistics,
+        **FLAGS.config.val_kwargs.to_dict(),
+    )
 
     ########
     #
@@ -650,7 +610,6 @@ def main(_):
 
             with timer("val"):
                 val_metrics = val_callback(train_state, i + 1)
-                SequenceViz.flush(i, limit=32)
                 wandb_log(val_metrics, step=i)
 
             if use_rollout:
