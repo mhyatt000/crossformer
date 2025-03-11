@@ -326,7 +326,6 @@ class CrossFormerModel:
         checkpoint_path, orbax.checkpoint.PyTreeCheckpointer()
         step = step if step is not None else checkpointer.latest_step()
 
-        """
         import os
         import orbax.checkpoint as ocp
         if True:
@@ -348,8 +347,7 @@ class CrossFormerModel:
             )
 
         else:
-        """
-        params = checkpointer.restore(step, params_shape)
+            params = checkpointer.restore(step, params_shape)
         """
 
         # use new orbax API for flexible restore
@@ -358,7 +356,7 @@ class CrossFormerModel:
 
         target = jax.tree_util.tree_map(jnp.zeros_like, params_shape)
         sharding = jax.sharding.NamedSharding(
-            jax.sharding.Mesh(jax.devices(), ('model',)),
+            jax.sharding.Mesh(jax.devices(), ("model",)),
             jax.sharding.PartitionSpec(
                 None,
             ),
@@ -366,7 +364,7 @@ class CrossFormerModel:
         doshard = lambda x: jax.device_put(x, sharding)
         spec = lambda x: (x.shape, x.dtype)
         target = jax.tree.map(doshard, target)
-        abstract = jax.tree.map( ocp.utils.to_shape_dtype_struct, target)
+        abstract = jax.tree.map(ocp.utils.to_shape_dtype_struct, target)
 
         manager = ocp.CheckpointManager(checkpoint_path, ocp.StandardCheckpointer())
         # structure = manager.item_metadata(step)
@@ -383,7 +381,6 @@ class CrossFormerModel:
             step = step if step is not None else checkpointer.latest_step()
             params = checkpointer.restore(step, params_shape)
         """
-
 
         if config["text_processor"] is not None:
             text_processor = ModuleSpec.instantiate(config["text_processor"])()
