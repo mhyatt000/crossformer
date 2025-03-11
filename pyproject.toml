@@ -1,3 +1,43 @@
+[project]
+name = "crossformer"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "absl-py>=0.12.0",
+    "chex>=0.1.85",
+    "distrax==0.1.5",
+    # "dlimp @ git+https://github.com/kvablack/dlimp.git@main",  # @branch
+    "einops>=0.6.1",
+    "flax>=0.7.5",
+    "gym>=0.26",
+    "imageio>=2.31.1",
+    "jax[cuda12]>=0.4.34",
+    "jaxlib",
+    "ml_collections>=0.1.0",
+    "ml_dtypes>=0.2.0",
+    "moviepy>=1.0.3",
+    "matplotlib",
+    "numpy==1.26",
+    "optax>=0.1.5",
+    "orbax>=0.1.9",
+    "orbax-checkpoint>=0.9.1",
+    "plotly>=5.16.1",
+    "pre-commit==3.3.3", # what is this
+    "scipy==1.12.0",
+    "tensorstore>=0.1.60",
+    "tqdm",
+    "transformers==4.43.1",
+    "tensorflow>=2.15.0,<2.18.0",
+    "tensorflow_datasets==4.9.2",
+    "tensorflow_graphics==2021.12.3",
+    "tensorflow_hub>=0.14.0",
+    "tensorflow_probability==0.23.0",
+    "tensorflow_text>=2.13.0",
+    "wandb>=0.12.14",
+]
+
 [tool.black]
 # https://github.com/psf/black
 line-length = 88
