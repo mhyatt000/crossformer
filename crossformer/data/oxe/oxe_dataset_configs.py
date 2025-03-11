@@ -53,6 +53,7 @@ class ActionDim(IntEnum):
 
     # OTHER
     NAV_2D = 2
+    JOINT_POS = 8
     JOINT_POS_BIMANUAL_NAV = 14
     QUADRUPED = 12
 
@@ -74,7 +75,7 @@ class ProprioDim(IntEnum):
 
     POS_EULER = 7
     POS_QUAT = 8
-    JOINT = 7
+    JOINT = 8
     BIMANUAL = 14
     POS_NAV = 3
     QUADRUPED = 46
@@ -114,7 +115,7 @@ xgym = {
         "quadruped": ProprioDim.QUADRUPED,
     },
     "proprio_encoding": ProprioEncoding.POS_EULER,  # roll-pitch-yaw + gripper open/close
-    "action_encoding": ActionEncoding.EEF_POS,
+    "action_encoding": ActionEncoding.JOINT_POS, # EEF_POS,
 }
 
 #

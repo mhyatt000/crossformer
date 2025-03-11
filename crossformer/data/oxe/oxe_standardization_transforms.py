@@ -169,8 +169,19 @@ def xgym_single_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     obs = trajectory.pop("observation")
     images = obs.pop("image")
 
-    proprio = obs.pop("proprio")["position"]
-    trajectory["observation"] = {**images, "proprio": proprio}
+    proprio = obs.pop("proprio")
+    position = proprio["position"]
+    joints = proprio["joints"]
+
+    trajectory["observation"] = {**images, "proprio": position}
+    trajectory["action"] = tf.concat(
+        [
+            trajectory["action"]["joints"],
+            trajectory["action"]["gripper"],
+        ],
+        axis=-1,
+    )
+
     return trajectory
 
 
