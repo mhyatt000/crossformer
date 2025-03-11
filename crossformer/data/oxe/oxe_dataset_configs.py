@@ -66,6 +66,7 @@ class ActionDim(IntEnum):
     DMANO_6 = 6  # xyz&rot
     DMANO_7 = 7  # xyz&rot grip
     # DMANO_18 = 18  # 3 palm & 15 finger params
+    DMANO_35 = 35  # xyz,rot, 6*3 major knuckles and thumb , 11*1 other knuckles
     DMANO_51 = 51  # 3 palm & 48 pose params
     DMANO_52 = 52  #
     # DMANO_XYZ = 63
@@ -86,10 +87,41 @@ class ProprioDim(IntEnum):
     DMANO_51 = ActionDim.DMANO_51 + 1
     DMANO_52 = ActionDim.DMANO_52 + 1
 
-    MANO = DMANO_7 # current setting
+    MANO = DMANO_7  # current setting
+
 
 # clean up data spec
 proprio = {}
+
+
+class PreDict:
+    # _TEMPLATE = {}
+
+    def __init__(self, keys):
+        """Generate a predefined dictionary with optional overrides."""
+
+        # self._TEMPLATE.copy()
+        self.TEMPLATE = {k: None for k in keys}
+
+    def __call__(self, **kwargs):
+        """Makes the class callable, delegating to the `generate` method."""
+        return self.generate(**kwargs)
+
+    def generate(self, **kwargs):
+        """Generate a dictionary with optional overrides."""
+
+        out = self.TEMPLATE.copy()
+        for key, value in kwargs.items():
+            if key in out:
+                out[key] = value
+            else:
+                raise KeyError(f"'{key}' is not a valid key in the template.")
+        return out
+
+
+IMOBS = PreDict(["primary", "high", "side", "nav", "left_wrist", "right_wrist"])
+DIMOBS = PreDict(["primary", "secondary", "wrist"])
+POBS = PreDict(["single", "mano", "bimanual", "quadruped"])
 
 xgym = {
     "image_obs_keys": {
@@ -100,14 +132,9 @@ xgym = {
         "left_wrist": "wrist",
         "right_wrist": None,
     },
-    "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+    "depth_obs_keys": DIMOBS(),
     "state_obs_keys": [],
-    "proprio_obs_keys": {
-        "single": "proprio",
-        "mano": None,
-        "bimanual": None,
-        "quadruped": None,
-    },
+    "proprio_obs_keys": POBS(single="proprio"),
     "proprio_obs_dims": {
         "mano": ProprioDim.MANO,
         "single": ProprioDim.POS_EULER,
@@ -123,15 +150,8 @@ xgym = {
 # it is a very complicated setup
 
 mano = {
-    "image_obs_keys": {
-        "primary": "image",
-        "high": None,
-        "side": None,
-        "nav": None,
-        "left_wrist": None,
-        "right_wrist": None,
-    },
-    "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+    "image_obs_keys": IMOBS(primary="image"),
+    "depth_obs_keys": DIMOBS(),
     "state_obs_keys": [
         "cam_intr",
         "mano_pose",
@@ -139,13 +159,8 @@ mano = {
         "joints_3d",
         "joints_vis",
     ],
-    "proprio_obs_keys": {
-        "single": None,
-        "mano": 'proprio',
-        "bimanual": None,
-        "quadruped": None,
-    },
-    # what is significant about this? 
+    "proprio_obs_keys": POBS(mano="proprio"),
+    # what is significant about this?
     # re: i think its needed for datasets where there is no proprio so they can fill zeros
     "proprio_obs_dims": {
         "mano": ProprioDim.MANO,
@@ -174,14 +189,8 @@ OXE_DATASET_CONFIGS = {
     #
     #
     "fractal20220817_data": {
-        "image_obs_keys": {
-            "primary": "image",
-            "high": None,
-            "nav": None,
-            "left_wrist": None,
-            "right_wrist": None,
-        },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "image_obs_keys": IMOBS(primary="image"),
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
         "proprio_obs_dims": {
             "bimanual": ProprioDim.BIMANUAL,
@@ -198,7 +207,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": None,
             "right_wrist": None,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
         "proprio_obs_dims": {
             "bimanual": ProprioDim.BIMANUAL,
@@ -217,7 +226,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": None,
             "right_wrist": None,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"mano": None, "bimanual": None, "quadruped": None},
         "proprio_obs_dims": {
             "mano": ProprioDim.MANO,
@@ -265,7 +274,7 @@ OXE_DATASET_CONFIGS = {
             "bimanual": ProprioDim.BIMANUAL,
             "quadruped": ProprioDim.QUADRUPED,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -284,7 +293,7 @@ OXE_DATASET_CONFIGS = {
             "bimanual": ProprioDim.BIMANUAL,
             "quadruped": ProprioDim.QUADRUPED,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -303,7 +312,7 @@ OXE_DATASET_CONFIGS = {
             "bimanual": ProprioDim.BIMANUAL,
             "quadruped": ProprioDim.QUADRUPED,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -315,7 +324,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": None,
             "right_wrist": None,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
         "proprio_obs_dims": {
             "bimanual": ProprioDim.BIMANUAL,
@@ -332,7 +341,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": "image",
             "right_wrist": "image",
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
         "proprio_obs_dims": {
             "bimanual": ProprioDim.BIMANUAL,
@@ -356,7 +365,7 @@ OXE_DATASET_CONFIGS = {
             "bimanual": ProprioDim.BIMANUAL,
             "quadruped": ProprioDim.QUADRUPED,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -375,7 +384,7 @@ OXE_DATASET_CONFIGS = {
             "bimanual": ProprioDim.BIMANUAL,
             "quadruped": ProprioDim.QUADRUPED,
         },
-        "depth_obs_keys": {"primary": "depth", "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_QUAT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -392,7 +401,7 @@ OXE_DATASET_CONFIGS = {
             "bimanual": ProprioDim.BIMANUAL,
             "quadruped": ProprioDim.QUADRUPED,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -409,7 +418,7 @@ OXE_DATASET_CONFIGS = {
             "bimanual": ProprioDim.BIMANUAL,
             "quadruped": ProprioDim.QUADRUPED,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -419,7 +428,7 @@ OXE_DATASET_CONFIGS = {
             "secondary": None,
             "wrist": "wrist_image",
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -439,7 +448,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": None,
             "right_wrist": None,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"mano": None, "bimanual": None, "quadruped": None},
         "proprio_obs_dims": {
             "mano": ProprioDim.MANO,
@@ -464,7 +473,7 @@ OXE_DATASET_CONFIGS = {
             "bimanual": ProprioDim.BIMANUAL,
             "quadruped": ProprioDim.QUADRUPED,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -483,7 +492,7 @@ OXE_DATASET_CONFIGS = {
             "bimanual": ProprioDim.BIMANUAL,
             "quadruped": ProprioDim.QUADRUPED,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -537,7 +546,7 @@ OXE_DATASET_CONFIGS = {
             "bimanual": ProprioDim.BIMANUAL,
             "quadruped": ProprioDim.QUADRUPED,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_QUAT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -547,7 +556,7 @@ OXE_DATASET_CONFIGS = {
             "secondary": None,
             "wrist": None,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.NONE,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -559,7 +568,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": None,
             "right_wrist": None,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"mano": None, "bimanual": None, "quadruped": None},
         "proprio_obs_dims": {
             "mano": ProprioDim.MANO,
@@ -577,7 +586,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": None,
             "right_wrist": None,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"mano": None, "bimanual": None, "quadruped": None},
         "proprio_obs_dims": {
             "mano": ProprioDim.MANO,
@@ -602,7 +611,7 @@ OXE_DATASET_CONFIGS = {
             "bimanual": ProprioDim.BIMANUAL,
             "quadruped": ProprioDim.QUADRUPED,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_QUAT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -621,7 +630,7 @@ OXE_DATASET_CONFIGS = {
             "bimanual": ProprioDim.BIMANUAL,
             "quadruped": ProprioDim.QUADRUPED,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_QUAT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -638,19 +647,19 @@ OXE_DATASET_CONFIGS = {
             "bimanual": ProprioDim.BIMANUAL,
             "quadruped": ProprioDim.QUADRUPED,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
     "utokyo_pr2_opening_fridge_converted_externally_to_rlds": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
     "utokyo_pr2_tabletop_manipulation_converted_externally_to_rlds": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -662,7 +671,7 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
             "nav": None,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -676,13 +685,13 @@ OXE_DATASET_CONFIGS = {
             "right_wrist": None,
             "wrist": None,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
     "robo_net": {
         "image_obs_keys": {"primary": "image", "secondary": "image1", "wrist": None},
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -695,7 +704,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": "hand_image",
             "right_wrist": None,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"mano": None, "bimanual": None, "quadruped": None},
         "proprio_obs_dims": {
             "mano": ProprioDim.MANO,
@@ -707,37 +716,37 @@ OXE_DATASET_CONFIGS = {
     },
     "berkeley_rpt_converted_externally_to_rlds": {
         "image_obs_keys": {"primary": None, "secondary": None, "wrist": "hand_image"},
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.JOINT_POS,
     },
     "kaist_nonprehensile_converted_externally_to_rlds": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_QUAT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
     "stanford_mask_vit_converted_externally_to_rlds": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
     "tokyo_u_lsmo_converted_externally_to_rlds": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
     "dlr_sara_pour_converted_externally_to_rlds": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
     "dlr_sara_grid_clamp_converted_externally_to_rlds": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -754,13 +763,13 @@ OXE_DATASET_CONFIGS = {
             "bimanual": ProprioDim.BIMANUAL,
             "quadruped": ProprioDim.QUADRUPED,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
     "asu_table_top_converted_externally_to_rlds": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -776,7 +785,7 @@ OXE_DATASET_CONFIGS = {
             "secondary": None,
             "wrist": "wrist_image",
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.NONE,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -795,7 +804,7 @@ OXE_DATASET_CONFIGS = {
             "bimanual": ProprioDim.BIMANUAL,
             "quadruped": ProprioDim.QUADRUPED,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -820,7 +829,7 @@ OXE_DATASET_CONFIGS = {
             "bimanual": ProprioDim.BIMANUAL,
             "quadruped": ProprioDim.QUADRUPED,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -839,7 +848,7 @@ OXE_DATASET_CONFIGS = {
             "bimanual": ProprioDim.BIMANUAL,
             "quadruped": ProprioDim.QUADRUPED,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -849,13 +858,13 @@ OXE_DATASET_CONFIGS = {
             "secondary": None,
             "wrist": "finger_vision_1",
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
     "cmu_play_fusion": {
         "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -872,7 +881,7 @@ OXE_DATASET_CONFIGS = {
             "bimanual": ProprioDim.BIMANUAL,
             "quadruped": ProprioDim.QUADRUPED,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -884,7 +893,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": None,
             "right_wrist": None,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
         "proprio_obs_dims": {
             "bimanual": ProprioDim.BIMANUAL,
@@ -903,7 +912,7 @@ OXE_DATASET_CONFIGS = {
             "secondary": "cam_low",
             "wrist": "cam_right_wrist",
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
         "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
     },
@@ -913,7 +922,7 @@ OXE_DATASET_CONFIGS = {
             "secondary": None,
             "wrist": "cam_right_wrist",
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
         "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL_NAV,
     },
@@ -933,7 +942,7 @@ OXE_DATASET_CONFIGS = {
     },
     "dobbe": {
         "image_obs_keys": {"primary": None, "secondary": None, "wrist": "wrist_image"},
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -943,7 +952,7 @@ OXE_DATASET_CONFIGS = {
             "secondary": "image_right",
             "wrist": "image_wrist",
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.JOINT,
         "action_encoding": ActionEncoding.JOINT_POS,
     },
@@ -953,7 +962,7 @@ OXE_DATASET_CONFIGS = {
             "secondary": "image_side_right",
             "wrist": "image_wrist",
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -963,7 +972,7 @@ OXE_DATASET_CONFIGS = {
             "secondary": None,
             "wrist": None,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_encoding": ProprioEncoding.POS_EULER,
         "action_encoding": ActionEncoding.EEF_POS,
     },
@@ -975,7 +984,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": None,
             "right_wrist": None,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"bimanual": None, "quadruped": "proprio"},
         "proprio_obs_dims": {
             "bimanual": ProprioDim.BIMANUAL,
@@ -995,7 +1004,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": None,
             "right_wrist": None,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"bimanual": None, "quadruped": "proprio"},
         "proprio_obs_dims": {
             "bimanual": ProprioDim.BIMANUAL,
@@ -1015,7 +1024,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": None,
             "right_wrist": None,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"bimanual": None, "quadruped": "proprio"},
         "proprio_obs_dims": {
             "bimanual": ProprioDim.BIMANUAL,
@@ -1036,7 +1045,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": "cam_left_wrist",
             "right_wrist": "cam_right_wrist",
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
         "proprio_obs_dims": {
             "bimanual": ProprioDim.BIMANUAL,
@@ -1053,7 +1062,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": "cam_left_wrist",
             "right_wrist": "cam_right_wrist",
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
         "proprio_obs_dims": {
             "bimanual": ProprioDim.BIMANUAL,
@@ -1070,7 +1079,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": "cam_left_wrist",
             "right_wrist": "cam_right_wrist",
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
         "proprio_obs_dims": {
             "bimanual": ProprioDim.BIMANUAL,
@@ -1087,7 +1096,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": "cam_left_wrist",
             "right_wrist": "cam_right_wrist",
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
         "proprio_obs_dims": {
             "bimanual": ProprioDim.BIMANUAL,
@@ -1104,7 +1113,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": "cam_left_wrist",
             "right_wrist": "cam_right_wrist",
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
         "proprio_obs_dims": {
             "bimanual": ProprioDim.BIMANUAL,
@@ -1121,7 +1130,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": "cam_left_wrist",
             "right_wrist": "cam_right_wrist",
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
         "proprio_obs_dims": {
             "bimanual": ProprioDim.BIMANUAL,
@@ -1138,7 +1147,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": "cam_left_wrist",
             "right_wrist": "cam_right_wrist",
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
         "proprio_obs_dims": {
             "bimanual": ProprioDim.BIMANUAL,
@@ -1155,7 +1164,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": "cam_left_wrist",
             "right_wrist": "cam_right_wrist",
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
         "proprio_obs_dims": {
             "bimanual": ProprioDim.BIMANUAL,
@@ -1174,7 +1183,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": None,
             "right_wrist": None,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
         "proprio_obs_dims": {
             "bimanual": ProprioDim.BIMANUAL,
@@ -1196,7 +1205,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": None,
             "right_wrist": None,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
         "proprio_obs_dims": {
             "bimanual": ProprioDim.BIMANUAL,
@@ -1215,7 +1224,7 @@ OXE_DATASET_CONFIGS = {
             "left_wrist": None,
             "right_wrist": None,
         },
-        "depth_obs_keys": {"primary": None, "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
         "proprio_obs_keys": {"bimanual": None, "quadruped": None},
         "proprio_obs_dims": {
             "bimanual": ProprioDim.BIMANUAL,

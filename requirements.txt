@@ -30,3 +30,6 @@ plotly >= 5.16.1
 
 matplotlib
 rail_tpu_utils
+uvicorn
+json_numpy
+fastapi
