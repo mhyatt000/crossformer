@@ -141,7 +141,7 @@ def main(_):
     #
     #########
 
-    if not FLAGS.config.debug:
+    if FLAGS.config.pretrained_path is not None:
         pretrained_model = CrossFormerModel.load_pretrained(
             FLAGS.config.pretrained_path,
             step=FLAGS.config.pretrained_step,
@@ -266,9 +266,11 @@ def main(_):
         dataset_statistics=dataset.dataset_statistics,
         verbose=True,
     )
-    merged_params = merge_params(model.params, pretrained_model.params)
-    model = model.replace(params=merged_params)
-    del pretrained_model
+
+    if FLAGS.config.pretrained_path is not None:
+        merged_params = merge_params(model.params, pretrained_model.params)
+        model = model.replace(params=merged_params)
+        del pretrained_model
 
     #########
     #
