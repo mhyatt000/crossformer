@@ -225,7 +225,8 @@ def main():
     parser.add_argument("--port", help="Port to run on", default=8001, type=int)
     args = parser.parse_args()
 
-    root = osp.expanduser("~/data/bafl")
+    root = osp.expanduser("~/bafl")
+
     # name, path, step
     paths = [
         # ("crossformer", "hf://rail-berkeley/crossformer", None),
@@ -244,7 +245,10 @@ def main():
         # ("bafl", osp.join(root, "experiment_20241101_152254"), 40_000),  # dijkstra
         # resync cameras
         # ("bafl", osp.join(root, "experiment_20241105_133026"), 50_000),  # dijkstra
-        ("bafl", osp.join(root, "experiment_20241105_182134"), 50_000),  # multi view with proprio
+        # ("bafl", osp.join(root, "experiment_20241105_182134"), 50_000),  # multi view with proprio
+        ("bafl", osp.join(root, "experiment_20241112_202015"), 10_000),
+
+
     ]
 
     server = HttpServer(paths)

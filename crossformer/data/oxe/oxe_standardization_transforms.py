@@ -12,9 +12,13 @@ step = {
 }
 """
 
+import itertools
+import random
 from typing import Any, Dict
 
 import jax
+from jax.scipy.spatial.transform import Rotation
+import numpy as np
 import tensorflow as tf
 
 from crossformer.data.utils.data_utils import (
@@ -34,85 +38,150 @@ METRIC_WAYPOINT_SPACING = {
     "tartan_drive": 0.72,
 }
 
-"""
-from bafl.data.transform import SimpleTransform3DMANO
-import torch
-from torch.utils.data import default_collate
-
-
-    class OakInkTransform(SimpleTransform3DMANO):
-
-    center_idx = 9
-    basis_param = {
-        "scale_jit_factor": 0.125,
-        "color_jit_factor": 0.3,  # 0.3
-        "rot_jit_factor": 30,
-        "rot_prob": 0.5,
-        "occlusion": True,
-        "occlusion_prob": 0.1,
-        "output_size": (224, 224),
-        "train": True,
-        "aug": True,
-    }
-
-    def __init__(self):
-        super().__init__(
-            center_idx=OakInkTransform.center_idx, **OakInkTransform.basis_param
-        )
-
-    def __call__(self, image, label, generator):
-        return super().__call__(image, label, generator)
-
-
-OI = OakInkTransform()
-
-
-import numpy as np
-"""
-
-
-from jax.scipy.spatial.transform import Rotation
-import numpy as np
-
-
-import random
 
 def xgym_mano_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    TODO make this dynamic depending on which MANO inference strategy we select
+    """
 
     obs = trajectory.pop("observation")
-    trajectory["observation"] = {'image':obs.pop("frame")}
+
+    # frame is used for v1
 
     # obs.pop("proprio")
 
     # DMANO_PALM = 6
-    j = obs["keypoints_3d"][:, 0]  # palm
-    # rot = Rotation.from_matrix(obs["mano"]["global_orient"][:, 0])  # w,1,3,3
-    # rot = rot.as_euler("xyz", degrees=False)
+    kp = obs["keypoints_3d"]
+    j = kp[:, 0]  # palm
+
+    def grippiness(fingers):
+        """grippiness is estimated as the mean dist 3d of all the fingers"""
+
+        fingers = np.array(fingers)
+        print(type(fingers))
+        combos = itertools.product(fingers, fingers)
+        dist = np.mean([np.linalg.norm(kp[a] - kp[b]) for a, b in combos])
+        return dist
+
+    def pairwise_combinations(fingers):
+        """
+        Computes pairwise 3D distances for a 5x3 array (fingers) using NumPy broadcasting.
+        """
+
+        fingers = np.array(fingers)
+        # Use broadcasting to compute pairwise differences
+        diff = fingers[:, np.newaxis, :] - fingers[np.newaxis, :, :]  # Shape: (5, 5, 3)
+
+        # Compute the Euclidean distances
+        distances = np.linalg.norm(diff, axis=2)  # Shape: (5, 5)
+
+        # Get the upper triangle of the distance matrix (excluding diagonal)
+        triu_indices = np.triu_indices(fingers.shape[0], k=1)
+        pairwise_distances = distances[triu_indices]
+
+        return pairwise_distances
+
+    def pairwise_combinations(fingers):
+        """
+        Computes pairwise 3D distances for a TensorFlow tensor (fingers) using broadcasting.
+        Compatible with symbolic execution.
+        """
+        # Expand dimensions to compute pairwise differences
+        diff = tf.expand_dims(fingers, axis=1) - tf.expand_dims(
+            fingers, axis=0
+        )  # Shape: (N, N, 3)
+
+        # Compute the Euclidean distances
+        distances = tf.norm(diff, axis=2)  # Shape: (N, N)
+
+        # Extract the upper triangle indices (excluding the diagonal)
+        num_fingers = tf.shape(fingers)[0]
+        row_indices, col_indices = tf.linalg.band_part(
+            tf.ones((num_fingers, num_fingers)), 0, -1
+        ) - tf.eye(num_fingers)
+        upper_triangle_mask = tf.where(row_indices > 0)
+
+        # Gather upper triangle distances
+        pairwise_distances = tf.gather_nd(distances, upper_triangle_mask)
+
+        return pairwise_distances
+
+    def pairwise_combinations(fingers):
+        """
+        Computes pairwise 3D distances for a TensorFlow tensor (fingers) using broadcasting.
+        Compatible with symbolic execution.
+        """
+        # Expand dimensions to compute pairwise differences
+        diff = tf.expand_dims(fingers, axis=1) - tf.expand_dims(
+            fingers, axis=0
+        )  # Shape: (N, N, 3)
+
+        # Compute the Euclidean distances
+        distances = tf.norm(diff, axis=2)  # Shape: (N, N)
+
+        # Create a mask for the upper triangle (excluding the diagonal)
+        num_fingers = tf.shape(fingers)[0]
+        row_indices, col_indices = tf.meshgrid(
+            tf.range(num_fingers), tf.range(num_fingers), indexing="ij"
+        )
+        upper_triangle_mask = tf.cast(row_indices < col_indices, tf.bool)
+
+        # Apply the mask to get the upper triangle distances
+        pairwise_distances = tf.boolean_mask(distances, upper_triangle_mask)
+        return tf.reduce_mean(pairwise_distances)
 
     def mat2euler(mat):
         """helper to avoid np problems with tf symbolic/eager tensors"""
         rot = Rotation.from_matrix(mat)
         return rot.as_euler("xyz", degrees=False)
 
-    rot = obs["mano"]["global_orient"][:, 0]
+    rot = obs["mano.global_orient"][:, 0]
     rot = tf.numpy_function(mat2euler, [rot], tf.float32)
 
-    state = tf.concat([j, rot], axis=-1)  # w,6
+    loc = np.array([4, 8, 12, 20]).astype(np.uint8)
+
+    # j = [j[:, x] for x in [0, 4, 8, 12, 16, 20]]
+    fingers = tf.gather(kp, indices=[4, 8, 12, 16, 20], axis=1)
+    grip = tf.map_fn(pairwise_combinations, fingers, fn_output_signature=tf.float32)
+    grip = tf.expand_dims(grip, axis=-1)  # shape b => b,1
+
+    state = tf.concat([j, rot, grip], axis=-1)  # w,7
+    # state = tf.concat([j, rot], axis=-1)  # w,7
+
     deltas = state[1:] - state[:-1]
     deltas = tf.concat([deltas, tf.zeros_like(state[-1:])], axis=0)
     actions = deltas
-    trajectory["action"] = actions
 
+    focal = obs["scaled_focal_length"]
+    focal = tf.expand_dims(focal, axis=-1)  # shape b => b,1
+    proprio = tf.concat([state, focal], axis=-1)
+
+    trajectory["action"] = actions
+    trajectory["observation"] = {
+        "image": obs.pop("img"),
+        "proprio": proprio,
+    }
     return trajectory
 
 
 def xgym_single_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 
     obs = trajectory.pop("observation")
-    images = obs.pop("image") 
+    images = obs.pop("image")
 
-    proprio = obs.pop("proprio")['position']
-    trajectory["observation"] = {**images, 'proprio':proprio}
+    proprio = obs.pop("proprio")
+    position = proprio["position"]
+    joints = proprio["joints"]
+
+    trajectory["observation"] = {**images, "proprio": position}
+    trajectory["action"] = tf.concat(
+        [
+            trajectory["action"]["joints"],
+            trajectory["action"]["gripper"],
+        ],
+        axis=-1,
+    )
+
     return trajectory
 
 
@@ -1224,13 +1293,13 @@ def droid_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 
 OXE_STANDARDIZATION_TRANSFORMS = {
     "xgym_lift_mano": xgym_mano_dataset_transform,
+    "xgym_stack_mano": xgym_mano_dataset_transform,
+    "xgym_duck_mano": xgym_mano_dataset_transform,
     "xgym_single": xgym_single_dataset_transform,
     "xgym_lift_single": xgym_single_dataset_transform,
     "xgym_duck_single": xgym_single_dataset_transform,
     "xgym_stack_single": xgym_single_dataset_transform,
     "xgym_play_single": xgym_single_dataset_transform,
-    "xgym_lift_single:1.0.1": xgym_single_dataset_transform,
-    "xgym_lift_single:2.0.0": xgym_single_dataset_transform,
     "rlds_oakink": oakink_dataset_transform,
     #
     "bridge_dataset": bridge_dataset_transform,

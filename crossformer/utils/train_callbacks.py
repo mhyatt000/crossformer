@@ -1,5 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
+import json
 import logging
 import os
 from typing import Callable, Mapping, Optional
@@ -12,11 +13,17 @@ import numpy as np
 import orbax.checkpoint
 import tensorflow as tf
 import tqdm
+import xgym
+from xgym.rlds.util import add_col, apply_persp, perspective_projection, remove_col
+from xgym.rlds.util.render import render_openpose
+from xgym.viz.mano import overlay_palm, overlay_pose
 
 from crossformer.data.dataset import make_single_dataset
+from crossformer.data.oxe import HEAD_TO_DATASET
 from crossformer.data.utils.text_processing import TextProcessor
 from crossformer.utils.train_utils import TrainState
 from crossformer.utils.typing import Any, Data, Sequence
+import wandb
 
 
 class Callback:
@@ -172,10 +179,6 @@ class ValidationCallback(Callback):
             val_iterator = map(self.process_batch_fn, val_iterator)
             self.val_iterators[single_dataset_kwargs["name"]] = val_iterator
 
-        # @partial(
-        # jax.jit,
-        # out_shardings=jax.sharding.PositionalSharding(jax.devices()).replicate(),
-        # )
         def eval_step(state: TrainState, batch: Data):
             loss_fn_partial = partial(
                 self.loss_fn,
@@ -218,3 +221,113 @@ class ValidationCallback(Callback):
             metrics = jax.tree_map(lambda *xs: np.mean(xs), *metrics)
             wandb_metrics[f"validation_{name}"] = metrics
         return wandb_metrics
+
+
+@dataclass
+class VisCallback(ValidationCallback):
+
+    stats: dict = field(default_factory=dict)
+
+    def __call__(self, train_state: TrainState, step: int):
+        wandb_metrics = {}
+        for name, val_data_iter in self.val_iterators.items():
+            metrics = []
+            videos = []
+            for _, batch in tqdm.tqdm(
+                zip(range(self.num_val_batches), val_data_iter),
+                total=self.num_val_batches,
+                desc=name,
+            ):
+                metric = self.eval_step(train_state, batch)
+
+                if name in HEAD_TO_DATASET["mano"]:
+                    print(metric.keys())
+                    k = list(metric.keys())[0]
+                    assert (
+                        "vis" in metric[k]
+                    ), "dont use VisCallback if no vis key in metric"
+                    vis = {k: v.pop("vis") for k, v in metric.items()}[k]
+
+                    # NOTE you might want/need to use more of the dataset_kwargs
+                    # to figure out what needs to be plotted
+                    videos += self.plot(batch, vis, name)
+
+                metrics.append(metric)
+            metrics = jax.tree_map(lambda *xs: np.mean(xs), *metrics)
+
+            metrics["video"] = videos[:32]  # avoid mean pooling metrics
+            wandb_metrics[f"validation_{name}"] = metrics
+        return wandb_metrics
+
+    def denormalize(self, thing, name, key="action"):
+        """denormalizes the thing with mean and std where mask is True"""
+        mask = self.stats[name][key]["mask"]
+        mean = self.stats[name][key]["mean"]
+        std = self.stats[name][key]["std"]
+        thing = np.where(mask, (thing * std + mean), thing)
+        return thing
+
+    def plot(self, batch, vis: dict, name):
+        """returns list of wandb Video objects"""
+
+        batch = jax.tree.map(np.array, batch)
+        deltas = np.array(vis["deltas"])
+
+        """ Tried to save... makes slow
+        d = {
+            "batch": batch,
+            "vis": vis,
+            "stats": self.stats,
+        }
+        """
+
+        act = self.denormalize(deltas, name)  # action deltas
+        b, w, h, actdim = act.shape
+
+        useop = actdim > 7  # use openpose or palm... for now assume False
+
+        proprio = batch["observation"]["proprio_mano"]  # doesnt have a horizon dim
+        joints, focal = proprio[..., :7], proprio[..., -1]
+        # joints, focal = proprio[..., : 21 * 3], proprio[..., -1]
+
+        # TODO ndimentional vmap and jit all the np functions
+        videos = []
+        for i in range(b):  # samples of batch
+
+            imgs = []
+            for j in range(w):  # windows of time
+
+                img = batch["observation"]["image_primary"][i, j]
+
+                p3d = joints[i, j, :3]
+                for k in range(-1, h):  # horizons of prediction
+
+                    if k == -1:
+                        grip = joints[i, j, -1]
+                    else:
+                        p3d += act[i, j, k, :3]
+                        grip = act[i, j, k, -1]
+                    print(f"grip: {grip} {grip.shape}")
+
+                    H, W = img.shape[0], img.shape[0]
+                    f = focal[i, j]
+                    P = perspective_projection(f, H, W)
+
+                    # expects b,points,3
+                    p2d = apply_persp(np.array([[p3d]]), P)  # expand to get batch dim 1
+                    palm = p2d[0, 0]
+
+                    x, y = int(palm[0]), int(palm[1])
+                    size = float(p3d[2])  # float(grip)
+                    sigmoid = lambda x: 1 / (1 + np.exp(-x))
+                    size = int(10 * sigmoid(size) ** 0.5) + 2
+                    # xgym.logger.info(f"x,y,s: {(x,y,size)}")
+
+                    img = overlay_palm(img, x=x, y=y, opacity=k, size=size)
+
+                    imgs.append(img)  # debug
+                imgs.append(img)
+            imgs = np.array(imgs).transpose(0, 3, 1, 2)  # colors first T-CWH
+            videos.append(wandb.Video(imgs, fps=10))
+
+        return videos[:32]

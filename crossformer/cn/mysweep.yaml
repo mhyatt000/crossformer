@@ -1,0 +1,22 @@
+# @package _global_
+
+defaults:
+  - run
+# - /launcher: base # slurm is an option ... make sbatch launcher also
+  - _self_
+
+# log_dir: ${callback.log_path} # need resolvers... just use post_init
+# +sweep_id: "jul9_l2bc_octo"
+
+hydra:
+  # run:
+    # dir: ${log_dir}/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    # sweep:
+    # dir: ${log_dir}/runs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+    # subdir: ${hydra.job.override_dirname}
+
+  mode: MULTIRUN # needed or else -m flag
+  sweeper:
+    params:
+      seed: 31,44,55 
+      batch_size: 32,64,256

@@ -1,4 +1,5 @@
 # Written by Dibya
+from perceiver_jax import Perceiver
 import logging
 from typing import Dict, Optional
 
@@ -275,6 +276,32 @@ class CrossFormerTransformer(nn.Module):
                 )
             )
 
+        """
+        ### begin perciever
+        steps = [group.tokens for group in all_timestep_groups]
+        steps = jnp.concatenate(steps, axis=-2)
+        if all_prefix_groups:
+            prefix = [group.tokens for group in all_prefix_groups]
+            prefix = jnp.concatenate(prefix, axis=-2)
+            steps = jnp.concatenate([prefix, steps], axis=-2)
+
+        output = Perceiver(
+            n_fourier_features=6,
+            depth=8,
+            n_latents=64,  # 512 # if input length is much smaller than this, reconsider using this architecture
+            latent_n_heads=8,
+            latent_head_features=64,
+            cross_n_heads=2,
+            cross_head_features=64,  # 128
+            attn_dropout=0.0,
+            ff_mult=1,
+            ff_dropout=0.0,
+            tie_layer_weights=True,
+        )(steps)
+
+        print(output.shape)
+        """
+
         # Run the transformer!
         prefix_outputs, timestep_outputs = BlockTransformer(self.transformer_kwargs)(
             all_prefix_groups,
@@ -282,6 +309,7 @@ class CrossFormerTransformer(nn.Module):
             train=train,
             verbose=verbose,
         )
+
         outputs = {}
         outputs.update(
             {
