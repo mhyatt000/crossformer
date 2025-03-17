@@ -118,7 +118,6 @@ class PreDict:
                 raise KeyError(f"'{key}' is not a valid key in the template.")
         return out
 
-
 IMOBS = PreDict(["primary", "high", "side", "nav", "left_wrist", "right_wrist"])
 DIMOBS = PreDict(["primary", "secondary", "wrist"])
 POBS = PreDict(["single", "mano", "bimanual", "quadruped"])
@@ -142,7 +141,7 @@ xgym = {
         "quadruped": ProprioDim.QUADRUPED,
     },
     "proprio_encoding": ProprioEncoding.POS_EULER,  # roll-pitch-yaw + gripper open/close
-    "action_encoding": ActionEncoding.JOINT_POS, # EEF_POS,
+    "action_encoding": ActionEncoding.JOINT_POS,  # EEF_POS,
 }
 
 #
