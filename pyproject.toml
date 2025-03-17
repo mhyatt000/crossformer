@@ -23,6 +23,7 @@ dependencies = [
     "optax>=0.1.5",
     "orbax>=0.1.9",
     "orbax-checkpoint>=0.9.1",
+    "omegaconf>=2.3.0",
     "plotly>=5.16.1",
     "pre-commit==3.3.3", # what is this
     "scipy==1.12.0",
@@ -36,6 +37,8 @@ dependencies = [
     "tensorflow_probability==0.23.0",
     "tensorflow_text>=2.13.0",
     "wandb>=0.12.14",
+    "tyro>=0.9.1",
+    "opencv-python-headless>=4.11.0.86",
 ]
 
 [tool.black]
@@ -49,3 +52,55 @@ profile = "black"
 line_length = 88
 force_sort_within_sections = "True"
 order_by_type = "False"
+force-single-line = true
+force-sort-within-sections = true
+single-line-exclusions = ["collections.abc", "typing", "typing_extensions"]
+known-third-party = ["wandb"]
+
+[tool.ruff.lint]
+# https://docs.astral.sh/ruff/rules/
+select = [
+    "B",
+    "C4",
+    "DTZ",
+    "E4",
+    "E7",
+    "E9",
+    "F",
+    "FBT",
+    "FURB",
+    "I",
+    "ICN",
+    "ISC",
+    "LOG",
+    "N",
+    "PD",
+    "PERF",
+    "PIE",
+    "PLC",
+    "PLE",
+    "PLR1",
+    "PLR5",
+    "PLW",
+    "PT",
+    "PTH",
+    "Q",
+    "RET",
+    "RUF",
+    "SIM",
+    "SLF",
+    "T10",
+    "T20",
+    "UP",
+    "W",
+]
+ignore = [
+    "F722",   # Conflicts with array typing.
+    "T201",   # We use print statements.
+    "PD008",  # Lots of false positives.
+    "ISC001", # Disabling to support ruff format.
+]
+unfixable = [
+    "B905", # Fix defaults to strict=False, which is not what we want.
+]
+

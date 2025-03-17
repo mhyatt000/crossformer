@@ -1,5 +1,5 @@
 # Written by Dibya
-from perceiver_jax import Perceiver
+# from perceiver_jax import Perceiver
 import logging
 from typing import Dict, Optional
 
