@@ -83,12 +83,16 @@ class ServerCN:
 
     host: str = "0.0.0.0"  # host to run on
     port: int = 8001  # port to run on
+    task: str = ""  # task to perform
 
     def __post_init__(self):
 
         assert self.models, "Please provide a model"
+        assert self.task, "Please provide a task"
         if isinstance(self.models, str):
             self.models = [m.split(":") for m in self.models.split(",")]
+
+
 
 
 class HttpServer:
@@ -99,23 +103,38 @@ class HttpServer:
         for name, path, step in paths:
             self.models[name] = CrossFormerModel.load_pretrained(path, step=step)
         self.head_name = "single_arm"
-        self.dataset_name = "xgym_stack_single"
-        # self.dataset_name = "xgym_duck_single"
         self.action_dim = 7
         self.pred_horizon = 4
         self.exp_weight = 0
         self.horizon = 1  # 5
-        self.text = "pick up the red block"
-        # self.text = "put the ducks in the bowl"
         self.task = None
         self.rng = jax.random.PRNGKey(0)
+
+        self.tasks = {
+            "duck": {
+                "text": "put the ducks in the bowl",
+                "dataset_name": "xgym_duck_single",
+            },
+            "stack": {
+                "text": "stack all the blocks vertically ",
+                "dataset_name": "xgym_stack_single",
+            },
+            "lift": {
+                "text": "pick up the red block",
+                "dataset_name": "xgym_lift_single",
+            },
+            "play": {"text": "pick up any object", "dataset_name": "xgym_play_single"},
+        }
+        self.dataset_name = self.tasks[cfg.task]["dataset_name"]
+        self.text = self.tasks[cfg.task]["text"]
+
 
         self.reset_history()
 
         # trigger compilation
         for name in self.models.keys():
             payload = {
-                "text": "",
+                "text": self.text,
                 "model": name,
             }
             self.reset(payload)
