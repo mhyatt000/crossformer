@@ -164,23 +164,40 @@ def xgym_mano_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     return trajectory
 
 
+from crossformer.cn.dataset.action import XGYM, ActionRep, ActionSpace
+
+
 def xgym_single_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 
     obs = trajectory.pop("observation")
     images = obs.pop("image")
 
+    x = XGYM()
+
+    def getrep() -> dict[str, tf.Tensor]:
+        if x.action_rep == ActionRep.RELATIVE:
+            return trajectory["action"]
+        if x.action_rep == ActionRep.ABSOLUTE:
+            return obs["proprio"]
+        raise ValueError(f"Unknown action representation {x.action_rep}")
+
+    spacekey = None
+    if x.action_encoding == ActionSpace.JOINT:
+        spacekey = "joints"
+    if x.action_encoding == ActionSpace.POS_EULER:
+        spacekey = "position"
+    if spacekey is None:
+        raise ValueError(f"Unknown action encoding {x.action_encoding}")
+
+    base = getrep()[spacekey]
+    gripper = getrep()["gripper"]
+
     proprio = obs.pop("proprio")
     position = proprio["position"]
     joints = proprio["joints"]
-
     trajectory["observation"] = {**images, "proprio": position}
-    trajectory["action"] = tf.concat(
-        [
-            trajectory["action"]["joints"],
-            trajectory["action"]["gripper"],
-        ],
-        axis=-1,
-    )
+
+    trajectory["action"] = tf.concat([base, gripper], axis=-1)
 
     return trajectory
 
@@ -383,7 +400,7 @@ def jaco_play_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def berkeley_cable_routing_dataset_transform(
-    trajectory: Dict[str, Any]
+    trajectory: Dict[str, Any],
 ) -> Dict[str, Any]:
     trajectory["action"] = tf.concat(
         (
@@ -475,7 +492,7 @@ def viola_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def berkeley_autolab_ur5_dataset_transform(
-    trajectory: Dict[str, Any]
+    trajectory: Dict[str, Any],
 ) -> Dict[str, Any]:
     trajectory["observation"]["depth"] = trajectory["observation"].pop(
         "image_with_depth"
@@ -561,7 +578,7 @@ def pusht_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def stanford_kuka_multimodal_dataset_transform(
-    trajectory: Dict[str, Any]
+    trajectory: Dict[str, Any],
 ) -> Dict[str, Any]:
     trajectory["observation"]["depth_image"] = trajectory["observation"]["depth_image"][
         ..., 0
@@ -689,7 +706,7 @@ def furniture_bench_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, A
 
 
 def cmu_franka_exploration_dataset_transform(
-    trajectory: Dict[str, Any]
+    trajectory: Dict[str, Any],
 ) -> Dict[str, Any]:
     trajectory["action"] = trajectory["action"][..., :-1]
     # no proprio provided
@@ -780,7 +797,7 @@ def bc_z_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def tokyo_pr2_opening_fridge_dataset_transform(
-    trajectory: Dict[str, Any]
+    trajectory: Dict[str, Any],
 ) -> Dict[str, Any]:
     trajectory["action"] = trajectory["action"][..., :-1]
     trajectory["observation"]["proprio"] = trajectory["observation"]["state"]
@@ -788,7 +805,7 @@ def tokyo_pr2_opening_fridge_dataset_transform(
 
 
 def tokyo_pr2_tabletop_manipulation_dataset_transform(
-    trajectory: Dict[str, Any]
+    trajectory: Dict[str, Any],
 ) -> Dict[str, Any]:
     trajectory["action"] = trajectory["action"][..., :-1]
     trajectory["observation"]["proprio"] = trajectory["observation"]["state"]
@@ -796,13 +813,13 @@ def tokyo_pr2_tabletop_manipulation_dataset_transform(
 
 
 def utokyo_xarm_pick_place_dataset_transform(
-    trajectory: Dict[str, Any]
+    trajectory: Dict[str, Any],
 ) -> Dict[str, Any]:
     return trajectory
 
 
 def utokyo_xarm_bimanual_dataset_transform(
-    trajectory: Dict[str, Any]
+    trajectory: Dict[str, Any],
 ) -> Dict[str, Any]:
     trajectory["action"] = trajectory["action"][..., -7:]
     trajectory["observation"]["proprio"] = trajectory["observation"][
@@ -881,7 +898,7 @@ def berkeley_rpt_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]
 
 
 def kaist_nonprehensible_dataset_transform(
-    trajectory: Dict[str, Any]
+    trajectory: Dict[str, Any],
 ) -> Dict[str, Any]:
     trajectory["action"] = tf.concat(
         (
@@ -936,7 +953,7 @@ def dlr_sara_grid_clamp_dataset_transform(trajectory: Dict[str, Any]) -> Dict[st
 
 
 def dlr_edan_shared_control_dataset_transform(
-    trajectory: Dict[str, Any]
+    trajectory: Dict[str, Any],
 ) -> Dict[str, Any]:
     # invert gripper action, +1 = open, 0 = close
     trajectory["action"] = tf.concat(
@@ -1050,7 +1067,7 @@ def berkeley_fanuc_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, An
 
 
 def cmu_playing_with_food_dataset_transform(
-    trajectory: Dict[str, Any]
+    trajectory: Dict[str, Any],
 ) -> Dict[str, Any]:
     import tensorflow_graphics.geometry.transformation as tft
 

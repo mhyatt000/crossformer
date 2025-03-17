@@ -1,9 +1,12 @@
+from dataclasses import dataclass
 from enum import Enum
+import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
 
-from crossformer.cn.util import asdataclass, CN, CS, default, store
+from crossformer.cn.base import CN, default
 from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
-from crossformer.log import logger
+
+logger = logging.getLogger(__name__)
 
 
 class GoalRelabel(Enum):
@@ -17,6 +20,7 @@ class GoalRelabel(Enum):
     UNIFORM = "uniform"
 
 
+@dataclass()
 class TrajectoryTransform(CN):
     window_size: int = 1
     action_horizon: int = 10  # max horizon
@@ -27,13 +31,9 @@ class TrajectoryTransform(CN):
     goal_relabling_strategy: GoalRelabel = GoalRelabel.UNIFORM  # TODO define
 
     task_augment_strategy: str = "delete_task_conditioning"
-    task_augment_kwargs: Dict[str, Any] = default(
-        {
-            "keep_image_prob": 0.5,
-            # If the default data loading speed is too slow, try these:
-            # num_parallel_calls=16,  # for less CPU-intensive ops
-        }
-    )
+    # If the default data loading speed is too slow, try these:
+    # -- num_parallel_calls=16,  # for less CPU-intensive ops
+    task_augment_kwargs: Dict[str, Any] = default({"keep_image_prob": 0.5})
 
     subsample_length: int = 100  # subsample length for episode -> trajectory
 

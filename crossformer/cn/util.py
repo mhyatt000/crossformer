@@ -1,11 +1,15 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, Field
+from rich import print as pprint
+
 from enum import Enum
 from functools import partial, wraps
 import inspect
-
+from pathlib import Path
 from typing import (
     Any,
     Callable,
+    Dict,
+    get_args,
     get_origin,
     List,
     Optional,
@@ -15,15 +19,13 @@ from typing import (
     Union,
 )
 
-import hydra
-from hydra.core.config_store import ConfigStore
-from hydra.utils import instantiate
-from omegaconf import DictConfig, MISSING, OmegaConf
-from rich import print as pprint
+# import hydra
+# from hydra.core.config_store import ConfigStore
+# from hydra.utils import instantiate
+# from omegaconf import DictConfig, MISSING, OmegaConf
+# from crossformer.log import logger
 
-from crossformer.log import logger
-
-CS = ConfigStore.instance()
+# CS = ConfigStore.instance()
 dataclass = partial(dataclass, kw_only=True)
 
 
@@ -34,9 +36,6 @@ def default(data, **kwargs):
     https://hydra.cc/docs/tutorials/structured_config/defaults/
     """
     return field(default_factory=lambda: data, **kwargs)
-
-
-from pathlib import Path
 
 
 def get_group(cls):
@@ -60,10 +59,6 @@ def store(cls):
         return cls
 
     return wrapper(cls) if name != "cn" else cls
-
-
-from dataclasses import Field
-from typing import Any, Dict, get_args, get_origin
 
 
 def isCN(typ):
@@ -163,7 +158,6 @@ class CNMeta(type):
                 defaults.append({k: anno})
         defaults += ["_self_"]
 
-
         attr = {k: default(v) for k, v in attr.items()}
         class_dict.update(attr)
 
@@ -220,6 +214,7 @@ def tryex(fn):
 
     return decorator
 
+
 def asdataclass(target: Type[T]):
     """
     Decorator to ensure that a Hydra configuration object is converted to the given type.
@@ -249,5 +244,3 @@ def asdataclass(target: Type[T]):
         return wrapper
 
     return decorator
-
-

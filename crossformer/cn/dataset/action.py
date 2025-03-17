@@ -1,373 +1,229 @@
-"""Dataset kwargs for Open X-Embodiment datasets.
+"""action space"""
 
-Target configuration:
-    image_obs_keys:
-        primary: primary external RGB
-        secondary: secondary external RGB
-        wrist: wrist RGB
-    depth_obs_keys:
-        primary: primary external depth
-        secondary: secondary external depth
-        wrist: wrist depth
-    proprio_encoding: Type of proprio encoding used
-    action_encoding: Type of action encoding used, e.g. EEF position vs joint position control
-"""
+from dataclasses import dataclass
+from enum import Enum
+import logging
+import os
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
 
-from enum import IntEnum
+import tyro
 
-from crossformer.utils.spec import ModuleSpec
+from crossformer.cn.base import CN, default
 
+# from crossformer.utils.spec import ModuleSpec
 
-class ProprioEncoding(IntEnum):
-    """Defines supported proprio encoding schemes for different datasets."""
-
-    NONE = -1  # no proprio provided
-    POS_EULER = 1  # EEF XYZ + roll-pitch-yaw + gripper open/close
-    POS_QUAT = 2  # EEF XYZ + quaternion + gripper open/close
-    JOINT = 3  # joint angles + gripper open/close
-    JOINT_BIMANUAL = 4  # 2 x [6 x joint angles + gripper open/close]
-    POS_NAV = 5  # XY + yaw
-    QUADRUPED = 6
-
-    # single arm
-    MANO = 7  # Hand 3D Pose (21 x 3) + MANO Pose (16 x 3) + cam (3x3) = 120 total
+logger = logging.getLogger(__name__)
+logger.info("Importing crossformer.cn")
 
 
-class ActionEncoding(IntEnum):
-    """Defines supported action encoding schemes for different datasets."""
+class ActionSpace(Enum):
 
-    EEF_POS = 1  # EEF delta XYZ + roll-pitch-yaw + gripper open/close
-    JOINT_POS = 2  # 7 x joint delta position + gripper open/close
-    JOINT_POS_BIMANUAL = 3  # 2 x [6 x joint pos + gripper]
-    NAV_2D = 4  # [delta_x, delta_y] waypoint
-    JOINT_POS_BIMANUAL_NAV = (
-        5  # 2 x [6 x joint pos + gripper] + linear base vel + angular base vel
-    )
-    QUADRUPED = 6
-
-    # single arm
-    MANO = 7  # Hand 3D Pose (21 x 3) + MANO Pose (16 x 3) + cam (3x3) = 120 total
-
-
-class ActionDim(IntEnum):
-
-    # OTHER
-    NAV_2D = 2
-    JOINT_POS = 8
-    JOINT_POS_BIMANUAL_NAV = 14
+    NONE = 0
     QUADRUPED = 12
+    NAV = 2  # 2D
 
-    # MAIN
-    SINGLE = 7
-    BIMANUAL = 14
-    MANO = 120
+    # single action space
+    POS_EULER = 7  # EEF XYZ + roll-pitch-yaw + gripper open/close
+    POS_QUAT = 8  # EEF XYZ + quaternion + gripper open/close
+    JOINT = 8  # joint angles + gripper open/close
 
-    # DEBUG
-    DMANO_6 = 6  # xyz&rot
-    DMANO_7 = 7  # xyz&rot grip
+    # bimanual action space
+    BI_POS_EULER = 14  # 2x(6+1)
+    BI_POS_QUAT = 16  # 2x(7+1)
+    BI_JOINT = 16  # 2x(7+1)
+
+    # human action
+    # TODO make better names
     # DMANO_18 = 18  # 3 palm & 15 finger params
     DMANO_35 = 35  # xyz,rot, 6*3 major knuckles and thumb , 11*1 other knuckles
     DMANO_51 = 51  # 3 palm & 48 pose params
     DMANO_52 = 52  #
-    # DMANO_XYZ = 63
+    MANO = 63  # 21 joints x 3
 
 
-class ProprioDim(IntEnum):
+class ActionRep(Enum):
+    """Action representation: relative or absolute"""
 
-    POS_EULER = 7
-    POS_QUAT = 8
-    JOINT = 8
-    BIMANUAL = 14
-    POS_NAV = 3
-    QUADRUPED = 46
-
-    # +1 to account for focal length which is needed for perspective mat
-    DMANO_6 = ActionDim.DMANO_6 + 1
-    DMANO_7 = ActionDim.DMANO_7 + 1
-    DMANO_51 = ActionDim.DMANO_51 + 1
-    DMANO_52 = ActionDim.DMANO_52 + 1
-
-    MANO = DMANO_7  # current setting
+    RELATIVE = "rel"
+    ABSOLUTE = "abs"
 
 
-# clean up data spec
-proprio = {}
+@dataclass
+class IMOBS(CN):
+    primary: Optional[str] = None
+    high: Optional[str] = None
+    side: Optional[str] = None
+    nav: Optional[str] = None
+    left_wrist: Optional[str] = None
+    right_wrist: Optional[str] = None
 
 
-class PreDict:
-    # _TEMPLATE = {}
+@dataclass
+class DIMOBS(CN):
+    primary: Optional[str] = None
+    secondary: Optional[str] = None
+    wrist: Optional[str] = None
 
-    def __init__(self, keys):
-        """Generate a predefined dictionary with optional overrides."""
 
-        # self._TEMPLATE.copy()
-        self.TEMPLATE = {k: None for k in keys}
+@dataclass
+class POBS(CN):
+    single: Optional[str] = None
+    mano: Optional[str] = None
+    bimanual: Optional[str] = None
+    quadruped: Optional[str] = None
 
-    def __call__(self, **kwargs):
-        """Makes the class callable, delegating to the `generate` method."""
-        return self.generate(**kwargs)
 
-    def generate(self, **kwargs):
-        """Generate a dictionary with optional overrides."""
+class Head(Enum):
+    """Output head / Action Space of the model"""
 
-        out = self.TEMPLATE.copy()
-        for key, value in kwargs.items():
-            if key in out:
-                out[key] = value
-            else:
-                raise KeyError(f"'{key}' is not a valid key in the template.")
-        return out
+    BIMANUAL = "bimanual"
+    QUADRUPED = "quadruped"
+    NAV = "nav"
+    SINGLE = "single"
+    MANO = "mano"
 
-IMOBS = PreDict(["primary", "high", "side", "nav", "left_wrist", "right_wrist"])
-DIMOBS = PreDict(["primary", "secondary", "wrist"])
-POBS = PreDict(["single", "mano", "bimanual", "quadruped"])
+    MULTI = "multi"  # reserved for MultiDataSource
 
-xgym = {
-    "image_obs_keys": {
-        "primary": "worm",
-        "high": "overhead",
-        "side": "side",
-        "nav": None,
-        "left_wrist": "wrist",
-        "right_wrist": None,
-    },
-    "depth_obs_keys": DIMOBS(),
-    "state_obs_keys": [],
-    "proprio_obs_keys": POBS(single="proprio"),
-    "proprio_obs_dims": {
-        "mano": ProprioDim.MANO,
-        "single": ProprioDim.POS_EULER,
-        "bimanual": ProprioDim.BIMANUAL,
-        "quadruped": ProprioDim.QUADRUPED,
-    },
-    "proprio_encoding": ProprioEncoding.POS_EULER,  # roll-pitch-yaw + gripper open/close
-    "action_encoding": ActionEncoding.JOINT_POS,  # EEF_POS,
+
+head2space = {
+    Head.BIMANUAL: ActionSpace.BI_POS_EULER,
+    Head.QUADRUPED: ActionSpace.QUADRUPED,
+    Head.NAV: ActionSpace.NAV,
+    Head.SINGLE: ActionSpace.POS_EULER,
+    Head.MANO: ActionSpace.MANO,
+}
+proprio_obs_dims = head2space
+
+
+@dataclass
+class DataSpec(CN):
+    """defines 1. keymapping to standard form 2. types of data 3. transforms"""
+
+    image_obs_keys: IMOBS = IMOBS().field()
+    depth_obs_keys: DIMOBS = DIMOBS().field()
+    proprio_obs_keys: POBS = POBS().field()
+    state_obs_keys: List[str] = default([])
+
+    proprio_encoding: ActionSpace = ActionSpace.NONE
+    action_encoding: ActionSpace = ActionSpace.NONE
+
+
+@dataclass
+class XGYM(DataSpec):
+
+    image_obs_keys: IMOBS = IMOBS(
+        primary="worm", high="overhead", side="side", left_wrist="wrist"
+    ).field()
+    depth_obs_keys: DIMOBS = DIMOBS().field()
+    proprio_obs_keys: POBS = POBS(single="proprio").field()
+    # state_obs_keys: []
+
+    proprio_encoding: ActionSpace = ActionSpace.POS_EULER
+    # TODO map head to possible action spaces
+    action_encoding: ActionSpace = ActionSpace.JOINT 
+
+    action_rep: ActionRep = ActionRep.RELATIVE
+
+
+
+
+class BasicDataSpec(DataSpec):
+    """includes one image quat proprio and euler action"""
+
+    image_obs_keys = IMOBS(primary="image").field()
+    proprio_encoding = ActionSpace.POS_QUAT
+    action_encoding = ActionSpace.POS_EULER
+
+
+xgym_specs = {
+    k: XGYM(name=k)
+    for k in [
+        "xgym_lift_single",
+        "xgym_duck_single",
+        "xgym_stack_single",
+        "xgym_play_single",
+        "xgym_single",
+    ]
+}
+xgym_specs = xgym_specs | {
+    k: XGYM(name=k)
+    for k in [
+        "xgym_lift_mano",
+        "xgym_stack_mano",
+        "xgym_stack_mano",
+        "xgym_duck_mano",
+        "xgym_duck_mano",
+    ]
 }
 
-#
-# TODO use some sort of metaclass to handle this cleanly?
-# it is a very complicated setup
+DATA_SPECS = xgym_specs
 
-mano = {
-    "image_obs_keys": IMOBS(primary="image"),
-    "depth_obs_keys": DIMOBS(),
-    "state_obs_keys": [
-        "cam_intr",
-        "mano_pose",
-        "mano_shape",
-        "joints_3d",
-        "joints_vis",
-    ],
-    "proprio_obs_keys": POBS(mano="proprio"),
-    # what is significant about this?
-    # re: i think its needed for datasets where there is no proprio so they can fill zeros
-    "proprio_obs_dims": {
-        "mano": ProprioDim.MANO,
-        "single": ProprioDim.POS_EULER,
-        "bimanual": ProprioDim.BIMANUAL,
-        "quadruped": ProprioDim.QUADRUPED,
-    },
-    "proprio_encoding": ProprioEncoding.MANO,
-    "action_encoding": ActionEncoding.MANO,
+
+fractal = BasicDataSpec(
+    name="fractal20220817_data",
+)
+kuka = BasicDataSpec(name="kuka")
+# NOTE: this is not actually the official OXE copy of bridge, it is our own more up-to-date copy that you
+# can find at https://rail.eecs.berkeley.edu/datasets/bridge_release/data/tfds/
+bridge = BasicDataSpec(name="bridge_dataset", image_obs_keys=IMOBS(primary="image_0"))
+
+taco_play = BasicDataSpec(
+    name="taco_play",
+    image_obs_keys=IMOBS(primary="rgb_static"),
+    depth_obs_keys=DIMOBS(primary="depth_static", wrist="depth_gripper"),
+)
+taco_extra = BasicDataSpec(
+    name="taco_extra", image_obs_keys=IMOBS(primary="rgb_static")
+)
+jaco_play = BasicDataSpec(name="jaco_play")
+
+bcable = BasicDataSpec(
+    name="berkeley_cable_routing",
+    proprio_encoding=ActionSpace.JOINT,
+    action_encoding=ActionSpace.POS_EULER,
+)
+
+roboturk = BasicDataSpec(
+    name="roboturk",
+    image_obs_keys=IMOBS(primary="front_rgb"),
+    proprio_encoding=ActionSpace.NONE,
+    action_encoding=ActionSpace.POS_EULER,
+)
+
+nyu_door = BasicDataSpec(
+    name="nyu_door_opening_surprising_effectiveness",
+    image_obs_keys=IMOBS(left_wrist="image", right_wrist="image"),
+    proprio_encoding=ActionSpace.NONE,
+    action_encoding=ActionSpace.POS_EULER,
+)
+
+viola = BasicDataSpec(
+    name="viola",
+    image_obs_keys=IMOBS(primary="agentview_rgb"),
+    proprio_encoding=ActionSpace.JOINT,
+    action_encoding=ActionSpace.POS_EULER,
+)
+
+DATA_SPECS = DATA_SPECS | {
+    x.name: x
+    for x in [
+        fractal,
+        kuka,
+        bridge,
+        taco_play,
+        taco_extra,
+        jaco_play,
+        bcable,
+        roboturk,
+        nyu_door,
+        viola,
+    ]
 }
 
+"""
 # === Individual Dataset Configs ===
 OXE_DATASET_CONFIGS = {
-    "xgym_lift_mano": mano,
-    "xgym_stack_mano": mano,
-    "xgym_stack_mano": mano,
-    "xgym_duck_mano": mano,
-    "xgym_duck_mano": mano,
-    "xgym_lift_single": xgym,
-    "xgym_duck_single": xgym,
-    "xgym_stack_single": xgym,
-    "xgym_play_single": xgym,
-    "xgym_single": xgym,
-    # "rlds_oakink": mano,  # OAK INK Dataset
-    #
-    #
-    #
-    "fractal20220817_data": {
-        "image_obs_keys": IMOBS(primary="image"),
-        "depth_obs_keys": DIMOBS(),
-        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {
-            "bimanual": ProprioDim.BIMANUAL,
-            "quadruped": ProprioDim.QUADRUPED,
-        },
-        "proprio_encoding": ProprioEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS,
-    },
-    "kuka": {
-        "image_obs_keys": {
-            "primary": "image",
-            "high": None,
-            "nav": None,
-            "left_wrist": None,
-            "right_wrist": None,
-        },
-        "depth_obs_keys": DIMOBS(),
-        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {
-            "bimanual": ProprioDim.BIMANUAL,
-            "quadruped": ProprioDim.QUADRUPED,
-        },
-        "proprio_encoding": ProprioEncoding.POS_QUAT,
-        "action_encoding": ActionEncoding.EEF_POS,
-    },
-    # NOTE: this is not actually the official OXE copy of bridge, it is our own more up-to-date copy that you
-    # can find at https://rail.eecs.berkeley.edu/datasets/bridge_release/data/tfds/
-    "bridge_dataset": {
-        "image_obs_keys": {
-            "primary": "image_0",
-            "high": None,
-            "nav": None,
-            "left_wrist": None,
-            "right_wrist": None,
-        },
-        "depth_obs_keys": DIMOBS(),
-        "proprio_obs_keys": {"mano": None, "bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {
-            "mano": ProprioDim.MANO,
-            "bimanual": ProprioDim.BIMANUAL,
-            "quadruped": ProprioDim.QUADRUPED,
-        },
-        "proprio_encoding": ProprioEncoding.POS_EULER,
-        "action_encoding": ActionEncoding.EEF_POS,
-    },
-    "taco_play": {
-        "image_obs_keys": {
-            "primary": "rgb_static",
-            "high": None,
-            "nav": None,
-            # "left_wrist": "rgb_gripper",
-            # "right_wrist": "rgb_gripper",
-            "left_wrist": None,
-            "right_wrist": None,
-        },
-        "depth_obs_keys": {
-            "primary": "depth_static",
-            "secondary": None,
-            "wrist": "depth_gripper",
-        },
-        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {
-            "bimanual": ProprioDim.BIMANUAL,
-            "quadruped": ProprioDim.QUADRUPED,
-        },
-        "proprio_encoding": ProprioEncoding.POS_EULER,
-        "action_encoding": ActionEncoding.EEF_POS,
-    },
-    "taco_extra": {
-        "image_obs_keys": {
-            "primary": "rgb_static",
-            "high": None,
-            "nav": None,
-            # "left_wrist": "rgb_gripper",
-            # "right_wrist": "rgb_gripper",
-            "left_wrist": None,
-            "right_wrist": None,
-        },
-        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {
-            "bimanual": ProprioDim.BIMANUAL,
-            "quadruped": ProprioDim.QUADRUPED,
-        },
-        "depth_obs_keys": DIMOBS(),
-        "proprio_encoding": ProprioEncoding.POS_EULER,
-        "action_encoding": ActionEncoding.EEF_POS,
-    },
-    "jaco_play": {
-        "image_obs_keys": {
-            "primary": "image",
-            "high": None,
-            "nav": None,
-            # "left_wrist": "image_wrist",
-            # "right_wrist": "image_wrist",
-            "left_wrist": None,
-            "right_wrist": None,
-        },
-        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {
-            "bimanual": ProprioDim.BIMANUAL,
-            "quadruped": ProprioDim.QUADRUPED,
-        },
-        "depth_obs_keys": DIMOBS(),
-        "proprio_encoding": ProprioEncoding.POS_EULER,
-        "action_encoding": ActionEncoding.EEF_POS,
-    },
-    "berkeley_cable_routing": {
-        "image_obs_keys": {
-            "primary": "image",
-            "high": None,
-            "nav": None,
-            # "left_wrist": "wrist45_image",
-            # "right_wrist": "wrist45_image",
-            "left_wrist": None,
-            "right_wrist": None,
-        },
-        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {
-            "bimanual": ProprioDim.BIMANUAL,
-            "quadruped": ProprioDim.QUADRUPED,
-        },
-        "depth_obs_keys": DIMOBS(),
-        "proprio_encoding": ProprioEncoding.JOINT,
-        "action_encoding": ActionEncoding.EEF_POS,
-    },
-    "roboturk": {
-        "image_obs_keys": {
-            "primary": "front_rgb",
-            "high": None,
-            "nav": None,
-            "left_wrist": None,
-            "right_wrist": None,
-        },
-        "depth_obs_keys": DIMOBS(),
-        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {
-            "bimanual": ProprioDim.BIMANUAL,
-            "quadruped": ProprioDim.QUADRUPED,
-        },
-        "proprio_encoding": ProprioEncoding.NONE,
-        "action_encoding": ActionEncoding.EEF_POS,
-    },
-    "nyu_door_opening_surprising_effectiveness": {
-        "image_obs_keys": {
-            "primary": None,
-            "high": None,
-            "nav": None,
-            "left_wrist": "image",
-            "right_wrist": "image",
-        },
-        "depth_obs_keys": DIMOBS(),
-        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {
-            "bimanual": ProprioDim.BIMANUAL,
-            "quadruped": ProprioDim.QUADRUPED,
-        },
-        "proprio_encoding": ProprioEncoding.NONE,
-        "action_encoding": ActionEncoding.EEF_POS,
-    },
-    "viola": {
-        "image_obs_keys": {
-            "primary": "agentview_rgb",
-            "high": None,
-            "nav": None,
-            # "left_wrist": "eye_in_hand_rgb",
-            # "right_wrist": "eye_in_hand_rgb",
-            "left_wrist": None,
-            "right_wrist": None,
-        },
-        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
-        "proprio_obs_dims": {
-            "bimanual": ProprioDim.BIMANUAL,
-            "quadruped": ProprioDim.QUADRUPED,
-        },
-        "depth_obs_keys": DIMOBS(),
-        "proprio_encoding": ProprioEncoding.JOINT,
-        "action_encoding": ActionEncoding.EEF_POS,
-    },
     "berkeley_autolab_ur5": {
         "image_obs_keys": {
             "primary": "image",
@@ -1233,3 +1089,4 @@ OXE_DATASET_CONFIGS = {
         "action_encoding": ActionEncoding.EEF_POS,
     },
 }
+"""
