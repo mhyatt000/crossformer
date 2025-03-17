@@ -1,13 +1,18 @@
+from dataclasses import dataclass
 from enum import Enum
+import logging
+import os
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
 
-from crossformer.cn.util import asdataclass, CN, CS, default, store
+from crossformer.cn.base import CN, default
 from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
-from crossformer.log import logger
 
 from .frame import FrameTransform, PerViewFrameTransform
 from .traj import TrajectoryTransform
 
+import logging
+logger = logging.getLogger(__name__)
 
 class Modality(Enum):
     IMG = "image_conditioned"
@@ -24,9 +29,10 @@ class KeepProb(Enum):
     HIGH = 0.9
 
 
+@dataclass()
 class Transform(CN):
-    traj: TrajectoryTransform = default(TrajectoryTransform)
-    frame: FrameTransform = default(PerViewFrameTransform)
+    traj: TrajectoryTransform = TrajectoryTransform().field()
+    frame: FrameTransform = PerViewFrameTransform().field()
 
     task_cond: Modality = Modality.MULTI  # alias for modality
     keep_image_prob: float = 0.5

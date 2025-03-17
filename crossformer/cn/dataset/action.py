@@ -1,0 +1,1092 @@
+"""action space"""
+
+from dataclasses import dataclass
+from enum import Enum
+import logging
+import os
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
+
+import tyro
+
+from crossformer.cn.base import CN, default
+
+# from crossformer.utils.spec import ModuleSpec
+
+logger = logging.getLogger(__name__)
+logger.info("Importing crossformer.cn")
+
+
+class ActionSpace(Enum):
+
+    NONE = 0
+    QUADRUPED = 12
+    NAV = 2  # 2D
+
+    # single action space
+    POS_EULER = 7  # EEF XYZ + roll-pitch-yaw + gripper open/close
+    POS_QUAT = 8  # EEF XYZ + quaternion + gripper open/close
+    JOINT = 8  # joint angles + gripper open/close
+
+    # bimanual action space
+    BI_POS_EULER = 14  # 2x(6+1)
+    BI_POS_QUAT = 16  # 2x(7+1)
+    BI_JOINT = 16  # 2x(7+1)
+
+    # human action
+    # TODO make better names
+    # DMANO_18 = 18  # 3 palm & 15 finger params
+    DMANO_35 = 35  # xyz,rot, 6*3 major knuckles and thumb , 11*1 other knuckles
+    DMANO_51 = 51  # 3 palm & 48 pose params
+    DMANO_52 = 52  #
+    MANO = 63  # 21 joints x 3
+
+
+class ActionRep(Enum):
+    """Action representation: relative or absolute"""
+
+    RELATIVE = "rel"
+    ABSOLUTE = "abs"
+
+
+@dataclass
+class IMOBS(CN):
+    primary: Optional[str] = None
+    high: Optional[str] = None
+    side: Optional[str] = None
+    nav: Optional[str] = None
+    left_wrist: Optional[str] = None
+    right_wrist: Optional[str] = None
+
+
+@dataclass
+class DIMOBS(CN):
+    primary: Optional[str] = None
+    secondary: Optional[str] = None
+    wrist: Optional[str] = None
+
+
+@dataclass
+class POBS(CN):
+    single: Optional[str] = None
+    mano: Optional[str] = None
+    bimanual: Optional[str] = None
+    quadruped: Optional[str] = None
+
+
+class Head(Enum):
+    """Output head / Action Space of the model"""
+
+    BIMANUAL = "bimanual"
+    QUADRUPED = "quadruped"
+    NAV = "nav"
+    SINGLE = "single"
+    MANO = "mano"
+
+    MULTI = "multi"  # reserved for MultiDataSource
+
+
+head2space = {
+    Head.BIMANUAL: ActionSpace.BI_POS_EULER,
+    Head.QUADRUPED: ActionSpace.QUADRUPED,
+    Head.NAV: ActionSpace.NAV,
+    Head.SINGLE: ActionSpace.POS_EULER,
+    Head.MANO: ActionSpace.MANO,
+}
+proprio_obs_dims = head2space
+
+
+@dataclass
+class DataSpec(CN):
+    """defines 1. keymapping to standard form 2. types of data 3. transforms"""
+
+    image_obs_keys: IMOBS = IMOBS().field()
+    depth_obs_keys: DIMOBS = DIMOBS().field()
+    proprio_obs_keys: POBS = POBS().field()
+    state_obs_keys: List[str] = default([])
+
+    proprio_encoding: ActionSpace = ActionSpace.NONE
+    action_encoding: ActionSpace = ActionSpace.NONE
+
+
+@dataclass
+class XGYM(DataSpec):
+
+    image_obs_keys: IMOBS = IMOBS(
+        primary="worm", high="overhead", side="side", left_wrist="wrist"
+    ).field()
+    depth_obs_keys: DIMOBS = DIMOBS().field()
+    proprio_obs_keys: POBS = POBS(single="proprio").field()
+    # state_obs_keys: []
+
+    proprio_encoding: ActionSpace = ActionSpace.POS_EULER
+    # TODO map head to possible action spaces
+    action_encoding: ActionSpace = ActionSpace.JOINT 
+
+    action_rep: ActionRep = ActionRep.RELATIVE
+
+
+
+
+class BasicDataSpec(DataSpec):
+    """includes one image quat proprio and euler action"""
+
+    image_obs_keys = IMOBS(primary="image").field()
+    proprio_encoding = ActionSpace.POS_QUAT
+    action_encoding = ActionSpace.POS_EULER
+
+
+xgym_specs = {
+    k: XGYM(name=k)
+    for k in [
+        "xgym_lift_single",
+        "xgym_duck_single",
+        "xgym_stack_single",
+        "xgym_play_single",
+        "xgym_single",
+    ]
+}
+xgym_specs = xgym_specs | {
+    k: XGYM(name=k)
+    for k in [
+        "xgym_lift_mano",
+        "xgym_stack_mano",
+        "xgym_stack_mano",
+        "xgym_duck_mano",
+        "xgym_duck_mano",
+    ]
+}
+
+DATA_SPECS = xgym_specs
+
+
+fractal = BasicDataSpec(
+    name="fractal20220817_data",
+)
+kuka = BasicDataSpec(name="kuka")
+# NOTE: this is not actually the official OXE copy of bridge, it is our own more up-to-date copy that you
+# can find at https://rail.eecs.berkeley.edu/datasets/bridge_release/data/tfds/
+bridge = BasicDataSpec(name="bridge_dataset", image_obs_keys=IMOBS(primary="image_0"))
+
+taco_play = BasicDataSpec(
+    name="taco_play",
+    image_obs_keys=IMOBS(primary="rgb_static"),
+    depth_obs_keys=DIMOBS(primary="depth_static", wrist="depth_gripper"),
+)
+taco_extra = BasicDataSpec(
+    name="taco_extra", image_obs_keys=IMOBS(primary="rgb_static")
+)
+jaco_play = BasicDataSpec(name="jaco_play")
+
+bcable = BasicDataSpec(
+    name="berkeley_cable_routing",
+    proprio_encoding=ActionSpace.JOINT,
+    action_encoding=ActionSpace.POS_EULER,
+)
+
+roboturk = BasicDataSpec(
+    name="roboturk",
+    image_obs_keys=IMOBS(primary="front_rgb"),
+    proprio_encoding=ActionSpace.NONE,
+    action_encoding=ActionSpace.POS_EULER,
+)
+
+nyu_door = BasicDataSpec(
+    name="nyu_door_opening_surprising_effectiveness",
+    image_obs_keys=IMOBS(left_wrist="image", right_wrist="image"),
+    proprio_encoding=ActionSpace.NONE,
+    action_encoding=ActionSpace.POS_EULER,
+)
+
+viola = BasicDataSpec(
+    name="viola",
+    image_obs_keys=IMOBS(primary="agentview_rgb"),
+    proprio_encoding=ActionSpace.JOINT,
+    action_encoding=ActionSpace.POS_EULER,
+)
+
+DATA_SPECS = DATA_SPECS | {
+    x.name: x
+    for x in [
+        fractal,
+        kuka,
+        bridge,
+        taco_play,
+        taco_extra,
+        jaco_play,
+        bcable,
+        roboturk,
+        nyu_door,
+        viola,
+    ]
+}
+
+"""
+# === Individual Dataset Configs ===
+OXE_DATASET_CONFIGS = {
+    "berkeley_autolab_ur5": {
+        "image_obs_keys": {
+            "primary": "image",
+            "high": None,
+            "nav": None,
+            # "left_wrist": "hand_image",
+            # "right_wrist": "hand_image",
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "toto": {
+        "image_obs_keys": {
+            "primary": "image",
+            "high": None,
+            "nav": None,
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.JOINT,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "language_table": {
+        "image_obs_keys": {
+            "primary": "rgb",
+            "high": None,
+            "nav": None,
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "columbia_cairlab_pusht_real": {
+        "image_obs_keys": {
+            "primary": "image",
+            "secondary": None,
+            "wrist": "wrist_image",
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "stanford_kuka_multimodal_dataset_converted_externally_to_rlds": {
+        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
+        "depth_obs_keys": {"primary": "depth_image", "secondary": None, "wrist": None},
+        "proprio_encoding": ProprioEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "nyu_rot_dataset_converted_externally_to_rlds": {
+        "image_obs_keys": {
+            "primary": "image",
+            "secondary": None,
+            "wrist": None,
+            "high": None,
+            "nav": None,
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_obs_keys": {"mano": None, "bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "mano": ProprioDim.MANO,
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "stanford_hydra_dataset_converted_externally_to_rlds": {
+        "image_obs_keys": {
+            "primary": "image",
+            "high": None,
+            "nav": None,
+            # "left_wrist": "wrist_image",
+            # "right_wrist": "wrist_image",
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "austin_buds_dataset_converted_externally_to_rlds": {
+        "image_obs_keys": {
+            "primary": "image",
+            "high": None,
+            "nav": None,
+            # "left_wrist": "wrist_image",
+            # "right_wrist": "wrist_image",
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.JOINT,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "nyu_franka_play_dataset_converted_externally_to_rlds": {
+        "image_obs_keys": {
+            "primary": "image",
+            "high": None,
+            "nav": None,
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "depth_obs_keys": {
+            "primary": "depth",
+            "secondary": "depth_additional_view",
+            "wrist": None,
+        },
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "maniskill_dataset_converted_externally_to_rlds": {
+        "image_obs_keys": {
+            "primary": "image",
+            "secondary": None,
+            "wrist": "wrist_image",
+        },
+        "depth_obs_keys": {
+            "primary": "depth",
+            "secondary": None,
+            "wrist": "wrist_depth",
+        },
+        "proprio_encoding": ProprioEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "furniture_bench_dataset_converted_externally_to_rlds": {
+        "image_obs_keys": {
+            "primary": "image",
+            "high": None,
+            "nav": None,
+            # "left_wrist": "wrist_image",
+            # "right_wrist": "wrist_image",
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "cmu_franka_exploration_dataset_converted_externally_to_rlds": {
+        "image_obs_keys": {
+            "primary": "highres_image",
+            "secondary": None,
+            "wrist": None,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.NONE,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "ucsd_kitchen_dataset_converted_externally_to_rlds": {
+        "image_obs_keys": {
+            "primary": "image",
+            "high": None,
+            "nav": None,
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_obs_keys": {"mano": None, "bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "mano": ProprioDim.MANO,
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "proprio_encoding": ProprioEncoding.JOINT,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "ucsd_pick_and_place_dataset_converted_externally_to_rlds": {
+        "image_obs_keys": {
+            "primary": "image",
+            "high": None,
+            "nav": None,
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_obs_keys": {"mano": None, "bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "mano": ProprioDim.MANO,
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "austin_sailor_dataset_converted_externally_to_rlds": {
+        "image_obs_keys": {
+            "primary": "image",
+            "nav": None,
+            "high": None,
+            # "left_wrist": "wrist_image",
+            # "right_wrist": "wrist_image",
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "austin_sirius_dataset_converted_externally_to_rlds": {
+        "image_obs_keys": {
+            "primary": "image",
+            "nav": None,
+            "high": None,
+            # "left_wrist": "wrist_image",
+            # "right_wrist": "wrist_image",
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "bc_z": {
+        "image_obs_keys": {
+            "primary": "image",
+            "high": None,
+            "nav": None,
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "utokyo_pr2_opening_fridge_converted_externally_to_rlds": {
+        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "utokyo_pr2_tabletop_manipulation_converted_externally_to_rlds": {
+        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "utokyo_xarm_pick_and_place_converted_externally_to_rlds": {
+        "image_obs_keys": {
+            "primary": "image",
+            "high": "image2",
+            "left_wrist": "hand_image",
+            "right_wrist": None,
+            "nav": None,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "utokyo_xarm_bimanual_converted_externally_to_rlds": {
+        "image_obs_keys": {
+            "primary": "image",
+            "secondary": None,
+            "high": None,
+            "nav": None,
+            "left_wrist": None,
+            "right_wrist": None,
+            "wrist": None,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "robo_net": {
+        "image_obs_keys": {"primary": "image", "secondary": "image1", "wrist": None},
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "berkeley_mvp_converted_externally_to_rlds": {
+        "image_obs_keys": {
+            "primary": None,
+            "secondary": None,
+            "high": None,
+            "nav": None,
+            "left_wrist": "hand_image",
+            "right_wrist": None,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_obs_keys": {"mano": None, "bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "mano": ProprioDim.MANO,
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "proprio_encoding": ProprioEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.JOINT_POS,
+    },
+    "berkeley_rpt_converted_externally_to_rlds": {
+        "image_obs_keys": {"primary": None, "secondary": None, "wrist": "hand_image"},
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.JOINT,
+        "action_encoding": ActionEncoding.JOINT_POS,
+    },
+    "kaist_nonprehensile_converted_externally_to_rlds": {
+        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_QUAT,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "stanford_mask_vit_converted_externally_to_rlds": {
+        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "tokyo_u_lsmo_converted_externally_to_rlds": {
+        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "dlr_sara_pour_converted_externally_to_rlds": {
+        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "dlr_sara_grid_clamp_converted_externally_to_rlds": {
+        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "dlr_edan_shared_control_converted_externally_to_rlds": {
+        "image_obs_keys": {
+            "primary": "image",
+            "high": None,
+            "nav": None,
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "asu_table_top_converted_externally_to_rlds": {
+        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "stanford_robocook_converted_externally_to_rlds": {
+        "image_obs_keys": {"primary": "image_1", "secondary": "image_2", "wrist": None},
+        "depth_obs_keys": {"primary": "depth_1", "secondary": "depth_2", "wrist": None},
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "imperialcollege_sawyer_wrist_cam": {
+        "image_obs_keys": {
+            "primary": "image",
+            "secondary": None,
+            "wrist": "wrist_image",
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.NONE,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "iamlab_cmu_pickup_insert_converted_externally_to_rlds": {
+        "image_obs_keys": {
+            "primary": "image",
+            "high": None,
+            "nav": None,
+            # "left_wrist": "wrist_image",
+            # "right_wrist": "wrist_image",
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.JOINT,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "uiuc_d3field": {
+        "image_obs_keys": {"primary": "image_1", "secondary": "image_2", "wrist": None},
+        "depth_obs_keys": {"primary": "depth_1", "secondary": "depth_2", "wrist": None},
+        "proprio_encoding": ProprioEncoding.NONE,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "utaustin_mutex": {
+        "image_obs_keys": {
+            "primary": "image",
+            "high": None,
+            "nav": None,
+            # "left_wrist": "wrist_image",
+            # "right_wrist": "wrist_image",
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.JOINT,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "berkeley_fanuc_manipulation": {
+        "image_obs_keys": {
+            "primary": "image",
+            "high": None,
+            "nav": None,
+            # "left_wrist": "wrist_image",
+            # "right_wrist": "wrist_image",
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.JOINT,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "cmu_playing_with_food": {
+        "image_obs_keys": {
+            "primary": "image",
+            "secondary": None,
+            "wrist": "finger_vision_1",
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "cmu_play_fusion": {
+        "image_obs_keys": {"primary": "image", "secondary": None, "wrist": None},
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.JOINT,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "cmu_stretch": {
+        "image_obs_keys": {
+            "primary": "image",
+            "high": None,
+            "nav": None,
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "omnimimic_gnm_dataset": {
+        "image_obs_keys": {
+            "primary": None,
+            "high": None,
+            "nav": "image",
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "proprio_encoding": ProprioEncoding.POS_NAV,
+        "action_encoding": ActionEncoding.NAV_2D,
+        "override_traj_transform_kwargs": {
+            "goal_relabeling_kwargs": {"max_goal_distance": 15},
+            "task_augment_kwargs": {"keep_image_prob": 1.0},
+        },
+    },
+    "aloha_dagger_dataset": {
+        "image_obs_keys": {
+            "primary": "cam_high",
+            "secondary": "cam_low",
+            "wrist": "cam_right_wrist",
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
+        "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
+    },
+    "aloha_mobile_dataset": {
+        "image_obs_keys": {
+            "primary": "cam_high",
+            "secondary": None,
+            "wrist": "cam_right_wrist",
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
+        "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL_NAV,
+    },
+    "fmb_dataset": {
+        "image_obs_keys": {
+            "primary": "image_side_1",
+            "secondary": "image_side_2",
+            "wrist": "image_wrist_1",
+        },
+        "depth_obs_keys": {
+            "primary": "image_side_1_depth",
+            "secondary": "image_side_2_depth",
+            "wrist": "image_wrist_1_depth",
+        },
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "dobbe": {
+        "image_obs_keys": {"primary": None, "secondary": None, "wrist": "wrist_image"},
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "roboset": {
+        "image_obs_keys": {
+            "primary": "image_left",
+            "secondary": "image_right",
+            "wrist": "image_wrist",
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.JOINT,
+        "action_encoding": ActionEncoding.JOINT_POS,
+    },
+    "rh20t": {
+        "image_obs_keys": {
+            "primary": "image_front",
+            "secondary": "image_side_right",
+            "wrist": "image_wrist",
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "mujoco_manip": {
+        "image_obs_keys": {
+            "primary": "image",
+            "secondary": None,
+            "wrist": None,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "go1": {
+        "image_obs_keys": {
+            "primary": None,
+            "high": None,
+            "nav": None,
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_obs_keys": {"bimanual": None, "quadruped": "proprio"},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "proprio_encoding": ProprioEncoding.QUADRUPED,
+        "action_encoding": ActionEncoding.QUADRUPED,
+        "override_traj_transform_kwargs": {
+            "task_augment_kwargs": {"keep_image_prob": 0.0}
+        },
+    },
+    "a1": {
+        "image_obs_keys": {
+            "primary": None,
+            "high": None,
+            "nav": None,
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_obs_keys": {"bimanual": None, "quadruped": "proprio"},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "proprio_encoding": ProprioEncoding.QUADRUPED,
+        "action_encoding": ActionEncoding.QUADRUPED,
+        "override_traj_transform_kwargs": {
+            "task_augment_kwargs": {"keep_image_prob": 0.0}
+        },
+    },
+    "go1_real_dataset": {
+        "image_obs_keys": {
+            "primary": None,
+            "high": None,
+            "nav": None,
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_obs_keys": {"bimanual": None, "quadruped": "proprio"},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "proprio_encoding": ProprioEncoding.QUADRUPED,
+        "action_encoding": ActionEncoding.QUADRUPED,
+        "override_traj_transform_kwargs": {
+            "task_augment_kwargs": {"keep_image_prob": 0.0},
+            "window_size": 1,
+        },
+    },
+    "aloha_pen_uncap_diverse_dataset": {
+        "image_obs_keys": {
+            "primary": None,
+            "high": "cam_high",
+            "nav": None,
+            "left_wrist": "cam_left_wrist",
+            "right_wrist": "cam_right_wrist",
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
+        "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
+    },
+    "aloha_new_sushi_dataset": {
+        "image_obs_keys": {
+            "primary": None,
+            "high": "cam_high",
+            "nav": None,
+            "left_wrist": "cam_left_wrist",
+            "right_wrist": "cam_right_wrist",
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
+        "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
+    },
+    "aloha_dough_cut_dataset": {
+        "image_obs_keys": {
+            "primary": None,
+            "high": "cam_high",
+            "nav": None,
+            "left_wrist": "cam_left_wrist",
+            "right_wrist": "cam_right_wrist",
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
+        "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
+    },
+    "aloha_lucy_dataset": {
+        "image_obs_keys": {
+            "primary": None,
+            "high": "cam_high",
+            "nav": None,
+            "left_wrist": "cam_left_wrist",
+            "right_wrist": "cam_right_wrist",
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
+        "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
+    },
+    "aloha_drawer_dataset": {
+        "image_obs_keys": {
+            "primary": None,
+            "high": "cam_high",
+            "nav": None,
+            "left_wrist": "cam_left_wrist",
+            "right_wrist": "cam_right_wrist",
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
+        "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
+    },
+    "aloha_pick_place_dataset": {
+        "image_obs_keys": {
+            "primary": None,
+            "high": "cam_high",
+            "nav": None,
+            "left_wrist": "cam_left_wrist",
+            "right_wrist": "cam_right_wrist",
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
+        "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
+    },
+    "aloha_static_dataset": {
+        "image_obs_keys": {
+            "primary": None,
+            "high": "cam_high",
+            "nav": None,
+            "left_wrist": "cam_left_wrist",
+            "right_wrist": "cam_right_wrist",
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
+        "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
+    },
+    "aloha_sushi_cut_full_dataset": {
+        "image_obs_keys": {
+            "primary": None,
+            "high": "cam_high",
+            "nav": None,
+            "left_wrist": "cam_left_wrist",
+            "right_wrist": "cam_right_wrist",
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_obs_keys": {"bimanual": "proprio", "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "proprio_encoding": ProprioEncoding.JOINT_BIMANUAL,
+        "action_encoding": ActionEncoding.JOINT_POS_BIMANUAL,
+    },
+    "droid": {
+        "image_obs_keys": {
+            "primary": "exterior_image_1_left",
+            "high": None,
+            "nav": None,
+            # "left_wrist": "wrist_image_left",
+            # "right_wrist": "wrist_image_left",
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+        "filter_functions": [
+            ModuleSpec.create("crossformer.data.utils.data_utils:filter_success_droid")
+        ],
+    },
+    "droid_wipe": {
+        "image_obs_keys": {
+            "primary": "exterior_image_2_left",
+            "high": None,
+            "nav": None,
+            # "left_wrist": "wrist_image_left",
+            # "right_wrist": "wrist_image_left",
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+    "droid_flip_pot_upright": {
+        "image_obs_keys": {
+            "primary": "exterior_image_2_right",
+            "high": None,
+            "nav": None,
+            # "left_wrist": "wrist_image_left",
+            # "right_wrist": "wrist_image_left",
+            "left_wrist": None,
+            "right_wrist": None,
+        },
+        "depth_obs_keys": DIMOBS(),
+        "proprio_obs_keys": {"bimanual": None, "quadruped": None},
+        "proprio_obs_dims": {
+            "bimanual": ProprioDim.BIMANUAL,
+            "quadruped": ProprioDim.QUADRUPED,
+        },
+        "proprio_encoding": ProprioEncoding.POS_EULER,
+        "action_encoding": ActionEncoding.EEF_POS,
+    },
+}
+"""
