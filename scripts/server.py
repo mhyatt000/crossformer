@@ -38,12 +38,12 @@ import time
 import traceback
 from typing import Any, Dict, Optional, Union
 
-import draccus
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 import jax
 import numpy as np
 import tensorflow as tf
+import tyro
 import uvicorn
 
 from crossformer.model.crossformer_model import CrossFormerModel
@@ -73,17 +73,20 @@ def stack_and_pad(history: deque, num_obs: int):
     return full_obs
 
 
+from rich.pretty import pprint  
+
 @dataclass
 class ServerCN:
+    """Server configuration"""
 
-    models: Union[str, list]  # comma separated models in name:id:step format
-    weights: Union[str, Path] = Path(
-        os.environ.get("BAFL_SAVE", ".")
-    ).expanduser()  # path to BAFL_SAVE or weights dir
+    models: Union[str, list]  # comma separated models as name : id : step
+    task: str = tyro.MISSING  # task to perform
+
+    # path to BAFL_SAVE or weights dir
+    weights: Union[str, Path] = os.environ.get("BAFL_SAVE", ".")
 
     host: str = "0.0.0.0"  # host to run on
     port: int = 8001  # port to run on
-    task: str = ""  # task to perform
 
     def __post_init__(self):
 
@@ -92,7 +95,9 @@ class ServerCN:
         if isinstance(self.models, str):
             self.models = [m.split(":") for m in self.models.split(",")]
 
-
+        self.weights = Path(self.weights).expanduser()
+        pprint(self.models)
+        self.models = [(n, str(self.weights / id), s) for n, id, s in self.models]
 
 
 class HttpServer:
@@ -103,7 +108,6 @@ class HttpServer:
         for name, path, step in paths:
             self.models[name] = CrossFormerModel.load_pretrained(path, step=step)
         self.head_name = "single_arm"
-        self.action_dim = 7
         self.pred_horizon = 4
         self.exp_weight = 0
         self.horizon = 1  # 5
@@ -128,7 +132,6 @@ class HttpServer:
         self.dataset_name = self.tasks[cfg.task]["dataset_name"]
         self.text = self.tasks[cfg.task]["text"]
 
-
         self.reset_history()
 
         # trigger compilation
@@ -141,7 +144,7 @@ class HttpServer:
             payload = {
                 "observation": {
                     "proprio_bimanual": np.zeros((14,)),
-                    "proprio_single": np.zeros((7,)),
+                    "proprio_single": np.zeros((6,)),
                     "image_primary": np.zeros((224, 224, 3)),
                     "image_high": np.zeros((224, 224, 3)),
                     "image_side": np.zeros((224, 224, 3)),
@@ -153,6 +156,7 @@ class HttpServer:
                 "model": name,
                 "dataset_name": self.dataset_name,
             }
+
             for _ in range(self.horizon):
                 start = time.time()
                 print(self.sample_actions(payload))
@@ -225,12 +229,12 @@ class HttpServer:
                 unnormalization_statistics,
                 head_name=self.head_name,
                 rng=key,
-            )[0, :, : self.action_dim]
+            )
+            print(actions.shape)
+            actions = actions[0, -1] # one batch, last window
 
             actions = np.array(actions)
-            actions = actions[
-                -1
-            ]  # @mhyatt patch since model returns for all windows now
+            print(f"actions: {actions.shape}")
 
             # whether to temporally ensemble the action predictions or return the full chunk
             if not payload.get("ensemble", True):
@@ -238,6 +242,7 @@ class HttpServer:
 
             self.act_history.append(actions[: self.pred_horizon])
             num_actions = len(self.act_history)
+            print(f"num_actions: {num_actions}")
 
             # select the predicted action for the current step from the history of action chunk predictions
             curr_act_preds = np.stack(
@@ -261,12 +266,10 @@ class HttpServer:
             return "error"
 
 
-@draccus.wrap()
 def main(cfg: ServerCN):
 
     tf.config.set_visible_devices([], "GPU")
 
-    cfg.models = [(n, str(cfg.weights / id), s) for n, id, s in cfg.models]
 
     # DEPRICATE name, path, step
     # root = osp.expanduser("~/data/bafl") # for carina
@@ -283,4 +286,4 @@ def main(cfg: ServerCN):
 
 
 if __name__ == "__main__":
-    main()
+    main(tyro.cli(ServerCN))
