@@ -241,7 +241,7 @@ class VisCallback(ValidationCallback):
                 metric = self.eval_step(train_state, batch)
 
                 if name in HEAD_TO_DATASET["mano"]:
-                    print(metric.keys())
+                    # print(metric.keys())
                     k = list(metric.keys())[0]
                     assert (
                         "vis" in metric[k]
@@ -307,7 +307,7 @@ class VisCallback(ValidationCallback):
                     else:
                         p3d += act[i, j, k, :3]
                         grip = act[i, j, k, -1]
-                    print(f"grip: {grip} {grip.shape}")
+                    # print(f"grip: {grip} {grip.shape}")
 
                     H, W = img.shape[0], img.shape[0]
                     f = focal[i, j]
@@ -320,7 +320,7 @@ class VisCallback(ValidationCallback):
                     x, y = int(palm[0]), int(palm[1])
                     size = float(p3d[2])  # float(grip)
                     sigmoid = lambda x: 1 / (1 + np.exp(-x))
-                    size = int(10 * sigmoid(size) ** 0.5) + 2
+                    size = int(4 * sigmoid(size) ** 0.5) + 2
                     # xgym.logger.info(f"x,y,s: {(x,y,size)}")
 
                     img = overlay_palm(img, x=x, y=y, opacity=k, size=size)
