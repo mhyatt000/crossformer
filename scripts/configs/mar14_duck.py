@@ -120,7 +120,7 @@ def get_augmentation_config(task_cond, window_size, action_horizon):
             # "right_wrist": (224, 224),
         },
         image_augment_kwargs={
-            "primary": bridge_image_augment_kwargs ,
+            "primary": bridge_image_augment_kwargs,
             # 'side': bridge_image_augment_kwargs ,
             # "high": aloha_image_augment_kwargs,
             # "nav": bridge_image_augment_kwargs,
@@ -153,12 +153,12 @@ def get_config():
     UPDATE_CONFIG = dict(
         model=dict(
             observation_tokenizers=dict(
-                # side=ModuleSpec.create( 
-                    # ImageTokenizer, 
-                      # obs_stack_keys=["image_side"], 
-                      # task_stack_keys=["image_side"], 
-                      # task_film_keys=["language_instruction"], 
-                      # encoder=ModuleSpec.create(ResNet26FILM),
+                # side=ModuleSpec.create(
+                # ImageTokenizer,
+                # obs_stack_keys=["image_side"],
+                # task_stack_keys=["image_side"],
+                # task_film_keys=["language_instruction"],
+                # encoder=ModuleSpec.create(ResNet26FILM),
                 # ),
                 single=ModuleSpec.create(
                     LowdimObsTokenizer,
@@ -169,26 +169,16 @@ def get_config():
             heads=dict(
                 single_arm=ModuleSpec.create(
                     DiffusionActionHead,
-                    action_horizon=15,
-                    action_dim=ActionDim.JOINT_POS,
-                    num_preds=ActionDim.JOINT_POS,
-                    pool_strategy="use_map", 
+                    action_horizon=50,
+                    action_dim=ActionDim.SINGLE,
+                    num_preds=ActionDim.SINGLE,
+                    pool_strategy="mean",  # isnt there another/better strategy
                     readout_key="readout_single_arm",
                     clip_pred=False,
                     loss_weight=1.0,
                     constrain_loss_dims=True,
-                    diffusion_steps=5,
+                    diffusion_steps=20,
                 ),
-                # single_arm=ModuleSpec.create(
-                    # L1ActionHead,
-                    # action_horizon=50,
-                    # action_dim=ActionDim.JOINT_POS,
-                    # pool_strategy="mean",
-                    # readout_key="readout_single_arm",
-                    # clip_pred=False,
-                    # loss_weight=1.0,
-                    # constrain_loss_dims=True,
-                # ),
                 bimanual=ModuleSpec.create(
                     L1ActionHead,
                     action_horizon=4,
@@ -212,7 +202,7 @@ def get_config():
                     diffusion_steps=5,
                 ),
             ),
-            readouts=dict(single_arm=15, mano=4, bimanual=4),
+            readouts=dict(single_arm=50, mano=4, bimanual=4),
         )
     )
 
@@ -223,7 +213,7 @@ def get_config():
     else:
         raise ValueError("Invalid mode")
 
-    max_steps = FieldReference(500_000)
+    max_steps = FieldReference(300_000)
     grad_acc = None
     max_steps = max_steps * (grad_acc or 1)
 
@@ -236,7 +226,7 @@ def get_config():
 
     action_horizon = 50
     dataset_kwargs = get_dataset_config(
-        "multi", window_size, action_horizon=action_horizon, mix="xgym_stack_single"
+        "multi", window_size, action_horizon=action_horizon, mix="xgym_duck_single"
     )
     config = dict(
         pretrained_path="hf://rail-berkeley/crossformer",
@@ -257,7 +247,7 @@ def get_config():
                     "bimanual": 4,
                     "quadruped": None,
                     "nav": None,
-                    "single_arm": 'x',
+                    "single_arm": 4,
                 },
                 "observation_tokenizers": {
                     "bimanual": None,
@@ -309,7 +299,7 @@ def get_config():
             val_shuffle_buffer_size=1000,
             num_val_batches=8,  # 16
         ),
-        eval_datasets=("xgym_stack_single"),
+        eval_datasets=("xgym_duck_single"),
         rollout_kwargs=dict(
             num_envs=4,
             use_rollout=False,
