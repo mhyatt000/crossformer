@@ -12,6 +12,7 @@ from .frame import FrameTransform, PerViewFrameTransform
 from .traj import TrajectoryTransform
 
 import logging
+from typing import *
 logger = logging.getLogger(__name__)
 
 class Modality(Enum):
@@ -29,15 +30,21 @@ class KeepProb(Enum):
     HIGH = 0.9
 
 
+
+
 @dataclass()
 class Transform(CN):
-    traj: TrajectoryTransform = TrajectoryTransform().field()
-    frame: FrameTransform = PerViewFrameTransform().field()
+    REGISTRY: ClassVar[Dict[str, "DataSource"]] = {}
+
+
+    traj: TrajectoryTransform = TrajectoryTransform(name='').field()
+    frame: FrameTransform = PerViewFrameTransform(name='').field()
 
     task_cond: Modality = Modality.MULTI  # alias for modality
     keep_image_prob: float = 0.5
 
     def __post_init__(self):
+        self.REGISTRY[self.name] = self
 
         keep: Dict[Modality, float] = {
             Modality.IMG: 1.0,

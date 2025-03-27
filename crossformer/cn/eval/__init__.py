@@ -12,10 +12,9 @@ logger.info("Importing crossformer.cn")
 
 @dataclass()
 class Eval(CN):
-    val_shuffle_buffer_size: int = 1000
-    num_val_batches: int = 1
-
-    # eval_datasets: List[str] = default(["xgym_stack_single", "xgym_stack_mano"])
+    shuffle_buffer: int = 1000
+    nbatch: int = 1
 
     def create(self, datasets: List[str]):
+        # eval_datasets: List[str] = default(["xgym_stack_single", "xgym_stack_mano"])
         return self.asdict() | dict(datasets=datasets)

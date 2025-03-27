@@ -1,5 +1,16 @@
 """action space"""
 
+from crossformer.data.utils.data_utils import NormalizationType
+from dataclasses import dataclass, fields
+
+
+from dataclasses import dataclass, asdict
+
+from crossformer.utils.spec import ModuleSpec
+
+# from crossformer.data.oxe.oxe_standardization_transforms import OXE_STANDARDIZATION_TRANSFORMS
+from typing import *
+
 from dataclasses import dataclass
 from enum import Enum
 import logging
@@ -11,7 +22,6 @@ import tyro
 
 from crossformer.cn.base import CN, default
 
-# from crossformer.utils.spec import ModuleSpec
 
 logger = logging.getLogger(__name__)
 logger.info("Importing crossformer.cn")
@@ -50,7 +60,22 @@ class ActionRep(Enum):
 
 
 @dataclass
-class IMOBS(CN):
+class OBS(CN):
+    name:str = ''
+
+    def __iter__(self):
+        """allows conversion of OBS keys into a list or set"""
+        # Iterate over the dataclass fields (which excludes ClassVars)
+        return (field.name for field in fields(self) if field.name != "name")
+
+    def items(self):
+        # asdict() returns a dict of instance fields, and .items() returns its key-value pairs
+        return {k: v for k, v in asdict(self).items() if k in self}
+        return [(k, v) for k, v in asdict(self).items() if k in self]
+
+
+@dataclass
+class IMOBS(OBS):
     primary: Optional[str] = None
     high: Optional[str] = None
     side: Optional[str] = None
@@ -60,14 +85,14 @@ class IMOBS(CN):
 
 
 @dataclass
-class DIMOBS(CN):
+class DIMOBS(OBS):
     primary: Optional[str] = None
     secondary: Optional[str] = None
     wrist: Optional[str] = None
 
 
 @dataclass
-class POBS(CN):
+class POBS(OBS):
     single: Optional[str] = None
     mano: Optional[str] = None
     bimanual: Optional[str] = None
@@ -100,6 +125,8 @@ proprio_obs_dims = head2space
 class DataSpec(CN):
     """defines 1. keymapping to standard form 2. types of data 3. transforms"""
 
+    REGISTRY: ClassVar[Dict[str, "DataSpec"]] = {}
+
     image_obs_keys: IMOBS = IMOBS().field()
     depth_obs_keys: DIMOBS = DIMOBS().field()
     proprio_obs_keys: POBS = POBS().field()
@@ -107,6 +134,13 @@ class DataSpec(CN):
 
     proprio_encoding: ActionSpace = ActionSpace.NONE
     action_encoding: ActionSpace = ActionSpace.NONE
+
+    def __post_init__(self):
+        self.REGISTRY[self.name] = self
+
+    @property
+    def action_space(self):
+        return self.action_encoding
 
 
 @dataclass
@@ -121,11 +155,9 @@ class XGYM(DataSpec):
 
     proprio_encoding: ActionSpace = ActionSpace.POS_EULER
     # TODO map head to possible action spaces
-    action_encoding: ActionSpace = ActionSpace.JOINT 
+    action_encoding: ActionSpace = ActionSpace.JOINT
 
     action_rep: ActionRep = ActionRep.RELATIVE
-
-
 
 
 class BasicDataSpec(DataSpec):
@@ -220,6 +252,106 @@ DATA_SPECS = DATA_SPECS | {
         viola,
     ]
 }
+
+print(DataSpec.REGISTRY.keys())
+
+
+@dataclass
+class DataPrep(CN):
+    """bundles DataSpec with loading rules"""
+
+    name: str = ""  # tfds name
+    weight: float = 0.0  # global sampling weight
+
+    # oxw_kwargs: Dict[str, Any]
+
+    # the folder that contains tfds
+    loc: str = os.path.join(os.path.expanduser("~"), "tensorflow_datasets")
+
+    # which of the provided camera views to load
+    load_camera_views: Sequence[str] = ("primary",)
+
+    load_depth: bool = False # y/n load depth images
+    load_proprio: bool = False # y/n load proprioception
+    load_language: bool = True # y/n load language instructions
+
+    force_recompute_dataset_statistics: bool = False
+    action_proprio_normalization_type: NormalizationType = NormalizationType.NORMAL
+
+    def __post_init__(self):
+
+        if missing_keys := (
+            set(self.load_camera_views) - set(self.spec.image_obs_keys)
+        ):
+            raise ValueError(
+                f"Cannot load {self.name} with views {missing_keys} since they are not available inside {self.spec}"
+            )
+
+        try:
+            _ = self.norm_mask
+        except KeyError:
+            raise ValueError(
+                f"Cannot load {sefl.name} with unsupported action encoding {self.spec.action_encoding}"
+            )
+
+    @property
+    def image_obs_keys(self):
+        return {
+            k: v
+            for k, v in self.spec.image_obs_keys.items()
+            if k in self.load_camera_views
+        }
+
+    @property
+    def depth_obs_keys(self):
+        d = {
+            k: v
+            for k, v in self.spec.depth_obs_keys.items()
+            if k in self.load_camera_views
+        }
+        return d if self.load_depth else None
+
+    @property
+    def proprio_obs_keys(self):
+        return {"primary": "proprio"} if self.load_proprio else None
+
+    @property
+    def language_key(self):
+        return "language_instruction" if self.load_language else None
+
+    @property
+    def spec(self) -> DataSpec:
+        return DataSpec.REGISTRY[self.name]
+
+    @property
+    def norm_mask(self):
+        space2norm = {
+            ActionSpace.POS_EULER: 7,
+            ActionSpace.POS_QUAT: 8,
+            ActionSpace.JOINT: 8,
+            ActionSpace.BI_POS_EULER: 14,
+            ActionSpace.BI_POS_QUAT: 16,
+            ActionSpace.BI_JOINT: 16,
+            ActionSpace.DMANO_35: 35,
+            ActionSpace.DMANO_51: 51,
+            ActionSpace.DMANO_52: 52,
+            ActionSpace.MANO: 63,
+        }
+        return space2norm[self.spec.action_space]
+
+    @property
+    def standardize_fn(self, oxe_standardization_transforms):
+        return oxe_standardization_transforms[self.name]
+        # return ModuleSpec.create(OXE_STANDARDIZATION_TRANSFORMS[name])
+
+
+DataPrep(
+    name="xgym_lift_single",
+    weight=1.0,
+    loc="xgym",
+    load_camera_views=("primary", "high", "side", "nav", "left_wrist", "right_wrist"),
+)
+
 
 """
 # === Individual Dataset Configs ===

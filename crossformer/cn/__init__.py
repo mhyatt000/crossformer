@@ -11,9 +11,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Un
 from rich import print as pprint
 import tyro
 
-from crossformer.cn.dataset import DataSource, Head, MultiDataSource, SOURCES
-
-""" from crossformer.cn import dataset, model """
+from crossformer.cn.dataset import (
+    DataSource,
+    Head,
+    MultiDataSource,
+)
+from crossformer.cn.dataset.action import DataSpec, DataPrep
 
 from crossformer.cn.dataset import Dataset, transform
 from crossformer.cn.eval import Eval
@@ -32,7 +35,7 @@ from crossformer.cn.base import CN, default
 
 @dataclass
 class Delete(CN):
-    data: Dict[str,Any] = tyro.MISSING
+    data: Dict[str, Any] = tyro.MISSING
 
     def __post_init__(self):
         logger.warn("TODO: was this for model only or all?")
@@ -137,20 +140,6 @@ UPDATE_CONFIG = dict(
 )
 
 
-class FreezeMode(Enum):
-    """training mode"""
-
-    FULL = "full"
-    HEAD = "head_only"
-    LORA = "lora"
-    FROZEN = "frozen"
-
-
-@dataclass()
-class Loader(CN):
-    pass
-
-
 @dataclass()
 class Train(CN):
     """Base Config"""
@@ -168,10 +157,7 @@ class Train(CN):
 
     # Spec for dataset, loader and its transform pipeline
     # -- ( "multi", window_size, action_horizon=action_horizon, mix="xstack")
-    # -- TODO change name to pipe
-    dataset: Dataset = Dataset().field()
-    # data source
-    data: DataSource = default(SOURCES["xgym"])
+    data: Dataset = Dataset().field()
 
     pretrained_path: Union[Path, str] = "hf://rail-berkeley/crossformer"
     pretrained_step: Optional[int] = None  # elapsed steps (if resume/restart)
@@ -181,15 +167,11 @@ class Train(CN):
 
     # uncomment this line to add new observation tokenizer and action head
     # -- TODO update: model.Model = default( model.Model)
-    update: Dict[str, Any] = default(UPDATE_CONFIG)
+    # update: Dict[str, Any] = default(UPDATE_CONFIG)
 
     skip_norm_keys: List[str] = default(["proprio_bimanual, proprio_mano"])
 
     # delete: Optional[Delete] = BasicDelete.field()
-
-    loader: Loader = Loader().field()
-
-    shuffle_buffer_size: int = 10000
 
     log_interval: int = 100
     eval_interval: int = 2000
@@ -197,11 +179,9 @@ class Train(CN):
     save_dir: Union[str, Path] = os.environ.get("BAFL_SAVE", Path().home())
     seed: int = 42
 
-    frame_transform_threads: Optional[int] = None
     prefetch_num_batches: int = 64
 
     modality: transform.Modality = transform.Modality.MULTI  # mode of observation
-    finetuning_mode: FreezeMode = FreezeMode.FULL  # mode of training
 
     head_name: Optional[str] = None  # TODO why is this here ... see logger warning
 
@@ -232,7 +212,6 @@ class Train(CN):
         logger.info("SUGGESTION: propogate from the main cfg down to children")
         logger.warn("TODO: assert all keys that appear twice are the same")
         logger.warn("TODO: is update_config for model arch only?")
-        logger.warn(f"TODO: is head_name for {FreezeMode.HEAD}?")
 
     def transform_schema(self) -> Dict[str, Any]:
         """
@@ -257,14 +236,14 @@ CONFIGS = []
 # Single Arm Only
 CONFIGS += [
     Train(name=x.name.replace("xgym", "bela"), data=x.name)
-    for x in SOURCES.values()
+    for x in DataSource.REGISTRY.values()
     if x.head == Head.SINGLE
 ]
 
 # # Human (Mano) Only
 CONFIGS += [
     Train(name=x.name.replace("xgym", "bela"), data=x.name)
-    for x in SOURCES.values()
+    for x in DataSource.REGISTRY.values()
     if x.head == Head.MANO
 ]
 CONFIGS = {x.name: x for x in CONFIGS}
@@ -301,12 +280,11 @@ class Experiment(Train):
             raise NotImplementedError("TODO: reverse merge with self")
             # if you reverse the merge then you can still apply CLI args to the chosen Experiment
             # need to be careful about the defaults somehow though
-            
+
             self.update(d)
 
 
 TYP = Experiment
-
 
 class Sweep(Train):
 

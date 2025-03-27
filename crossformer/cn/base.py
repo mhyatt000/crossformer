@@ -17,14 +17,14 @@ def default(data, **kwargs):
 
 @dataclass()
 class CN:
-    name: str = "default"
+    name: str = ''
 
     def field(self):
-        """ wrap this class as a dataclass field """
-        return field(default_factory=lambda : self)
+        """wrap this class as a dataclass field"""
+        return field(default_factory=lambda: self)
 
     def default(self, other):
-        """ wrap an object as a dataclass field """
+        """wrap an object as a dataclass field"""
         return field(default_factory=lambda: other)
 
     def asdict(self):
