@@ -1,7 +1,7 @@
 #!/bin/bash
 
-#SBATCH --partition=long
-#SBATCH --time=3-00:00:00
+#SBATCH --partition=xl
+#SBATCH --time=14-00:00:00
 #SBATCH --account=bela
 
 #SBATCH --gres=gpu:4

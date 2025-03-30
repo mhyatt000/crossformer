@@ -8,12 +8,14 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Un
 from crossformer.cn.base import CN, default
 from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
 
-from .frame import FrameTransform, PerViewFrameTransform
+from .frame import FrameTransform
 from .traj import TrajectoryTransform
 
 import logging
 from typing import *
+
 logger = logging.getLogger(__name__)
+
 
 class Modality(Enum):
     IMG = "image_conditioned"
@@ -30,15 +32,16 @@ class KeepProb(Enum):
     HIGH = 0.9
 
 
-
-
 @dataclass()
 class Transform(CN):
-    REGISTRY: ClassVar[Dict[str, "DataSource"]] = {}
+    REGISTRY: ClassVar[Dict[str, "Transform"]] = {}
 
+    # TODO rename to seq
+    traj: TrajectoryTransform = TrajectoryTransform(name="").field()
 
-    traj: TrajectoryTransform = TrajectoryTransform(name='').field()
-    frame: FrameTransform = PerViewFrameTransform(name='').field()
+    frame: FrameTransform = FrameTransform(name="").field()
+
+    skip_norm_keys: List[str] = default(["proprio_bimanual", "proprio_mano"])
 
     task_cond: Modality = Modality.MULTI  # alias for modality
     keep_image_prob: float = 0.5

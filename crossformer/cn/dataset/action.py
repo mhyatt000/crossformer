@@ -1,5 +1,7 @@
 """action space"""
 
+from rich.pretty import pprint
+
 from crossformer.data.utils.data_utils import NormalizationType
 from dataclasses import dataclass, fields
 
@@ -46,6 +48,7 @@ class ActionSpace(Enum):
     # human action
     # TODO make better names
     # DMANO_18 = 18  # 3 palm & 15 finger params
+    DMANO_7 = 7  # xyz,rot,grippiness
     DMANO_35 = 35  # xyz,rot, 6*3 major knuckles and thumb , 11*1 other knuckles
     DMANO_51 = 51  # 3 palm & 48 pose params
     DMANO_52 = 52  #
@@ -61,7 +64,7 @@ class ActionRep(Enum):
 
 @dataclass
 class OBS(CN):
-    name:str = ''
+    name: str = ""
 
     def __iter__(self):
         """allows conversion of OBS keys into a list or set"""
@@ -70,8 +73,8 @@ class OBS(CN):
 
     def items(self):
         # asdict() returns a dict of instance fields, and .items() returns its key-value pairs
-        return {k: v for k, v in asdict(self).items() if k in self}
         return [(k, v) for k, v in asdict(self).items() if k in self]
+        return {k: v for k, v in asdict(self).items() if k in self}
 
 
 @dataclass
@@ -111,14 +114,13 @@ class Head(Enum):
     MULTI = "multi"  # reserved for MultiDataSource
 
 
-head2space = {
+HEAD2SPACE = {
     Head.BIMANUAL: ActionSpace.BI_POS_EULER,
     Head.QUADRUPED: ActionSpace.QUADRUPED,
     Head.NAV: ActionSpace.NAV,
-    Head.SINGLE: ActionSpace.POS_EULER,
+    Head.SINGLE: ActionSpace.JOINT,
     Head.MANO: ActionSpace.MANO,
 }
-proprio_obs_dims = head2space
 
 
 @dataclass
@@ -256,6 +258,15 @@ DATA_SPECS = DATA_SPECS | {
 print(DataSpec.REGISTRY.keys())
 
 
+from crossformer.data.oxe.oxe_dataset_configs import ProprioDim
+proprio_obs_dims = {
+    "mano": ProprioDim.MANO,
+    "single": ProprioDim.POS_EULER,
+    "bimanual": ProprioDim.BIMANUAL,
+    "quadruped": ProprioDim.QUADRUPED,
+}
+
+
 @dataclass
 class DataPrep(CN):
     """bundles DataSpec with loading rules"""
@@ -266,19 +277,25 @@ class DataPrep(CN):
     # oxw_kwargs: Dict[str, Any]
 
     # the folder that contains tfds
-    loc: str = os.path.join(os.path.expanduser("~"), "tensorflow_datasets")
+    loc: Path | str = Path().home().expanduser() / "tensorflow_datasets"
 
     # which of the provided camera views to load
-    load_camera_views: Sequence[str] = ("primary",)
+    load_camera_views: Sequence[str] = ()
 
-    load_depth: bool = False # y/n load depth images
-    load_proprio: bool = False # y/n load proprioception
-    load_language: bool = True # y/n load language instructions
+    load_depth: bool = False  # y/n load depth images
+    load_proprio: bool = False  # y/n load proprioception
+    load_language: bool = True  # y/n load language instructions
 
+    skip_norm_keys: List[str] = default([])
     force_recompute_dataset_statistics: bool = False
     action_proprio_normalization_type: NormalizationType = NormalizationType.NORMAL
 
     def __post_init__(self):
+
+        self.loc = str(self.loc)
+        assert (
+            self.load_camera_views
+        ), f"Must specify at least one camera view to load for {self.name}"
 
         if missing_keys := (
             set(self.load_camera_views) - set(self.spec.image_obs_keys)
@@ -325,32 +342,102 @@ class DataPrep(CN):
 
     @property
     def norm_mask(self):
+        """
+        if dataset_kwargs["action_encoding"] is ActionEncoding.EEF_POS:
+            # with EEF_POS actions, the last action dimension is gripper
+            dataset_kwargs["action_normalization_mask"] = [True] * 6 + [False]
+
+        elif dataset_kwargs["action_encoding"] is ActionEncoding.JOINT_POS:
+            # with JOINT_POS actions, last dimension is gripper
+            dataset_kwargs["action_normalization_mask"] = [True] * 7 + [False]
+
+        elif dataset_kwargs["action_encoding"] is ActionEncoding.JOINT_POS_BIMANUAL:
+            # with JOINT_POS_BIMANUAL actions, 7th and 14th dimension are gripper
+            dataset_kwargs["action_normalization_mask"] = (
+                [True] * 6 + [False] + [True] * 6 + [False]
+            )
+
+        elif dataset_kwargs["action_encoding"] is ActionEncoding.NAV_2D:
+            # with NAV_2D actions, all dimensions are deltas
+            dataset_kwargs["action_normalization_mask"] = [True] * 2
+
+        elif dataset_kwargs["action_encoding"] is ActionEncoding.JOINT_POS_BIMANUAL_NAV:
+            # with JOINT_POS_BIMANUAL_NAV actions, 7th and 14th dimension are gripper
+            dataset_kwargs["action_normalization_mask"] = (
+                [True] * 6 + [False] + [True] * 6 + [False] + [True] * 2
+            )
+
+        elif dataset_kwargs["action_encoding"] is ActionEncoding.QUADRUPED:
+            dataset_kwargs["action_normalization_mask"] = [True] * 12
+
+        # MANO
+        elif dataset_kwargs["action_encoding"] is ActionEncoding.MANO:
+            # dataset_kwargs["action_normalization_mask"] = [True] * (ActionDim.MANO-9) + [False] * 9
+            dataset_kwargs["action_normalization_mask"] = [True] * ActionDim.DMANO_7
+        """
+
         space2norm = {
-            ActionSpace.POS_EULER: 7,
-            ActionSpace.POS_QUAT: 8,
-            ActionSpace.JOINT: 8,
-            ActionSpace.BI_POS_EULER: 14,
-            ActionSpace.BI_POS_QUAT: 16,
-            ActionSpace.BI_JOINT: 16,
-            ActionSpace.DMANO_35: 35,
-            ActionSpace.DMANO_51: 51,
-            ActionSpace.DMANO_52: 52,
-            ActionSpace.MANO: 63,
+            # ActionSpace.POS_EULER: 7,
+            # ActionSpace.POS_QUAT: 8,
+            ActionSpace.JOINT: [True] * 7 + [False],
+            # ActionSpace.BI_POS_EULER: 14,
+            # ActionSpace.BI_POS_QUAT: 16,
+            ActionSpace.BI_JOINT: [True] * 6 + [False] + [True] * 6 + [False],
+            ActionSpace.QUADRUPED: [True] * 12,
+            # ActionSpace.DMANO_35: 35,
+            # ActionSpace.DMANO_51: 51,
+            # ActionSpace.DMANO_52: 52,
+            ActionSpace.MANO: [True] * ActionSpace.DMANO_7.value,
         }
-        return space2norm[self.spec.action_space]
+        out = space2norm[self.spec.action_encoding]
+        assert isinstance(out, list), "action space not found"
+        return out
 
     @property
-    def standardize_fn(self, oxe_standardization_transforms):
-        return oxe_standardization_transforms[self.name]
+    def standardize_fn(self, oxe_fns: Dict[str, Callable]):
+        """takes OXE_STANDARDIZATION_TRANSFORMS"""
         # return ModuleSpec.create(OXE_STANDARDIZATION_TRANSFORMS[name])
+        return ModuleSpec.create(oxe_fns[self.name])
 
+    def create(self,  oxe_fns):
+        d = self.asdict()
 
-DataPrep(
-    name="xgym_lift_single",
-    weight=1.0,
-    loc="xgym",
-    load_camera_views=("primary", "high", "side", "nav", "left_wrist", "right_wrist"),
-)
+        # computed not set
+        d2 = {
+            "action_normalization_mask": self.norm_mask,
+            "data_dir": self.loc,
+            #
+            "language_key": self.language_key,
+            "image_obs_keys": self.image_obs_keys,
+            # "depth_obs_keys": self.depth_obs_keys,
+            'state_obs_keys': self.spec.state_obs_keys,
+        }
+
+        if self.load_proprio:
+            d2['proprio_obs_keys'] =self.proprio_obs_keys 
+
+        h2s = {k.value: v for k, v in HEAD2SPACE.items()}
+        last = {
+            "standardize_fn": ModuleSpec.create(oxe_fns[self.name]),
+            "proprio_obs_dims": proprio_obs_dims,
+        }
+
+        d = d | d2 | last
+
+        pops = [
+            "weight",
+            "loc",
+            "load_camera_views",
+            "load_depth",
+            "load_proprio",
+            "load_language",
+            # "force_recompute_dataset_statistics",
+        ]
+
+        for p in pops:
+            d.pop(p)
+
+        return d
 
 
 """

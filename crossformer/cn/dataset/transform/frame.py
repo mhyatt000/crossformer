@@ -45,12 +45,9 @@ class AlohaAug(Augment):
 
 @dataclass()
 class BridgeAug(Augment):
-    random_resized_crop: Dict[str, Any] = default(dict(scale=[0.8, 1.0], ratio=[0.9, 1.1]))
-
-
-@dataclass()
-class Primary(BridgeAug):
-    pass
+    random_resized_crop: Dict[str, Any] = default(
+        dict(scale=[0.8, 1.0], ratio=[0.9, 1.1])
+    )
 
 
 #
@@ -58,12 +55,15 @@ class Primary(BridgeAug):
 #
 
 
+from typing import Sequence
+
+
 @dataclass()
 class FrameTransform(CN):
 
     # workspace (3rd person) camera is at 224x224
-    resize_size: Dict[str, List] = default({"primary": [224, 224]})
-    image_augment_kwargs: Dict[str, Augment] = default({"primary": Primary})
+    resize_size: Sequence = default([224, 224])
+    image_augment_kwargs: Augment = AlohaAug().field()
 
     # for the most CPU-intensive ops
     # threads: int  # if dloading too slow, set to 32 for (decoding, resizing, augmenting)
@@ -72,27 +72,16 @@ class FrameTransform(CN):
     def __post_init__(self):
         logger.warn("TODO: set self.threads")
 
+    def create(self, load_camera_views: Sequence[str]):
+        """Create a per-view frame transform for the specified camera views."""
 
-@dataclass()
-class PerViewFrameTransform(FrameTransform):
-    resize_size: Dict[str, List[int]] = default(
-        {
-            "primary": [224, 224],
-            "side": [224, 224],
-            "high": [224, 224],
-            "nav": [224, 224],
-            "left_wrist": [224, 224],
-            "right_wrist": [224, 224],
+        aug = self.image_augment_kwargs.asdict()
+        aug.pop('name')
+        d = {
+            "resize_size": {k: self.resize_size for k in load_camera_views},
+            "num_parallel_calls": self.num_parallel_calls,
+            "image_augment_kwargs": {
+                k: self.image_augment_kwargs.asdict() for k in load_camera_views
+            },
         }
-    )
-
-    image_augment_kwargs: Dict[str, Augment] = default(
-        {
-            "primary": BridgeAug,
-            "side": BridgeAug,
-            "high": AlohaAug,
-            "nav": BridgeAug,
-            "left_wrist": AlohaAug,
-            "right_wrist": AlohaAug,
-        }
-    )
+        return d

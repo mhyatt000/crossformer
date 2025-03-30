@@ -1,5 +1,6 @@
 """config nodes"""
 
+from typing import Sequence
 from dataclasses import dataclass, field, Field
 import enum
 from enum import Enum
@@ -7,171 +8,215 @@ import logging
 import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
-
 from rich import print as pprint
+from six import u
 import tyro
-
 from crossformer.cn.dataset import (
     DataSource,
     Head,
     MultiDataSource,
 )
-from crossformer.cn.dataset.action import DataSpec, DataPrep
-
+from crossformer.cn.dataset.action import DataSpec, DataPrep, HEAD2SPACE
 from crossformer.cn.dataset import Dataset, transform
 from crossformer.cn.eval import Eval
 from crossformer.cn.optim import Optimizer
 from crossformer.cn.rollout import Rollout
 from crossformer.cn.wab import Wandb
+from crossformer.cn import wab
+import flax
+from crossformer.cn.base import CN, default
+from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
+from crossformer.model.components.action_heads import (
+    ActionHead,
+    DiffusionActionHead,
+    L1ActionHead,
+)
+from crossformer.model.components.tokenizers import ImageTokenizer, LowdimObsTokenizer
+from crossformer.model.components.vit_encoders import ResNet26, ResNet26FILM
+from crossformer.utils.spec import ModuleSpec
+
 
 logger = logging.getLogger(__name__)
 logger.info("Importing crossformer.cn")
 
 
-import flax
-
-from crossformer.cn.base import CN, default
+class ModuleE(Enum):
+    L1 = L1ActionHead
+    DIFFUSION = DiffusionActionHead
 
 
 @dataclass
-class Delete(CN):
-    data: Dict[str, Any] = tyro.MISSING
+class HeadFactory(CN):
+
+    horizon: int = 4
+    module: ModuleE = ModuleE.L1
+    steps: int = 0  # diffusion steps
 
     def __post_init__(self):
-        logger.warn("TODO: was this for model only or all?")
-        logger.warn("TODO: prob better way to impose structure")
 
-    def expand(self) -> List[str]:
+        if self.module == ModuleE.DIFFUSION:
+            assert self.steps, "Diffusion steps must be 1+"
+        if self.module == ModuleE.L1:
+            assert not self.steps, "Diffusion steps must be 0"
+
+        h = Head[self.name.upper()]
+        self.dim = HEAD2SPACE[h]
+
+    def kwargs(self):
+        d = dict(
+            pool_strategy="use_map",
+            clip_pred=False,
+            loss_weight=1.0,
+            constrain_loss_dims=True,
+            readout_key=f"readout_{self.name}",
+        )
+        if self.module == ModuleE.DIFFUSION:
+            d["diffusion_steps"] = self.steps
+
+        return d
+
+    def create(self):
+        return ModuleSpec.create(
+            self.module.value,
+            action_horizon=self.horizon,
+            action_dim=self.dim.value,
+            **self.kwargs(),
+        )
+
+
+@dataclass
+class ModelFactory(CN):
+
+    im: Sequence[str] = default(["primary", "left_wrist"])
+    proprio: Sequence[str] = default(["single"])
+
+    # which heads to create
+    heads: Sequence[str] = default(["single", "bimanual", "mano"])
+
+    single: HeadFactory = HeadFactory(name="single").field()
+    bimanual: HeadFactory = HeadFactory(name="bimanual").field()
+    mano: HeadFactory = HeadFactory(name="mano").field()
+    debug: bool = False  # y/n load model?
+
+    def create(self) -> Dict[str, Any]:
+        """create the model config"""
+
+        tok = {k: self.make_obs_im(k) for k in self.im} | {
+            k: self.make_obs_proprio(k) for k in self.proprio
+        }
+
+        heads = {
+            v.name: v
+            for v in [self.single, self.bimanual, self.mano]
+            if v.name in self.heads
+        }
+        model = dict(
+            observation_tokenizers=tok,
+            heads={k: v.create() for k, v in heads.items()},
+            readouts={k: v.horizon for k, v in heads.items()},
+        )
+        return {"model": model}
+
+    def spec(self) -> Dict[str, Any]:
+        "simplified keys that can be used to delete old model config"
+        model = self.create()["model"]
+        model = {
+            "observation_tokenizers": {
+                k: v["module"] for k, v in model["observation_tokenizers"].items()
+            },
+            "heads": {k: v["module"] for k, v in model["heads"].items()},
+            "readouts": {k: v for k, v in model["readouts"].items()},
+        }
+        return {"model": model}
+
+    def flatten(self) -> List[str]:
         """expand the delete config into a list of keys"""
-        flattened = flax.traverse_util.flatten_dict(self.data, keep_empty_nodes=True)
+        flattened = flax.traverse_util.flatten_dict(self.spec(), keep_empty_nodes=True)
         flattened = list(flattened.keys())
         return flattened
 
+    def delete(self, flat):
+        """delete keys from flax config tree based on flat spec"""
+        """
+        Delete keys from the model config based on the flattened list
+        :param flat: list of keys to delete
+        """
 
-@dataclass
-class BasicDelete(Delete):
-    """cant be a tyro CN until we know what the keys are"""
+        def inside(a: List[str], b: List[str]):
+            """see if a is inside b"""
+            if len(a) > len(b):
+                return False
+            for _a, _b in zip(a, b[: len(a)]):
+                if _a != _b:
+                    return False
+            return True
 
-    data: Dict[str, Any] = default(
-        {
-            "model": {
-                "readouts": {
-                    "bimanual": 4,
-                    "quadruped": None,
-                    "nav": None,
-                    "single_arm": 4,
-                },
-                "observation_tokenizers": {
-                    "bimanual": None,
-                    "quadruped": None,
-                    # "high": None,
-                    "nav": None,
-                },
-                "heads": {
-                    "single_arm": "diffusion",
-                    "quadruped": None,
-                    "nav": None,
-                },
-            },
-        }
-    )
+        mykeys = self.flatten() # keep any keys already shared
+        # delete model: observation_tokenizers, heads, readouts
+        deletespec = set([m[:2] for m in mykeys])
 
+        for c in list(flat.keys()):
+            if any([inside(m, c) for m in mykeys]):
+                continue
+            if any([inside(d, c) for d in deletespec]):
+                print(f"del: {'.'.join(c)}")
+                del flat[c]
 
-from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
-from crossformer.model.components.action_heads import DiffusionActionHead, L1ActionHead
-from crossformer.model.components.tokenizers import ImageTokenizer, LowdimObsTokenizer
-from crossformer.model.components.vit_encoders import ResNet26, ResNet26FILM
-from crossformer.utils.spec import ModuleSpec
+        return flat
 
-UPDATE_CONFIG = dict(
-    model=dict(
-        observation_tokenizers=dict(
-            side=ModuleSpec.create(
-                ImageTokenizer,
-                obs_stack_keys=["image_side"],
-                task_stack_keys=["image_side"],
-                task_film_keys=["language_instruction"],
-                encoder=ModuleSpec.create(ResNet26FILM),
-            ),
-            single=ModuleSpec.create(
-                LowdimObsTokenizer,
-                obs_keys=["proprio_single"],
-                dropout_rate=0.2,
-            ),
-        ),
-        heads=dict(
-            single_arm=ModuleSpec.create(
-                DiffusionActionHead,
-                action_horizon=4,
-                action_dim=ActionDim.SINGLE,
-                num_preds=ActionDim.SINGLE,
-                pool_strategy="mean",  # isnt there another/better strategy
-                readout_key="readout_single_arm",
-                clip_pred=False,
-                loss_weight=1.0,
-                constrain_loss_dims=True,
-                diffusion_steps=20,
-            ),
-            bimanual=ModuleSpec.create(
-                L1ActionHead,
-                action_horizon=4,
-                action_dim=ActionDim.BIMANUAL,
-                # num_preds=ActionDim.BIMANUAL,
-                pool_strategy="pass",
-                readout_key="readout_bimanual",
-                clip_pred=False,
-                loss_weight=1.0,
-                constrain_loss_dims=True,
-            ),
-            mano=ModuleSpec.create(
-                DiffusionActionHead,
-                action_horizon=4,
-                action_dim=ActionDim.DMANO_7,
-                pool_strategy="mean",
-                readout_key="readout_mano",
-                clip_pred=False,
-                loss_weight=1.0,
-                constrain_loss_dims=True,
-                diffusion_steps=5,
-            ),
-        ),
-        readouts=dict(single_arm=4, mano=4, bimanual=4),
-    )
-)
+    def make_obs_proprio(self, key: str):
+        """create observation tokenizer for proprio"""
+        return ModuleSpec.create(
+            LowdimObsTokenizer, obs_keys=[f"proprio_{key}"], dropout_rate=0.2
+        )
+
+    def make_obs_im(self, key: str):
+        """create observation tokenizer for image"""
+        return ModuleSpec.create(
+            ImageTokenizer,
+            obs_stack_keys=[f"image_{key}"],
+            task_stack_keys=[f"image_{key}"],
+            task_film_keys=["language_instruction"],
+            encoder=ModuleSpec.create(ResNet26FILM),
+        )
+
+    def max_horizon(self) -> int:
+        h = 0
+        for head in [self.single, self.bimanual, self.mano]:
+            if head.name in self.heads:
+                h = max(h, head.horizon)
+        return h
+
+    def max_action_dim(self) -> int:
+        d = 0
+        for head in [self.single, self.bimanual, self.mano]:
+            if head.name in self.heads:
+                d = max(d, head.dim.value)
+        return d
 
 
 @dataclass()
 class Train(CN):
     """Base Config"""
 
-    max_steps: int = int(5e5)  # 500k
+    debug: bool = False  # mostly turns off wandb
 
+    steps: int = int(5e6)  # n training steps
     grad_acc = None
-    # max_steps = max_steps * (grad_acc or 1)
 
+    modality: transform.Modality = transform.Modality.MULTI  # mode of observation
     window_size: int = 1
-
-    # max action horizon
-    # -- TODO make this dynamic to dataset ... with factory
-    action_horizon = 50
-
-    # Spec for dataset, loader and its transform pipeline
-    # -- ( "multi", window_size, action_horizon=action_horizon, mix="xstack")
-    data: Dataset = Dataset().field()
+    head_name: Optional[str] = None  # TODO why is this here ... see logger warning
 
     pretrained_path: Union[Path, str] = "hf://rail-berkeley/crossformer"
     pretrained_step: Optional[int] = None  # elapsed steps (if resume/restart)
-    resume_path: Optional[str] = None
 
     wandb: Wandb = Wandb().field()
-
-    # uncomment this line to add new observation tokenizer and action head
-    # -- TODO update: model.Model = default( model.Model)
-    # update: Dict[str, Any] = default(UPDATE_CONFIG)
-
-    skip_norm_keys: List[str] = default(["proprio_bimanual, proprio_mano"])
-
-    # delete: Optional[Delete] = BasicDelete.field()
+    data: Dataset = Dataset().field()
+    model: ModelFactory = ModelFactory().field()  # model specs
+    optimizer: Optimizer = Optimizer().field()
+    eval: Eval = Eval().field()
+    rollout: Rollout = Rollout().field()
 
     log_interval: int = 100
     eval_interval: int = 2000
@@ -179,35 +224,30 @@ class Train(CN):
     save_dir: Union[str, Path] = os.environ.get("BAFL_SAVE", Path().home())
     seed: int = 42
 
-    prefetch_num_batches: int = 64
-
-    modality: transform.Modality = transform.Modality.MULTI  # mode of observation
-
-    head_name: Optional[str] = None  # TODO why is this here ... see logger warning
-
-    optimizer: Optimizer = Optimizer().field()
-    eval: Eval = Eval().field()
-    rollout: Rollout = Rollout().field()
-
-    debug: bool = False
-
-    def expand_enum(self):
-        logger.warn("TODO: make recursive")
-        for k, v in self.__dict__.items():
-            if isinstance(v, enum.Enum):
-                setattr(self, k, v.value)
-
     def __post_init__(self):
 
-        logger.warn("TODO: fix grad_acc and max_steps")
+        if self.data.transform.traj.action_horizon != self.model.max_horizon():
+            logger.warning(
+                "WARNING: action horizon mismatch."
+                f"data.transform.traj ({self.data.transform.traj.action_horizon}) "
+                f"model.max_horizon ({self.model.max_horizon()})."
+            )
+            self.data.transform.traj.action_horizon = self.model.max_horizon()
+
+        if self.data.transform.traj.max_action_dim != self.model.max_action_dim():
+            logger.warning(
+                "WARNING: max action dim mismatch."
+                f"data.transform.traj ({self.data.transform.traj.max_action_dim}) "
+                f"model.max_action_dim ({self.model.max_action_dim()})."
+            )
+            self.data.transform.traj.max_action_dim = self.model.max_action_dim()
+
+        if self.optimizer.lr.decay_steps is None:
+            logger.warning(f'WARNING: decay_steps is None, setting it to {self.steps}')
+            self.optimizer.lr.decay_steps = self.steps
+
+        logger.warn("TODO: fix grad_acc and steps")
         logger.warn("TODO: fix dataset")
-
-        logger.warn("TODO: expand_enum")
-
-        logger.warn("self.optimizer.lr.decay_steps = self.max_steps")
-        # assert ( self.optimizer.lr.decay_steps == self.max_steps), "Decay steps must match max steps"
-
-        logger.warn("TODO: wandb disabled if debug")
 
         logger.info("SUGGESTION: propogate from the main cfg down to children")
         logger.warn("TODO: assert all keys that appear twice are the same")
@@ -233,6 +273,9 @@ MGRS = []
 
 
 CONFIGS = []
+CONFIGS += [Train(name="default")]
+
+"""
 # Single Arm Only
 CONFIGS += [
     Train(name=x.name.replace("xgym", "bela"), data=x.name)
@@ -246,6 +289,8 @@ CONFIGS += [
     for x in DataSource.REGISTRY.values()
     if x.head == Head.MANO
 ]
+"""
+
 CONFIGS = {x.name: x for x in CONFIGS}
 
 # Train(
@@ -285,6 +330,7 @@ class Experiment(Train):
 
 
 TYP = Experiment
+
 
 class Sweep(Train):
 

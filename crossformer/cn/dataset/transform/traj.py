@@ -28,7 +28,7 @@ class TrajectoryTransform(CN):
     max_action_dim: ActionDim = ActionDim.BIMANUAL
     max_proprio_dim: ActionDim = ActionDim.BIMANUAL
     # head_to_dataset: Dict = default(HEAD_TO_DATASET)
-    goal_relabling_strategy: GoalRelabel = GoalRelabel.UNIFORM  # TODO define
+    goal_relabeling_strategy: GoalRelabel = GoalRelabel.UNIFORM  # TODO define
 
     task_augment_strategy: str = "delete_task_conditioning"
     # If the default data loading speed is too slow, try these:
@@ -41,3 +41,11 @@ class TrajectoryTransform(CN):
 
         logger.warn("TODO: ensure max dims are truly the max")
         logger.warn("TODO: define goal relabeling strategies")
+
+    def create(self):
+        d = self.asdict()
+        d["head_to_dataset"] = HEAD_TO_DATASET
+        d.pop("name")  
+        d['goal_relabeling_strategy'] = self.goal_relabeling_strategy.value
+        return d
+

@@ -23,6 +23,9 @@ from crossformer.data.dataset import make_interleaved_dataset, make_single_datas
 from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
 
 # make_oxe_dataset_kwargs_and_weights,
+from crossformer.data.oxe.oxe_standardization_transforms import (
+    OXE_STANDARDIZATION_TRANSFORMS,
+)
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec
@@ -51,7 +54,30 @@ except ImportError:
     pass
 
 
+def set_wandb(cfg: cn.Train):
+    # name = format_name_with_config( FLAGS.name, cfg.asdict())
+    time = datetime.datetime.now(
+        cst := datetime.timezone(datetime.timedelta(hours=-6))
+    ).strftime("%m%d")
+    # wandb_id = f"{cfg.name}_{time}"
+    logging.warning(f"TODO use {cfg.wandb} config")
+    run = wandb.init(
+        config=cfg.asdict(),
+        # # id=wandb_id,
+        # # name=cfg.name,
+        mode=cfg.wandb.mode(cfg.debug),
+        **cfg.wandb.asdict(),
+    )
+    run.name = f"{time}_{run.name}"
+    cfg.name = run.name
+
+
+def wandb_log(info, step):
+    wandb.log(flatten_dict(info, sep="/"), step=step)
+
+
 def main(cfg: cn.Train) -> None:  # experiment or sweep
+
     pprint(cfg)
     initialize_compilation_cache()
     devices = jax.devices()
@@ -62,24 +88,22 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         ======================
         Pretrained model: {cfg.pretrained_path}
         Finetuning Dataset: {cfg.data}
-        Data dir: {cfg.dataset.loc}
+        Data dir: {cfg.data.reader.loc}
         Task Modality: {cfg.modality}
         Finetuning Mode: {cfg.optimizer.mode}
 
         # Devices: {jax.device_count()}
-        Batch size: {cfg.dataset.batch_size} ({cfg.dataset.batch_size // len(devices) } per device)
-        # Steps: {cfg.max_steps}
+        Batch size: {cfg.data.gbs} ({cfg.data.bs} per device)
+        # Steps: {cfg.steps}
     """
     )
 
-    #########
     #
     # Setup Jax Data Parallelism
     #
-    #########
 
-    msg = f"Batch size ({cfg.dataset.batch_size}) must be divisible by the number of devices ({len(devices)})"
-    assert cfg.dataset.batch_size % len(devices) == 0, msg
+    msg = f"Batch size ({cfg.data.gbs}) must be divisible by the number of devices ({len(devices)})"
+    assert cfg.data.gbs % len(devices) == 0, msg
 
     # create a 1D mesh with a single axis named "batch"
     mesh = Mesh(jax.devices(), axis_names="batch")
@@ -99,35 +123,17 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     # prevent tensorflow from using GPU memory since it's only used for data loading
     tf.config.set_visible_devices([], "GPU")
 
-    #########
     #
     # Setup WandB
     #
-    #########
 
-    # name = format_name_with_config( FLAGS.name, cfg.asdict())
-    time = datetime.datetime.now(
-        cst := datetime.timezone(datetime.timedelta(hours=-6))
-    ).strftime("%m%d")
-    wandb_id = f"{cfg.name}_{time}"
-    logging.warning(f"TODO use {cfg.wandb} config")
-    wandb.init(
-        config=cfg.asdict(),
-        id=wandb_id,
-        # name=cfg.name,
-        mode=cn.wab.WandbMode.DISABLED.value if cfg.debug else None,
-        # TODO handle internally with cn factory:
-        # mode=cfg.wandb.mode(cfg.debug).value
-        **cfg.wandb.asdict(),
-    )
+    set_wandb(cfg)
 
-    #########
     #
     # Load Pretrained model + optionally modify config
     #
-    #########
 
-    if cfg.debug is False and cfg.pretrained_path is not None:
+    if cfg.model.debug is False and cfg.pretrained_path is not None:
         pretrained_model = CrossFormerModel.load_pretrained(
             cfg.pretrained_path,
             step=cfg.pretrained_step,
@@ -136,30 +142,19 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
             pretrained_model.config, keep_empty_nodes=True
         )
 
-        # delete keys from config
-        for d_key in cn.BasicDelete().expand():  # list of x.y.z
-
-            for c_key in list(flat_config.keys()):
-                # deletes all leaf nodes in cfg.delete
-                if ".".join(c_key).startswith(".".join(d_key)):
-                    print(f"Deleting {'.'.join(c_key)}")
-                    del flat_config[c_key]
+        flat_config = cfg.model.delete(flat_config)
 
         config = ConfigDict(flax.traverse_util.unflatten_dict(flat_config))
-        config.update(cfg.get("update", ConfigDict()))
+        config.update(cfg.model.create())
         config = config.to_dict()
         check_config_diff(config, pretrained_model.config)
 
-    #########
     #
     # Setup Data Loader
     #
-    #########
 
-    if cfg.debug:  # only for debugging when model is not needed
+    if cfg.model.debug:  # only for debugging when model is not needed
         config = {"text_processor": None}
-
-    # create text processor
     if config["text_processor"] is None:
         text_processor = None
     else:
@@ -170,44 +165,21 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         del batch["dataset_name"]
         return batch
 
+    #
     # load datasets
+    #
 
-    # create dataset_kwargs_list
-    data_weights: List[Tuple[str, float]] = cfg.data.value.flatten()
-    data_prep: List[cn.DataPrep] = [
-        cn.DataPrep(name=d, weight=w) for d, w in data_weights
-    ]
+    dataset = cfg.data.create(OXE_STANDARDIZATION_TRANSFORMS, train=True)
+    data_iter = dataset.iterator(prefetch=cfg.data.loader.prefetch)
+    data_iter = map(shard, map(process_batch, data_iter))
 
-    # TODO rename local_batch_size
-    cfg.dataset.batch_size //= jax.process_count()
-
-    # for l in cfg.dataset.dataset_kwargs_list:
-    # l["skip_norm_keys"] = ["proprio_bimanual", "proprio_mano"]
-
-    dataset = make_interleaved_dataset(**cfg.dataset, train=True)
-
-    train_data_iter = map(
-        shard,
-        map(
-            process_batch,
-            dataset.iterator(prefetch=cfg.prefetch_num_batches),
-        ),
-    )
-
-    example_batch = next(train_data_iter)
-
-    spec = lambda xtree: jax.tree.map(lambda arr: (arr.shape, str(arr.dtype)), xtree)
+    example_batch = next(data_iter)
+    spec = lambda _x: jax.tree.map(lambda arr: (arr.shape, str(arr.dtype)), _x)
     pprint(spec(example_batch))
 
-    # print(dataset.statistics)
-
-    quit()
-
-    #########
     #
     # Load Pretrained Model
     #
-    #########
 
     rng = jax.random.PRNGKey(cfg.seed)
     rng, init_rng = jax.random.split(rng)
@@ -225,41 +197,32 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         model = model.replace(params=merged_params)
         del pretrained_model
 
-    #########
     #
     # Setup Optimizer and Train State
     #
-    #########
 
     params = model.params
     if cfg.optimizer.frozen_keys is None:
         cfg.optimizer.frozen_keys = model.config["optimizer"]["frozen_keys"]
 
     tx, lr_callable, param_norm_callable = create_optimizer(
-        params,
-        **cfg.optimizer.to_dict(),
+        params, **cfg.optimizer.create()
     )
-    train_state = TrainState.create(
-        model=model,
-        tx=tx,
-        rng=rng,
-    )
+    train_state = TrainState.create(model=model, tx=tx, rng=rng)
 
-    #########
     #
     # Save all metadata
     #
-    #########
 
     if cfg.save_dir is not None:
         save_dir = tf.io.gfile.join(
-            cfg.save_dir,
+            str(cfg.save_dir),
             cfg.wandb.project,
             cfg.wandb.group or "",
-            wandb_id,
+            cfg.name,
         )
         wandb.config.update(dict(save_dir=save_dir), allow_val_change=True)
-        logging.info("Saving to %s", save_dir)
+        logging.info(f"Saving to {save_dir}")
         save_callback = SaveCallback(save_dir)
 
         # Add window_size to top of config, to make eval easier
@@ -269,28 +232,24 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         ].shape[1]
         model = model.replace(config=new_config)
 
+        logging.warning("WARNING: not saving config to disk")
         # Save finetuning config since it's not saved by SaveCallback, i.e. as part of model.save_pretrained()
-        with tf.io.gfile.GFile(
-            tf.io.gfile.join(save_dir, "finetune_config.json"), "w"
-        ) as config_file:
-            config_file.write(cfg.to_json_best_effort())
+        # with tf.io.gfile.GFile(
+        # tf.io.gfile.join(save_dir, "finetune_config.json"), "w"
+        # ) as config_file:
+        # config_file.write(cfg.serialize())
     else:
         save_dir = None
         save_callback = SaveCallback(None)
         logging.warning("save_dir not passed in, not saving checkpoints")
 
-    example_batch_spec = jax.tree.map(
-        lambda arr: (arr.shape, str(arr.dtype)), example_batch
-    )
     wandb.config.update(
-        dict(example_batch_spec=example_batch_spec), allow_val_change=True
+        dict(example_batch_spec=spec(example_batch)), allow_val_change=True
     )
 
-    #########
     #
     # Define loss, train_step, and eval_step
     #
-    #########
 
     def loss_fn(params, batch, rng, train=True):
         bound_module = model.module.bind({"params": params}, rngs={"dropout": rng})
@@ -347,7 +306,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         new_state = state.apply_gradients(grads=grads, rng=rng)
         return new_state, info
 
-    # @partial(
+    # @partial(  # cant pass kwargs to jitted function
     # jax.jit,
     # in_shardings=[replicated_sharding, dp_sharding],
     # )
@@ -385,160 +344,43 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
             action_metrics[head_name] = head_metrics
 
         # eval metrics
-        mano_head = bound_module.heads["mano"]
-        deltas = mano_head.predict_action(
-            transformer_embeddings,
-            train=train,
-            rng=rng,
-        )
-        action_metrics["vis"] = {"deltas": deltas}
+        if "mano" in cfg.model.heads:
+            mano_head = bound_module.heads["mano"]
+            deltas = mano_head.predict_action(
+                transformer_embeddings,
+                train=train,
+                rng=rng,
+            )
+            action_metrics["vis"] = {"deltas": deltas}
         return action_loss, action_metrics
 
-    #########
     #
     # Build validation callback
     #
-    #########
 
-    val_datasets_kwargs_list, _ = filter_eval_datasets(
-        cfg.dataset["dataset_kwargs_list"],
-        cfg.dataset["sample_weights"],
-        cfg.get("eval_datasets", ()),
-    )
+    # identical dataset kwargs for eval
+    dks, _ = cfg.data.kwargs_list(oxe_fns=OXE_STANDARDIZATION_TRANSFORMS)
     val_callback = VisCallback(
         loss_fn=val_fn,  # loss_fn,
         process_batch_fn=lambda batch: shard(process_batch(batch)),
         text_processor=text_processor,
-        val_dataset_kwargs_list=val_datasets_kwargs_list,
-        dataset=cfg.dataset,
+        val_dataset_kwargs_list=dks,
+        dataset_kwargs=cfg.data.kwargs(),
         stats=dataset.dataset_statistics,
-        **cfg.val_kwargs.to_dict(),
+        val_shuffle_buffer_size=1_000,
+        num_val_batches=8,
     )
 
-    ########
-    #
-    # SET UP MODEL ROLLOUTS (from improve & SIMPLER)
-    #
-    ########
-
-    def _model_step(params, batch, rng, train=False):
-        """for evaluation in env"""
-
-        # modified for crossformer from octo
-        print(spec(batch))
-
-        """
-        actions = model.sample_actions(
-            batch,
-            task,
-            model.dataset_statistics['bridge_dataset'],
-            head_name='single_arm',
-            rng=rng,
-        )[0, :, : 7]
-        """
-
-        bound_module = model.module.bind({"params": params}, rngs={"dropout": rng})
-        transformer_embeddings = bound_module.crossformer_transformer(
-            batch["observation"],
-            batch["task"],
-            batch["observation"]["timestep_pad_mask"],
-            train=train,
-        )
-        actions = bound_module.heads["single_arm"](
-            transformer_embeddings,  # doesnt need rng since its not diffusion
-            train=train,
-        )
-
-        return actions
-
-    @partial(
-        jax.jit,
-        # state is replicated, batch is data-parallel
-        in_shardings=(dp_sharding),
-        out_shardings=(replicated_sharding),
-        # allows jax to modify `state` in-place, saving a lot of memory
-        # donate_argnums=0,
-    )
-    def model_step(batch):
-        actions = _model_step(train_state.model.params, batch, train_state.rng)
-        # act_horizon is 4 for single_arm
-        # we act on the last obs horizon
-        actions = actions[: cfg.rollout_kwargs.num_envs, -1, :4, :]
-        return actions
-
-    use_rollout = cfg.rollout_kwargs.use_rollout
-    if use_rollout:
-        import simpler_env as simpler
-        from simpler_utils import EvalCallback, mk_envs
-
-        tasks = [e for e in simpler.ENVIRONMENTS if "widowx" in e]
-        # replicates a few times
-        tasks = tasks
-        venv = mk_envs(tasks, cfg.rollout_kwargs.num_envs)
-        instructions = venv.env_method("get_language_instruction")
-
-    def transform(batch):
-        # zeros = jax.tree.map(lambda arr: jnp.zeros(arr), gapspec)
-        batch["observation"]["timestep_pad_mask"] = batch["observation"].pop("pad_mask")
-
-        zeros = jax.tree.map(
-            lambda arr: jnp.zeros(
-                (
-                    cfg.dataset.batch_size - cfg.rollout_kwargs.num_envs,
-                    *arr.shape[1:],
-                )
-            ),
-            batch,
-        )
-        batch = jax.tree.map(lambda a, b: jnp.concatenate([a, b], axis=0), batch, zeros)
-
-        _instruct = instructions + [
-            "" for _ in range(cfg.dataset.batch_size - cfg.rollout_kwargs.num_envs)
-        ]
-        batch["task"] = {"language_instruction": [i.encode("utf-8") for i in _instruct]}
-        batch["dataset_name"] = "bridge_dataset"  # dummy variable
-
-        batch = shard(process_batch(batch))
-        return batch
-
-    if use_rollout:
-        from improve.fm.oxes import OXESimplerInference, PolicyStepper
-
-        stepper = PolicyStepper(
-            model_type="func",
-            dataset_id="bridge_dataset",  # or google dataset
-            func=model_step,
-            transform=transform,
-        )
-
-        oxes = OXESimplerInference(
-            stepper,
-            batch_size=cfg.rollout_kwargs.num_envs,
-            image_size=224,
-        )
-        oxes.reset(instructions)
-
-        def og_step(obs):
-            raw, act = oxes.step(obs)
-            return act
-
-        eval_callback = EvalCallback(venv, og_step)
-
-    #########
     #
     # Train loop
     #
-    #########
-
-    def wandb_log(info, step):
-        wandb.log(flatten_dict(info, sep="/"), step=step)
 
     timer = Timer()
-    for i in tqdm.tqdm(range(cfg.max_steps), total=cfg.max_steps, dynamic_ncols=True):
+    for i in tqdm.tqdm(range(cfg.steps), total=cfg.steps, dynamic_ncols=True):
         timer.tick("total")
 
         with timer("dataset"):
-            batch = next(train_data_iter)
+            batch = next(data_iter)
 
         with timer("train"):
             train_state, update_info = train_step(train_state, batch)
@@ -558,7 +400,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
                 val_metrics = val_callback(train_state, i + 1)
                 wandb_log(val_metrics, step=i)
 
-            if use_rollout:
+            if cfg.rollout.use:
                 with timer("rollout"):
                     evals = eval_callback(i)
                     wandb_log({"eval": evals}, step=i)

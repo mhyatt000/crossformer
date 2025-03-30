@@ -16,7 +16,7 @@ class Wandb(CN):
 
     project: str = "bafl"
     group: str = "ssl-luc"
-    entity: Optional[str] = None  # should take default entity
+    entity: Optional[str] = None
 
     # id of run to resume... optionally use f'{id}?_step={step}'
     resume_from: Optional[str] = None
@@ -28,3 +28,7 @@ class Wandb(CN):
     # -- disabled: Disables all W&B functionality, making the run’s methods no-ops
     # mode: WandbMode = WandbMode.ONLINE
 
+    def mode(self, debug):
+        """ Returns the mode for wandb based on the provided settings. """
+        m = WandbMode.DISABLED if debug else WandbMode.ONLINE
+        return m.value

@@ -7,4 +7,4 @@ from crossformer.cn.base import CN
 @dataclass()
 class Rollout(CN):
     num_envs: int = 4
-    use_rollout: bool = False
+    use: bool = False
