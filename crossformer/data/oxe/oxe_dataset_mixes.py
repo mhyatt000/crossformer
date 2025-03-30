@@ -10,7 +10,7 @@ HEAD_TO_DATASET = {
     # 'binamo': [ ],
     # 'smplx': [ ],
     "nav": ["omnimimic_gnm_dataset"],
-    "single_arm": [
+    "single": [
         "xgym_lift_single",
         "xgym_stack_single",
         "xgym_duck_single",
