@@ -235,6 +235,8 @@ class MSEActionHead(ContinuousActionHead):
     pool_strategy: str = "use_map"
 
 
+import logging
+
 class DiffusionActionHead(nn.Module):
     """Predicts actions uses a diffusion process.
 
