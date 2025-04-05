@@ -6,11 +6,8 @@ from pathlib import Path
 from typing import *
 
 from crossformer.cn.base import CN, default
-from crossformer.cn.dataset.transform import Transform
-from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
-from crossformer.data.oxe.oxe_dataset_mixes import OXE_NAMED_MIXES
 
-from crossformer.cn.dataset.action import Head
+from crossformer.cn.dataset.types import Head
 
 
 @dataclass

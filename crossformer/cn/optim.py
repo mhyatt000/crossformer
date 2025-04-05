@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from rich.pretty import pprint 
+from rich.pretty import pprint
 from enum import Enum
 import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
@@ -19,10 +19,10 @@ class LearningRate(CN):
     peak: float = 3e-4  # peak value
     warmup_steps: int = 2000  # num steps to reach peak
     decay_steps: Optional[int] = None  # max_steps
-    last: float = 0.0  # final value
+    last: float = 1e-7  # final value
 
     def __post_init__(self):
-        assert self.name in ["linear", "cosine", "exponential"]
+        assert self.name in ["linear", "cosine", "exponential", 'rsqrt']
         logger.warn(f" decay is none: { self.decay_steps is None}")
         logger.warn("TODO make scheduler")
 
@@ -35,9 +35,29 @@ class LearningRate(CN):
         return d
 
 
+@dataclass
+class Cosine(LearningRate):
+
+    name: str = "cosine"
+    decay_steps: Optional[int] = None  # max_steps
+
+    def create(self):
+        # assert decay here
+        d = super().create()
+        return d
+
+
+@dataclass
+class RSQRT(LearningRate):
+
+    name: str = "rsqrt"
+    timescale: float = 1e4
+
+
 linear = LearningRate()
 cosine = LearningRate(name="cosine")
 exponential = LearningRate(name="exponential")
+rsqrt = RSQRT()
 
 
 class FreezeMode(Enum):
@@ -53,7 +73,7 @@ class FreezeMode(Enum):
 class Optimizer(CN):
     """Optimizer Config. Which weights to learn, and how"""
 
-    lr: LearningRate = LearningRate(name='cosine').field()
+    lr: LearningRate = LearningRate(name="cosine").field()
     weight_decay: float = 0.01
     clip_gradient: float = 1.0
     frozen_keys: Optional[List[str]] = None

@@ -145,6 +145,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         flat_config = cfg.model.delete(flat_config)
 
         config = ConfigDict(flax.traverse_util.unflatten_dict(flat_config))
+        pprint(cfg.model.create())
         config.update(cfg.model.create())
         config = config.to_dict()
         check_config_diff(config, pretrained_model.config)

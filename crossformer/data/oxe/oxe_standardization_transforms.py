@@ -164,7 +164,8 @@ def xgym_mano_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     return trajectory
 
 
-from crossformer.cn.dataset.action import XGYM, ActionRep, ActionSpace
+from crossformer.cn.dataset.action import DataSpec, XGYM
+from crossformer.cn.dataset.types import ActionRep, ActionSpace
 
 
 def xgym_single_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
@@ -172,7 +173,7 @@ def xgym_single_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     obs = trajectory.pop("observation")
     images = obs.pop("image")
 
-    x = XGYM()
+    x= DataSpec.REGISTRY['xgym_stack_single']
 
     def getrep() -> dict[str, tf.Tensor]:
         if x.action_rep == ActionRep.RELATIVE:

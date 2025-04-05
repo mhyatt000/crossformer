@@ -1,5 +1,3 @@
-"""action space"""
-
 from rich.pretty import pprint
 
 from crossformer.data.utils.data_utils import NormalizationType
@@ -24,42 +22,8 @@ import tyro
 
 from crossformer.cn.base import CN, default
 
-
-logger = logging.getLogger(__name__)
-logger.info("Importing crossformer.cn")
-
-
-class ActionSpace(Enum):
-
-    NONE = 0
-    QUADRUPED = 12
-    NAV = 2  # 2D
-
-    # single action space
-    POS_EULER = 7  # EEF XYZ + roll-pitch-yaw + gripper open/close
-    POS_QUAT = 8  # EEF XYZ + quaternion + gripper open/close
-    JOINT = 8  # joint angles + gripper open/close
-
-    # bimanual action space
-    BI_POS_EULER = 14  # 2x(6+1)
-    BI_POS_QUAT = 16  # 2x(7+1)
-    BI_JOINT = 16  # 2x(7+1)
-
-    # human action
-    # TODO make better names
-    # DMANO_18 = 18  # 3 palm & 15 finger params
-    DMANO_7 = 7  # xyz,rot,grippiness
-    DMANO_35 = 35  # xyz,rot, 6*3 major knuckles and thumb , 11*1 other knuckles
-    DMANO_51 = 51  # 3 palm & 48 pose params
-    DMANO_52 = 52  #
-    MANO = 63  # 21 joints x 3
-
-
-class ActionRep(Enum):
-    """Action representation: relative or absolute"""
-
-    RELATIVE = "rel"
-    ABSOLUTE = "abs"
+from crossformer.cn.dataset.types import ActionSpace, ActionRep, Head, HEAD2SPACE
+from crossformer.cn.dataset.mix import DataSource
 
 
 @dataclass
@@ -102,27 +66,6 @@ class POBS(OBS):
     quadruped: Optional[str] = None
 
 
-class Head(Enum):
-    """Output head / Action Space of the model"""
-
-    BIMANUAL = "bimanual"
-    QUADRUPED = "quadruped"
-    NAV = "nav"
-    SINGLE = "single"
-    MANO = "mano"
-
-    MULTI = "multi"  # reserved for MultiDataSource
-
-
-HEAD2SPACE = {
-    Head.BIMANUAL: ActionSpace.BI_POS_EULER,
-    Head.QUADRUPED: ActionSpace.QUADRUPED,
-    Head.NAV: ActionSpace.NAV,
-    Head.SINGLE: ActionSpace.JOINT,
-    Head.MANO: ActionSpace.MANO,
-}
-
-
 @dataclass
 class DataSpec(CN):
     """defines 1. keymapping to standard form 2. types of data 3. transforms"""
@@ -157,9 +100,17 @@ class XGYM(DataSpec):
 
     proprio_encoding: ActionSpace = ActionSpace.POS_EULER
     # TODO map head to possible action spaces
-    action_encoding: ActionSpace = ActionSpace.JOINT
+    action_encoding: ActionSpace = ActionSpace.POS_EULER # JOINT
 
     action_rep: ActionRep = ActionRep.RELATIVE
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        head = DataSource.REGISTRY[self.name].head
+        space = HEAD2SPACE.get(head, None)
+        msg = f"action_encoding {self.action_encoding} does not match head {head} for {self.name}"
+        assert self.action_encoding == space, msg
 
 
 class BasicDataSpec(DataSpec):
@@ -176,20 +127,11 @@ xgym_specs = {
         "xgym_lift_single",
         "xgym_duck_single",
         "xgym_stack_single",
-        "xgym_play_single",
-        "xgym_single",
+        # "xgym_play_single",
+        # "xgym_single",
     ]
 }
-xgym_specs = xgym_specs | {
-    k: XGYM(name=k)
-    for k in [
-        "xgym_lift_mano",
-        "xgym_stack_mano",
-        "xgym_stack_mano",
-        "xgym_duck_mano",
-        "xgym_duck_mano",
-    ]
-}
+# xgym_specs = xgym_specs | { k: XGYM(name=k) for k in [ "xgym_lift_mano", "xgym_stack_mano", "xgym_stack_mano", "xgym_duck_mano", "xgym_duck_mano", ] }
 
 DATA_SPECS = xgym_specs
 
@@ -259,6 +201,7 @@ print(DataSpec.REGISTRY.keys())
 
 
 from crossformer.data.oxe.oxe_dataset_configs import ProprioDim
+
 proprio_obs_dims = {
     "mano": ProprioDim.MANO,
     "single": ProprioDim.POS_EULER,
@@ -287,7 +230,7 @@ class DataPrep(CN):
     load_language: bool = True  # y/n load language instructions
 
     skip_norm_keys: List[str] = default([])
-    force_recompute_dataset_statistics: bool = False
+    force_recompute_dataset_statistics: bool = True
     action_proprio_normalization_type: NormalizationType = NormalizationType.NORMAL
 
     def __post_init__(self):
@@ -308,7 +251,7 @@ class DataPrep(CN):
             _ = self.norm_mask
         except KeyError:
             raise ValueError(
-                f"Cannot load {sefl.name} with unsupported action encoding {self.spec.action_encoding}"
+                f"Cannot load {self.name} with unsupported action encoding {self.spec.action_encoding}"
             )
 
     @property
@@ -377,7 +320,7 @@ class DataPrep(CN):
         """
 
         space2norm = {
-            # ActionSpace.POS_EULER: 7,
+            ActionSpace.POS_EULER: [True] * 6 + [False],
             # ActionSpace.POS_QUAT: 8,
             ActionSpace.JOINT: [True] * 7 + [False],
             # ActionSpace.BI_POS_EULER: 14,
@@ -399,7 +342,7 @@ class DataPrep(CN):
         # return ModuleSpec.create(OXE_STANDARDIZATION_TRANSFORMS[name])
         return ModuleSpec.create(oxe_fns[self.name])
 
-    def create(self,  oxe_fns):
+    def create(self, oxe_fns):
         d = self.asdict()
 
         # computed not set
@@ -410,11 +353,11 @@ class DataPrep(CN):
             "language_key": self.language_key,
             "image_obs_keys": self.image_obs_keys,
             # "depth_obs_keys": self.depth_obs_keys,
-            'state_obs_keys': self.spec.state_obs_keys,
+            "state_obs_keys": self.spec.state_obs_keys,
         }
 
         if self.load_proprio:
-            d2['proprio_obs_keys'] =self.proprio_obs_keys 
+            d2["proprio_obs_keys"] = self.proprio_obs_keys
 
         h2s = {k.value: v for k, v in HEAD2SPACE.items()}
         last = {

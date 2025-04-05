@@ -8,10 +8,5 @@ from crossformer.cn.dataset.dataset import (
     DataSourceE,
     TransformE,
 )
-from crossformer.cn.dataset.action import (
-    DataSpec,
-    DataPrep,
-    Head,
-    ActionSpace,
-    ActionRep,
-)
+from crossformer.cn.dataset.action import DataSpec, DataPrep
+from crossformer.cn.dataset.types import Head, ActionSpace, ActionRep

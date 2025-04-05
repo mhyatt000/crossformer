@@ -39,6 +39,7 @@ dependencies = [
     "wandb>=0.12.14",
     "tyro>=0.9.1",
     "opencv-python-headless>=4.11.0.86",
+    "grain>=0.2.6",
 ]
 
 [tool.black]

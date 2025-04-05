@@ -69,6 +69,7 @@ class HeadFactory(CN):
             loss_weight=1.0,
             constrain_loss_dims=True,
             readout_key=f"readout_{self.name}",
+            num_preds= 0, # force to use dim * horizon
         )
         if self.module == ModuleE.DIFFUSION:
             d["diffusion_steps"] = self.steps
@@ -110,6 +111,7 @@ class ModelFactory(CN):
             for v in [self.single, self.bimanual, self.mano]
             if v.name in self.heads
         }
+        assert len(heads) > 0, "No heads selected"
         model = dict(
             observation_tokenizers=tok,
             heads={k: v.create() for k, v in heads.items()},
