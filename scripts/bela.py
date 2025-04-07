@@ -1,4 +1,5 @@
 import os
+from functools import partial
 from finetune import TrainState, create_optimizer
 from crossformer.model.crossformer_module import (
     CrossFormerModule,
@@ -248,7 +249,7 @@ def run_nnx(module, optimizer, metrics, data):
             )
 
 
-def run_linen(train_state, model, data, cfg, param_norm_callable, lr_callable):
+def run_linen(train_state, model, data, cfg, param_norm_callable, lr_callable, shards):
 
     def loss_fn(params, batch, rng, train=True):
         bound_module = model.module.bind({"params": params}, rngs={"dropout": rng})
@@ -282,7 +283,11 @@ def run_linen(train_state, model, data, cfg, param_norm_callable, lr_callable):
 
     # Data parallelism
     # Model is replicated across devices, data is split across devices
-    @jax.jit
+    @partial(
+        jax.jit,
+        in_shardings=(shards['rep'], shards['ddp']),
+        out_shardings=shards['rep'],
+    )
     def train_step(state: TrainState, batch):
         rng, dropout_rng = jax.random.split(state.rng)
         (loss, info), grads = jax.value_and_grad(loss_fn, has_aux=True)(
@@ -478,7 +483,7 @@ def main(cfg: cn.Train):
         if use_nnx:
             run_nnx(module, optimizer, metrics, data)
         if use_linen:
-            run_linen(train_state, model, data, cfg, param_norm_callable, lr_callable)
+            run_linen(train_state, model, data, cfg, param_norm_callable, lr_callable, shards)
 
 
 if __name__ == "__main__":
