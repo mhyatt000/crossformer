@@ -245,6 +245,7 @@ dependencies = [
     { name = "distrax" },
     { name = "einops" },
     { name = "flax" },
+    { name = "grain" },
     { name = "gym" },
     { name = "imageio" },
     { name = "jax", extra = ["cuda12"] },
@@ -282,6 +283,7 @@ requires-dist = [
     { name = "distrax", specifier = "==0.1.5" },
     { name = "einops", specifier = ">=0.6.1" },
     { name = "flax", specifier = ">=0.7.5" },
+    { name = "grain", specifier = ">=0.2.6" },
     { name = "gym", specifier = ">=0.26" },
     { name = "imageio", specifier = ">=2.31.1" },
     { name = "jax", extras = ["cuda12"], specifier = ">=0.4.34" },
@@ -571,6 +573,29 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/41/4f/d8be74b88621131dfd1ed70e5aff2c47f2bdf2289a70736bbf3eb0e7bc70/googleapis_common_protos-1.69.1.tar.gz", hash = "sha256:e20d2d8dda87da6fe7340afbbdf4f0bcb4c8fae7e6cadf55926c31f946b0b9b1", size = 144514 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/16/cb/2f4aa605b16df1e031dd7c322c597613eef933e8dd5b6a4414330b21e791/googleapis_common_protos-1.69.1-py2.py3-none-any.whl", hash = "sha256:4077f27a6900d5946ee5a369fab9c8ded4c0ef1c6e880458ea2f70c14f7b70d5", size = 293229 },
+]
+
+[[package]]
+name = "grain"
+version = "0.2.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "absl-py" },
+    { name = "array-record" },
+    { name = "cloudpickle" },
+    { name = "dm-tree" },
+    { name = "etils", extra = ["epath", "epy"] },
+    { name = "more-itertools" },
+    { name = "numpy" },
+    { name = "protobuf" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/35/c4/5ea4ea92958794eedd6a1f86ccba44bc630c6dd882433866b88321433695/grain-0.2.6-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:8851d1247a867660b89d094456a28b487f1d56d70731902bbf4930c0470c345f", size = 386107 },
+    { url = "https://files.pythonhosted.org/packages/55/41/0de91f0cbe2d9754cfea34cad5d806cff61014161b47f79f07379a019b1a/grain-0.2.6-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:fcac071a0109f861ae885e7e25645f702f0c2ca3439572ca0d0dde165acb28d2", size = 468157 },
+    { url = "https://files.pythonhosted.org/packages/3f/7a/2e976c371c2f35cc062245b90bfdc86ae44bdc2f4d52d1a4e3d95cd8f7f0/grain-0.2.6-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:6324001e6aa77be9d11939adf88b52e22c9bb60ce6635ef118f49f4f70d769e5", size = 469055 },
+    { url = "https://files.pythonhosted.org/packages/33/68/3c6501741905bce98c2c223010ef70c748c8da11e44598509a051293bd10/grain-0.2.6-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:266e56375b82c5bc00fd5457533c3d92074a76fd58524316a538f2418f2c7da2", size = 386893 },
+    { url = "https://files.pythonhosted.org/packages/06/f7/c8c17ea10ce83f99183758e991d5badaed987720391c6da6e060322f6ee8/grain-0.2.6-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:9fec9ee32050712a55295e6d0589bdc2873a6f99f6cdc01756fecc46c5653a94", size = 469363 },
+    { url = "https://files.pythonhosted.org/packages/21/96/09842b4c672eead3c96f7c6ca5a1c643ac2dc4f4baca4afd7bac168e47e4/grain-0.2.6-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:44cbbdfc7fe5d9598628d5a983cae3e97f62ec2374242cd27bdea4e5e0f0a8d6", size = 470408 },
 ]
 
 [[package]]
@@ -1080,6 +1105,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/8f/8c/7b610bd500617854c8cc6ed7c8cfb9d48d6a5c21a1437a36a4b9bc8a3598/ml_dtypes-0.4.1-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:772426b08a6172a891274d581ce58ea2789cc8abc1c002a27223f314aaf894e7", size = 2181554 },
     { url = "https://files.pythonhosted.org/packages/c7/c6/f89620cecc0581dc1839e218c4315171312e46c62a62da6ace204bda91c0/ml_dtypes-0.4.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:126e7d679b8676d1a958f2651949fbfa182832c3cd08020d8facd94e4114f3e9", size = 2160488 },
     { url = "https://files.pythonhosted.org/packages/ae/11/a742d3c31b2cc8557a48efdde53427fd5f9caa2fa3c9c27d826e78a66f51/ml_dtypes-0.4.1-cp312-cp312-win_amd64.whl", hash = "sha256:df0fb650d5c582a9e72bb5bd96cfebb2cdb889d89daff621c8fbc60295eba66c", size = 127462 },
+]
+
+[[package]]
+name = "more-itertools"
+version = "10.6.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/88/3b/7fa1fe835e2e93fd6d7b52b2f95ae810cf5ba133e1845f726f5a992d62c2/more-itertools-10.6.0.tar.gz", hash = "sha256:2cd7fad1009c31cc9fb6a035108509e6547547a7a738374f10bd49a09eb3ee3b", size = 125009 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/23/62/0fe302c6d1be1c777cab0616e6302478251dfbf9055ad426f5d0def75c89/more_itertools-10.6.0-py3-none-any.whl", hash = "sha256:6eb054cb4b6db1473f6e15fcc676a08e4732548acd47c708f0e179c2c7c01e89", size = 63038 },
 ]
 
 [[package]]
