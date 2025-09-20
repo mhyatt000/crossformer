@@ -1,5 +1,5 @@
 default_language_version:
-    python: python3.10
+    python: python3.11
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v2.3.0
@@ -15,22 +15,22 @@ repos:
       - id: detect-private-key
       - id: debug-statements
         exclude: ^experiments/
-  - repo: https://github.com/psf/black
-    rev: 22.10.0
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.5.14
     hooks:
-      - id: black
-        exclude: ^experiments/
-  - repo: https://github.com/PyCQA/flake8
-    rev: 6.1.0
+      - id: uv-lock
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.6
     hooks:
-      - id: flake8
-        exclude: ^experiments/
-  - repo: https://github.com/pycqa/isort
-    rev: 5.12.0
+      # Run the linter.
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
     hooks:
-      - id: isort
-        exclude: ^experiments/
-        args: ["--profile", "black", "--src", "crossformer", "--src", "experiments"]
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
   - repo: https://github.com/srstevenson/nb-clean
     rev: 3.1.0
     hooks:
