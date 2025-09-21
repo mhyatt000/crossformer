@@ -29,6 +29,7 @@ from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
 from crossformer.model.components.action_heads import (
     ActionHead,
     DiffusionActionHead,
+    FlowMatchingActionHead,
     L1ActionHead,
 )
 from crossformer.model.components.tokenizers import ImageTokenizer, LowdimObsTokenizer
@@ -43,6 +44,7 @@ logger.info("Importing crossformer.cn")
 class ModuleE(Enum):
     L1 = L1ActionHead
     DIFFUSION = DiffusionActionHead
+    FLOW = FlowMatchingActionHead
 
 
 @dataclass
@@ -58,6 +60,8 @@ class HeadFactory(CN):
             assert self.steps, "Diffusion steps must be 1+"
         if self.module == ModuleE.L1:
             assert not self.steps, "Diffusion steps must be 0"
+        if self.module == ModuleE.FLOW:
+            assert self.steps, "Flow steps must be 1+"
 
         h = Head[self.name.upper()]
         self.dim = HEAD2SPACE[h]
@@ -73,6 +77,8 @@ class HeadFactory(CN):
         )
         if self.module == ModuleE.DIFFUSION:
             d["diffusion_steps"] = self.steps
+        if self.module == ModuleE.FLOW:
+            d["flow_steps"] = self.steps
 
         return d
 
