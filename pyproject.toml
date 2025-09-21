@@ -25,7 +25,6 @@ dependencies = [
     "orbax-checkpoint==0.11.20",
     "omegaconf>=2.3.0",
     "plotly>=5.16.1",
-    "pre-commit==3.3.3", # what is this
     "scipy==1.12.0",
     "tensorstore>=0.1.60",
     "tqdm",
@@ -48,35 +47,42 @@ dependencies = [
 [dependency-groups]
 dev = [
     "coverage>=7.10.6",
+    "pre-commit==3.3.3",
     "pytest>=8.4.2",
 ]
 
-# [tool.black]
-# https://github.com/psf/black
-# exclude = "(.eggs|.git|.hg|.mypy_cache|.nox|.tox|.venv|.svn|_build|buck-out|build|dist)"
-
 [tool.ruff]
+target-version = "py311"
 line-length = 120
 
 [tool.ruff.lint]
-select = [
+select = [ # list of rule codes Ruff should check
   "E",  # pycodestyle
   "F",  # pyflakes
   "I",  # isort
+  "UP", # unused imports
 ]
-ignore = [
+ignore = [ # exceptions to select
     "F841",  # assigned but unused variable
     "F821",  # undefined name
     "E731",  # do not assign lambda
     "E722",  # do not use bare except
-    "E402",  # module import not at top of file
+    # "E402",  # module import not at top of file
     "E501",  # line too long
+    "F401",
+    "UP035",
     #
     "F722",   # Conflicts with array typing.
     "T201",   # We use print statements.
     "PD008",  # Lots of false positives.
     "ISC001", # Disabling to support ruff format.
 ]
+fixable = [ # whitelist potentially 'unsafe' linter fixes
+    "F401", # unused imports
+    "UP006", # Use `list` instead of `List` for type annotation
+    "UP007", # Use `X | Y` for type annotations
+]
+unfixable = [] # blacklist linter fixes
 
 
 [tool.ruff.lint.isort]

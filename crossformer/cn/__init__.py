@@ -1,31 +1,33 @@
 """config nodes"""
 
-from typing import Sequence
-from dataclasses import dataclass, field, Field
+from dataclasses import Field, dataclass, field
 import enum
 from enum import Enum
 import logging
 import os
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Type, TypeVar, Union
+
+import flax
 from rich import print as pprint
 from six import u
 import tyro
+
+from crossformer.cn import wab
+from crossformer.cn.base import CN, default
 from crossformer.cn.dataset import (
+    Dataset,
     DataSource,
     Head,
     MultiDataSource,
+    transform,
 )
-from crossformer.cn.dataset.action import DataSpec, DataPrep, HEAD2SPACE
-from crossformer.cn.dataset import Dataset, transform
+from crossformer.cn.dataset.action import HEAD2SPACE, DataPrep, DataSpec
 from crossformer.cn.eval import Eval
 from crossformer.cn.optim import Optimizer
 from crossformer.cn.rollout import Rollout
 from crossformer.cn.wab import Wandb
-from crossformer.cn import wab
-import flax
-from crossformer.cn.base import CN, default
-from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
+from crossformer.data.oxe import HEAD_TO_DATASET, ActionDim
 from crossformer.model.components.action_heads import (
     ActionHead,
     DiffusionActionHead,
@@ -34,7 +36,6 @@ from crossformer.model.components.action_heads import (
 from crossformer.model.components.tokenizers import ImageTokenizer, LowdimObsTokenizer
 from crossformer.model.components.vit_encoders import ResNet26, ResNet26FILM
 from crossformer.utils.spec import ModuleSpec
-
 
 logger = logging.getLogger(__name__)
 logger.info("Importing crossformer.cn")
@@ -47,13 +48,11 @@ class ModuleE(Enum):
 
 @dataclass
 class HeadFactory(CN):
-
     horizon: int = 4
     module: ModuleE = ModuleE.L1
     steps: int = 0  # diffusion steps
 
     def __post_init__(self):
-
         if self.module == ModuleE.DIFFUSION:
             assert self.steps, "Diffusion steps must be 1+"
         if self.module == ModuleE.L1:
@@ -69,7 +68,7 @@ class HeadFactory(CN):
             loss_weight=1.0,
             constrain_loss_dims=True,
             readout_key=f"readout_{self.name}",
-            num_preds= 0, # force to use dim * horizon
+            num_preds=0,  # force to use dim * horizon
         )
         if self.module == ModuleE.DIFFUSION:
             d["diffusion_steps"] = self.steps
@@ -85,32 +84,28 @@ class HeadFactory(CN):
         )
 
 
+_SINGLE = "single_arm"
+
+
 @dataclass
 class ModelFactory(CN):
-
     im: Sequence[str] = default(["primary", "left_wrist"])
-    proprio: Sequence[str] = default(["single"])
+    proprio: Sequence[str] = default([_SINGLE])
 
     # which heads to create
-    heads: Sequence[str] = default(["single", "bimanual", "mano"])
+    heads: Sequence[str] = default([_SINGLE, "bimanual", "mano"])
 
-    single: HeadFactory = HeadFactory(name="single").field()
+    single: HeadFactory = HeadFactory(name=_SINGLE).field()
     bimanual: HeadFactory = HeadFactory(name="bimanual").field()
     mano: HeadFactory = HeadFactory(name="mano").field()
     debug: bool = False  # y/n load model?
 
-    def create(self) -> Dict[str, Any]:
+    def create(self) -> dict[str, Any]:
         """create the model config"""
 
-        tok = {k: self.make_obs_im(k) for k in self.im} | {
-            k: self.make_obs_proprio(k) for k in self.proprio
-        }
+        tok = {k: self.make_obs_im(k) for k in self.im} | {k: self.make_obs_proprio(k) for k in self.proprio}
 
-        heads = {
-            v.name: v
-            for v in [self.single, self.bimanual, self.mano]
-            if v.name in self.heads
-        }
+        heads = {v.name: v for v in [self.single, self.bimanual, self.mano] if v.name in self.heads}
         assert len(heads) > 0, "No heads selected"
         model = dict(
             observation_tokenizers=tok,
@@ -119,19 +114,17 @@ class ModelFactory(CN):
         )
         return {"model": model}
 
-    def spec(self) -> Dict[str, Any]:
+    def spec(self) -> dict[str, Any]:
         "simplified keys that can be used to delete old model config"
         model = self.create()["model"]
         model = {
-            "observation_tokenizers": {
-                k: v["module"] for k, v in model["observation_tokenizers"].items()
-            },
+            "observation_tokenizers": {k: v["module"] for k, v in model["observation_tokenizers"].items()},
             "heads": {k: v["module"] for k, v in model["heads"].items()},
             "readouts": {k: v for k, v in model["readouts"].items()},
         }
         return {"model": model}
 
-    def flatten(self) -> List[str]:
+    def flatten(self) -> list[str]:
         """expand the delete config into a list of keys"""
         flattened = flax.traverse_util.flatten_dict(self.spec(), keep_empty_nodes=True)
         flattened = list(flattened.keys())
@@ -144,7 +137,7 @@ class ModelFactory(CN):
         :param flat: list of keys to delete
         """
 
-        def inside(a: List[str], b: List[str]):
+        def inside(a: list[str], b: list[str]):
             """see if a is inside b"""
             if len(a) > len(b):
                 return False
@@ -153,7 +146,7 @@ class ModelFactory(CN):
                     return False
             return True
 
-        mykeys = self.flatten() # keep any keys already shared
+        mykeys = self.flatten()  # keep any keys already shared
         # delete model: observation_tokenizers, heads, readouts
         deletespec = set([m[:2] for m in mykeys])
 
@@ -168,9 +161,7 @@ class ModelFactory(CN):
 
     def make_obs_proprio(self, key: str):
         """create observation tokenizer for proprio"""
-        return ModuleSpec.create(
-            LowdimObsTokenizer, obs_keys=[f"proprio_{key}"], dropout_rate=0.2
-        )
+        return ModuleSpec.create(LowdimObsTokenizer, obs_keys=[f"proprio_{key}"], dropout_rate=0.2)
 
     def make_obs_im(self, key: str):
         """create observation tokenizer for image"""
@@ -203,15 +194,15 @@ class Train(CN):
 
     debug: bool = False  # mostly turns off wandb
 
-    steps: int = int(5e6)  # n training steps
+    steps: int = int(5e5)  # n training steps
     grad_acc = None
 
     modality: transform.Modality = transform.Modality.MULTI  # mode of observation
     window_size: int = 1
-    head_name: Optional[str] = None  # TODO why is this here ... see logger warning
+    head_name: str | None = None  # TODO why is this here ... see logger warning
 
-    pretrained_path: Union[Path, str] = "hf://rail-berkeley/crossformer"
-    pretrained_step: Optional[int] = None  # elapsed steps (if resume/restart)
+    pretrained_path: Path | str = "hf://rail-berkeley/crossformer"
+    pretrained_step: int | None = None  # elapsed steps (if resume/restart)
 
     wandb: Wandb = Wandb().field()
     data: Dataset = Dataset().field()
@@ -223,11 +214,10 @@ class Train(CN):
     log_interval: int = 100
     eval_interval: int = 2000
     save_interval: int = 2000
-    save_dir: Union[str, Path] = os.environ.get("BAFL_SAVE", Path().home())
+    save_dir: str | Path = os.environ.get("BAFL_SAVE", Path().home())
     seed: int = 42
 
     def __post_init__(self):
-
         if self.data.transform.traj.action_horizon != self.model.max_horizon():
             logger.warning(
                 "WARNING: action horizon mismatch."
@@ -245,7 +235,7 @@ class Train(CN):
             self.data.transform.traj.max_action_dim = self.model.max_action_dim()
 
         if self.optimizer.lr.decay_steps is None:
-            logger.warning(f'WARNING: decay_steps is None, setting it to {self.steps}')
+            logger.warning(f"WARNING: decay_steps is None, setting it to {self.steps}")
             self.optimizer.lr.decay_steps = self.steps
 
         logger.warn("TODO: fix grad_acc and steps")
@@ -255,7 +245,7 @@ class Train(CN):
         logger.warn("TODO: assert all keys that appear twice are the same")
         logger.warn("TODO: is update_config for model arch only?")
 
-    def transform_schema(self) -> Dict[str, Any]:
+    def transform_schema(self) -> dict[str, Any]:
         """
         Transform the schema of the config
         for use in crossformer repo
@@ -317,9 +307,8 @@ ET = Enum("ExperimentTypes", {k: k for k, v in CONFIGS.items()})
 
 @dataclass()
 class Experiment(Train):
-
     # whether to use CLI or defined experiment
-    exp: Optional[ET] = None
+    exp: ET | None = None
 
     def __post_init__(self):
         if self.exp:
@@ -335,11 +324,10 @@ TYP = Experiment
 
 
 class Sweep(Train):
-
     # sweep parameters
     # -- expand into list of training runs
     # -- TODO how to compose them in a modular way?
-    sweep: Optional[Dict[str, List[Any]]] = None
+    sweep: dict[str, list[Any]] | None = None
 
 
 def main(cfg: TYP) -> None:  # experiment or sweep
