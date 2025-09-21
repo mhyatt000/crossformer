@@ -71,6 +71,9 @@ select = [  # list of rule codes Ruff should check
     "PERF", # perflint: safe micro-optimizations
     "ISC",  # implicit string concatenation checks (see ignore for ISC001)
     "RUF",  # Ruff-specific rules (e.g., remove unused `# noqa`)
+    #
+    "T10",  # flake8-debugger: breakpoint()/pdb/ipdb/etc.
+    "T20",  # flake8-print: print()/pprint()
 ]
 ignore = [ # exceptions to select
     "F841",   # assigned but unused variable
@@ -102,7 +105,11 @@ fixable = [
     "PTH",  # flake8-use-pathlib: prefer pathlib.Path over os.path/open
 ]
 unfixable = [] # blacklist linter fixes
-per-file-ignores = { "__init__.py" = ["F401"], "*/__init__.py" = ["F401"]}
+per-file-ignores = {
+  "__init__.py"   = ["F401"],        # allow unused imports in top-level __init__.py
+  "*/__init__.py" = ["F401"],        # allow unused imports in 1-level subpackage __init__.py
+  "tests/**"      = ["T201","T203"]  # allow print/pprint in tests
+}
 
 [tool.ruff.lint.isort]
 profile = "black"
