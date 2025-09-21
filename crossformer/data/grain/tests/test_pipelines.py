@@ -1,112 +1,135 @@
-"""Unit tests for the Grain data pipeline."""
-
 from __future__ import annotations
 
 import itertools
-import tempfile
-import unittest
 from pathlib import Path
 
-import numpy as np
+import pytest
 
-from crossformer.data.grain import builders, make_interleaved_dataset, make_single_dataset
-
-
-def _make_trajectory(length: int, *, language: str, offset: float = 0.0) -> dict:
-    return {
-        "observation": {
-            "rgb": np.array([f"img_{i}" for i in range(length)], dtype=object),
-            "proprio": np.stack([
-                np.linspace(0.0 + offset, 1.0 + offset, num=2, dtype=np.float32)
-                for _ in range(length)
-            ]),
-        },
-        "action": np.stack(
-            [
-                np.array([i + offset, i + 1 + offset], dtype=np.float32)
-                for i in range(length)
-            ]
-        ),
-        "language": np.array([language] * length, dtype=object),
-    }
+from crossformer.data.grain import builders, pipelines, transforms
+from crossformer.data.grain.tests.conftest import make_synthetic_trajectory, standardize_synthetic
+from crossformer.utils.spec import ModuleSpec
 
 
-def _make_config(name: str, *, trajectories: list[dict], tmp_path: Path) -> builders.GrainDatasetConfig:
+def _annotate_frame(frame: dict) -> dict:
+    frame = dict(frame)
+    frame["annotated"] = True
+    return frame
+
+
+@pytest.fixture
+def pipeline_config(tmp_path: Path) -> builders.GrainDatasetConfig:
+    trajectories = [
+        make_synthetic_trajectory(5, language="pick", seed=0),
+        make_synthetic_trajectory(4, language="place", seed=1),
+        make_synthetic_trajectory(3, language="", seed=2),
+    ]
     return builders.GrainDatasetConfig(
-        name=name,
-        source=trajectories,
-        image_obs_keys={"main": "rgb"},
+        name="spec_dataset",
+        source=lambda: trajectories,
+        standardize_fn=ModuleSpec.create(standardize_synthetic),
+        image_obs_keys={"main": "img1", "aux": "img2", "wrist": "img_wrist"},
         depth_obs_keys={},
-        proprio_obs_keys={"arm": "proprio"},
-        proprio_obs_dims={"arm": 2},
-        language_key="language",
-        statistics_save_dir=str(tmp_path / f"stats_{name}"),
+        proprio_obs_keys={
+            "cartesian": "state_cartesian",
+            "joints": "state_joints",
+            "gripper": "state_gripper",
+        },
+        proprio_obs_dims={"cartesian": 6, "joints": 7, "gripper": 1},
+        language_key="language_instruction",
+        statistics_save_dir=str(tmp_path / "stats"),
     )
 
 
-class GrainPipelineTest(unittest.TestCase):
-    def setUp(self):
-        self._tmpdir = tempfile.TemporaryDirectory()
-        self.tmp_path = Path(self._tmpdir.name)
+def test_make_single_dataset_pipeline(pipeline_config: builders.GrainDatasetConfig):
+    result = pipelines.make_single_dataset(
+        pipeline_config,
+        train=False,
+        traj_transform_kwargs={
+            "window_size": 3,
+            "action_horizon": 2,
+            "skip_unlabeled": True,
+            "goal_relabeling_strategy": "uniform",
+            "max_action": 10.0,
+            "max_proprio": 10.0,
+            "post_chunk_transforms": [ModuleSpec.create(transforms.zero_out_future_proprio)],
+            "head_to_dataset": {"arm": [pipeline_config.name]},
+        },
+        shuffle_buffer_size=3,
+        seed=7,
+    )
 
-    def tearDown(self):
-        self._tmpdir.cleanup()
-
-    def test_single_dataset_chunking(self):
-        trajectories = [
-            _make_trajectory(3, language="pick"),
-            _make_trajectory(2, language="", offset=0.5),
-        ]
-        config = _make_config("toy", trajectories=trajectories, tmp_path=self.tmp_path)
-        result = make_single_dataset(
-            config,
-            train=False,
-            traj_transform_kwargs={
-                "window_size": 2,
-                "action_horizon": 2,
-                "skip_unlabeled": True,
-            },
-        )
-
-        frames = list(result.dataset)
-        # Only the labeled trajectory remains after skip_unlabeled.
-        self.assertEqual(len(frames), 3)
-        for frame in frames:
-            self.assertEqual(frame["action"].shape, (2, 2, 2))
-            self.assertEqual(frame["action_pad_mask"].shape, (2, 2, 2))
-            self.assertEqual(frame["observation"]["image_main"].shape, (2,))
-            self.assertEqual(frame["observation"]["timestep_pad_mask"].shape, (2,))
-            self.assertEqual(frame["observation"]["task_completed"].shape, (2, 2))
-            self.assertEqual(frame["dataset_name"], "toy")
-
-        stats = result.statistics
-        self.assertEqual(stats.num_trajectories, 2)
-        self.assertEqual(stats.action.mean.shape, (2,))
-
-    def test_interleaved_dataset_sampling(self):
-        config_a = _make_config(
-            "dataset_a",
-            trajectories=[_make_trajectory(2, language="alpha")],
-            tmp_path=self.tmp_path,
-        )
-        config_b = _make_config(
-            "dataset_b",
-            trajectories=[_make_trajectory(4, language="beta", offset=0.7)],
-            tmp_path=self.tmp_path,
-        )
-
-        result = make_interleaved_dataset(
-            [config_a, config_b],
-            train=False,
-            sample_weights=[0.8, 0.2],
-            shuffle_buffer_size=3,
-        )
-
-        frames = list(itertools.islice(result.dataset, 6))
-        names = {frame["dataset_name"] for frame in frames}
-        self.assertTrue(names.issubset({"dataset_a", "dataset_b"}))
-        self.assertEqual(set(result.statistics.keys()), {"dataset_a", "dataset_b"})
+    frames = list(result.dataset)
+    assert all(frame["dataset_name"] == pipeline_config.name for frame in frames)
+    assert all(frame["task"]["language_instruction"] != "" for frame in frames)
+    assert frames[0]["action"].shape[-2:] == (2, 4)
+    assert bool(frames[0]["action_head_masks"]["arm"])
+    # statistics still reflect all processed trajectories
+    assert result.statistics.num_trajectories == 3
+    assert result.statistics.action.mean.shape == (4,)
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_apply_frame_transforms_module_spec():
+    import grain.python as gp
+
+    base = gp.MapDataset.range(3).map(lambda idx: {"value": idx})
+    iter_dataset = base.to_iter_dataset()
+    transformed = pipelines.apply_frame_transforms(
+        iter_dataset, [ModuleSpec.create(_annotate_frame)]
+    )
+    frames = list(transformed)
+    assert all(frame["annotated"] for frame in frames)
+
+
+def test_make_interleaved_dataset_mixtures(tmp_path: Path):
+    cfg_a = builders.GrainDatasetConfig(
+        name="dataset_a",
+        source=[make_synthetic_trajectory(4, language="alpha", seed=3)],
+        standardize_fn=ModuleSpec.create(standardize_synthetic),
+        image_obs_keys={"main": "img1"},
+        depth_obs_keys={},
+        proprio_obs_keys={"cartesian": "state_cartesian"},
+        proprio_obs_dims={"cartesian": 6},
+        language_key="language_instruction",
+        statistics_save_dir=str(tmp_path / "stats_a"),
+    )
+    cfg_b = builders.GrainDatasetConfig(
+        name="dataset_b",
+        source=[make_synthetic_trajectory(3, language="beta", seed=4)],
+        standardize_fn=ModuleSpec.create(standardize_synthetic),
+        image_obs_keys={"main": "img1"},
+        depth_obs_keys={},
+        proprio_obs_keys={"cartesian": "state_cartesian"},
+        proprio_obs_dims={"cartesian": 6},
+        language_key="language_instruction",
+        statistics_save_dir=str(tmp_path / "stats_b"),
+    )
+
+    result = pipelines.make_interleaved_dataset(
+        [cfg_a, cfg_b],
+        train=False,
+        sample_weights=[0.75, 0.25],
+        shuffle_buffer_size=4,
+        seed=9,
+    )
+
+    frames = list(itertools.islice(result.dataset, 6))
+    dataset_names = {frame["dataset_name"] for frame in frames}
+    assert dataset_names <= {"dataset_a", "dataset_b"}
+    assert set(result.statistics.keys()) == {"dataset_a", "dataset_b"}
+
+
+def test_make_interleaved_dataset_invalid_weights(tmp_path: Path):
+    cfg = builders.GrainDatasetConfig(
+        name="dataset_a",
+        source=[make_synthetic_trajectory(2, language="alpha", seed=0)],
+        standardize_fn=ModuleSpec.create(standardize_synthetic),
+        image_obs_keys={"main": "img1"},
+        depth_obs_keys={},
+        proprio_obs_keys={"cartesian": "state_cartesian"},
+        proprio_obs_dims={"cartesian": 6},
+        language_key="language_instruction",
+        statistics_save_dir=str(tmp_path / "stats_a"),
+    )
+
+    with pytest.raises(ValueError):
+        pipelines.make_interleaved_dataset([cfg], train=False, sample_weights=[0.5, 0.5])
