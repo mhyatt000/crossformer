@@ -125,8 +125,8 @@ def test_continuous_action_head_forward_and_masks():
     )
 
     assert jnp.allclose(masked_loss, masked_loss_modified)
-    assert unmasked_loss > masked_loss
-    assert metrics["loss"] == masked_loss
+    assert unmasked_loss.item() > masked_loss.item()
+    assert jnp.allclose(metrics["loss"], masked_loss)
     assert set(metrics) == {"loss", "mse", "lsign"}
 
 
@@ -202,8 +202,8 @@ def test_diffusion_action_head_end_to_end():
     )
 
     assert jnp.allclose(masked_loss, masked_loss_modified)
-    assert unmasked_loss > masked_loss
-    assert metrics["loss"] == masked_loss
+    assert unmasked_loss.item() > masked_loss.item()
+    assert jnp.allclose(metrics["loss"], masked_loss)
     assert set(metrics) == {"loss", "mse", "lsign"}
 
     sampled = head.apply(
@@ -290,8 +290,8 @@ def test_flow_matching_action_head_end_to_end():
     )
 
     assert jnp.allclose(masked_loss, masked_loss_modified)
-    assert unmasked_loss > masked_loss
-    assert metrics["loss"] == masked_loss
+    assert unmasked_loss.item() > masked_loss.item()
+    assert jnp.allclose(metrics["loss"], masked_loss)
     assert set(metrics) == {"loss", "mse", "lsign"}
 
     samples = head.apply(
