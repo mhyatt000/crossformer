@@ -1,17 +1,14 @@
 import datetime
-from typing import *
 from functools import partial
-import os
+from typing import *  # noqa
 
 from absl import logging
 import flax
 from flax.traverse_util import flatten_dict
 import jax
-from jax._src.util import tuple_insert
 from jax.experimental import multihost_utils
-import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-from ml_collections import config_flags, ConfigDict
+from ml_collections import ConfigDict
 import optax
 from rich.pretty import pprint
 import tensorflow as tf
@@ -19,8 +16,6 @@ import tqdm
 import tyro
 
 from crossformer import cn
-from crossformer.data.dataset import make_interleaved_dataset, make_single_dataset
-from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
 
 # make_oxe_dataset_kwargs_and_weights,
 from crossformer.data.oxe.oxe_standardization_transforms import (
@@ -31,18 +26,15 @@ from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec
 from crossformer.utils.train_callbacks import (
     SaveCallback,
-    ValidationCallback,
     VisCallback,
 )
 from crossformer.utils.train_utils import (
-    check_config_diff,
-    create_optimizer,
-    filter_eval_datasets,
-    format_name_with_config,
-    merge_params,
-    process_text,
     Timer,
     TrainState,
+    check_config_diff,
+    create_optimizer,
+    merge_params,
+    process_text,
 )
 import wandb
 
@@ -56,9 +48,7 @@ except ImportError:
 
 def set_wandb(cfg: cn.Train):
     # name = format_name_with_config( FLAGS.name, cfg.asdict())
-    time = datetime.datetime.now(
-        cst := datetime.timezone(datetime.timedelta(hours=-6))
-    ).strftime("%m%d")
+    time = datetime.datetime.now(cst := datetime.timezone(datetime.timedelta(hours=-6))).strftime("%m%d")
     # wandb_id = f"{cfg.name}_{time}"
     logging.warning(f"TODO use {cfg.wandb} config")
     run = wandb.init(
@@ -77,7 +67,6 @@ def wandb_log(info, step):
 
 
 def main(cfg: cn.Train) -> None:  # experiment or sweep
-
     pprint(cfg)
     initialize_compilation_cache()
     devices = jax.devices()
@@ -113,9 +102,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     replicated_sharding = NamedSharding(mesh, PartitionSpec())
 
     def shard(batch):
-        return multihost_utils.host_local_array_to_global_array(
-            batch, mesh, PartitionSpec("batch")
-        )
+        return multihost_utils.host_local_array_to_global_array(batch, mesh, PartitionSpec("batch"))
 
     # make sure each process loads different data
     tf.random.set_seed(cfg.seed + jax.process_index())
@@ -138,9 +125,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
             cfg.pretrained_path,
             step=cfg.pretrained_step,
         )
-        flat_config = flax.traverse_util.flatten_dict(
-            pretrained_model.config, keep_empty_nodes=True
-        )
+        flat_config = flax.traverse_util.flatten_dict(pretrained_model.config, keep_empty_nodes=True)
 
         flat_config = cfg.model.delete(flat_config)
 
@@ -184,6 +169,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
 
     rng = jax.random.PRNGKey(cfg.seed)
     rng, init_rng = jax.random.split(rng)
+    pprint(config)
     model = CrossFormerModel.from_config(
         config,
         example_batch,
@@ -206,9 +192,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     if cfg.optimizer.frozen_keys is None:
         cfg.optimizer.frozen_keys = model.config["optimizer"]["frozen_keys"]
 
-    tx, lr_callable, param_norm_callable = create_optimizer(
-        params, **cfg.optimizer.create()
-    )
+    tx, lr_callable, param_norm_callable = create_optimizer(params, **cfg.optimizer.create())
     train_state = TrainState.create(model=model, tx=tx, rng=rng)
 
     #
@@ -228,9 +212,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
 
         # Add window_size to top of config, to make eval easier
         new_config = ConfigDict(model.config)
-        new_config["window_size"] = example_batch["observation"][
-            "timestep_pad_mask"
-        ].shape[1]
+        new_config["window_size"] = example_batch["observation"]["timestep_pad_mask"].shape[1]
         model = model.replace(config=new_config)
 
         logging.warning("WARNING: not saving config to disk")
@@ -244,9 +226,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         save_callback = SaveCallback(None)
         logging.warning("save_dir not passed in, not saving checkpoints")
 
-    wandb.config.update(
-        dict(example_batch_spec=spec(example_batch)), allow_val_change=True
-    )
+    wandb.config.update(dict(example_batch_spec=spec(example_batch)), allow_val_change=True)
 
     #
     # Define loss, train_step, and eval_step
@@ -273,9 +253,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
             )
 
             # weight loss by number of samples from each head
-            head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(
-                batch["action"]
-            )
+            head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(batch["action"])
             action_loss += head_loss * head_sample_fraction * head.loss_weight
             action_metrics[head_name] = head_metrics
         action_metrics["total_loss"] = action_loss
@@ -338,9 +316,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
             )
 
             # weight loss by number of samples from each head
-            head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(
-                batch["action"]
-            )
+            head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(batch["action"])
             action_loss += head_loss * head_sample_fraction * head.loss_weight
             action_metrics[head_name] = head_metrics
 
@@ -390,9 +366,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
 
         if (i + 1) % cfg.log_interval == 0:
             update_info = jax.device_get(update_info)
-            wandb_log(
-                {"training": update_info, "timer": timer.get_average_times()}, step=i
-            )
+            wandb_log({"training": update_info, "timer": timer.get_average_times()}, step=i)
 
         if (i) % cfg.eval_interval == 0:  # eval on i=0 for comparison
             logging.info("Evaluating...")
@@ -401,10 +375,10 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
                 val_metrics = val_callback(train_state, i + 1)
                 wandb_log(val_metrics, step=i)
 
-            if cfg.rollout.use:
-                with timer("rollout"):
-                    evals = eval_callback(i)
-                    wandb_log({"eval": evals}, step=i)
+            # if cfg.rollout.use:
+            # with timer("rollout"):
+            # evals = eval_callback(i)
+            # wandb_log({"eval": evals}, step=i)
 
         if (i + 1) % cfg.save_interval == 0 and save_dir is not None:
             logging.info("Saving checkpoint...")
