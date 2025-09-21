@@ -58,20 +58,27 @@ target-version = "py311"
 line-length = 120
 
 [tool.ruff.lint]
-select = [ # list of rule codes Ruff should check
-  "E",  # pycodestyle
-  "F",  # pyflakes
-  "I",  # isort
-  "UP", # unused imports
+# https://docs.astral.sh/ruff/rules/
+select = [  # list of rule codes Ruff should check
+    "E",    # pycodestyle (includes E4/E7; whitespace/statement/import style)
+    "W",    # pycodestyle whitespace-specific rules
+    "F",    # pyflakes (undefined names, unused vars/imports, etc.)
+    "I",    # isort (import sorting/merging)
+    "UP",   # pyupgrade: modernize syntax based on target-version
+    "C4",   # flake8-comprehensions: prefer comprehensions / remove redundant wrappers
+    "SIM",  # flake8-simplify: simplify boolean logic / control flow
+    "PIE",  # flake8-pie: small safe cleanups & niceties
+    "PERF", # perflint: safe micro-optimizations
+    "ISC",  # implicit string concatenation checks (see ignore for ISC001)
+    "RUF",  # Ruff-specific rules (e.g., remove unused `# noqa`)
 ]
 ignore = [ # exceptions to select
-    "F841",  # assigned but unused variable
-    "F821",  # undefined name
-    "E731",  # do not assign lambda
-    "E722",  # do not use bare except
-    # "E402",  # module import not at top of file
-    "E501",  # line too long
-    # "F401",
+    "F841",   # assigned but unused variable
+    "F821",   # undefined name
+    "E731",   # do not assign a lambda (style preference)
+    "E722",   # do not use bare except (style preference)
+    # "E402", # module import not at top of file
+    "E501",   # line too long (let the formatter handle wrapping)
     "UP035",
     #
     "F722",   # Conflicts with array typing.
@@ -81,50 +88,46 @@ ignore = [ # exceptions to select
 ]
 # whitelist potentially 'unsafe' linter fixes
 fixable = [
-    "I",
-    "F401", # unused imports
-    "UP006", # Use `list` instead of `List` for type annotation
-    "UP007", # Use `X | Y` for type annotations
-    "UP045", # Use `X | None` for type annotations
+    "I", "W", "E4", "E7",
+    "F401",   # unused imports
+    "UP006",  # Use `list` instead of `List` for type annotation
+    "UP007",  # Use `X | Y` for type annotations
+    "UP045",  # Use `X | None` for type annotations
+    "C4",     # comprehension cleanups
+    "SIM",    # simplify obvious boolean/control-flow patterns
+    "PIE",    # tiny safe cleanups
+    "PERF",   # safe micro-optimizations
+    "RUF100",  # remove unused `# noqa`
+    "B",    # flake8-bugbear: likely bugs / risky patterns
+    "PTH",  # flake8-use-pathlib: prefer pathlib.Path over os.path/open
 ]
 unfixable = [] # blacklist linter fixes
 per-file-ignores = { "__init__.py" = ["F401"], "*/__init__.py" = ["F401"]}
 
-
 [tool.ruff.lint.isort]
-# force-single-line = true
+profile = "black"
+order_by_type = "False"
+force-single-line = true
 force-sort-within-sections = true
-
-# [tool.isort]
-# profile = "black"
-# line_length = 88
-# force_sort_within_sections = "True"
-# order_by_type = "False"
-# force-single-line = true
-# force-sort-within-sections = true
-# single-line-exclusions = ["collections.abc", "typing", "typing_extensions"]
+line_length = 120
+single-line-exclusions = ["collections.abc", "typing", "typing_extensions"]
 # known-third-party = ["wandb"]
 
 # [tool.ruff.lint]
 # https://docs.astral.sh/ruff/rules/
 # select = [
 # "B",
-# "C4",
 # "DTZ",
 # "E4",
 # "E7",
 # "E9",
-# "F",
 # "FBT",
 # "FURB",
-# "I",
 # "ICN",
 # "ISC",
 # "LOG",
 # "N",
 # "PD",
-# "PERF",
-# "PIE",
 # "PLC",
 # "PLE",
 # "PLR1",
@@ -134,12 +137,9 @@ force-sort-within-sections = true
 # "PTH",
 # "Q",
 # "RET",
-# "RUF",
-# "SIM",
 # "SLF",
 # "T10",
 # "T20",
-# "UP",
 # "W",
 # ]
 # ignore = [
@@ -154,9 +154,7 @@ force-sort-within-sections = true
 #
 
 # [tool.ruff]
-# line-length = 100
-# target-version = "py310"
-# lint.select = ["E","F","I","UP","B","SIM","PTH","RUF"]
+# lint.select = ["B","PTH"]
 # lint.ignore = ["E203","E501"]
 
 [tool.pyright]
