@@ -472,3 +472,180 @@ class DiffusionActionHead(nn.Module):
         actions = jax.vmap(sample_actions)(jax.random.split(rng, n_samples))
         actions = actions.reshape(sample_shape + actions.shape[1:])
         return actions
+
+
+class FlowMatchingActionHead(nn.Module):
+    """Flow-matching head that predicts conditional action velocities."""
+
+    readout_key: str
+    pool_strategy: str = "mean"
+    action_horizon: int = 1
+    action_dim: int = 7
+    clip_pred: bool = True
+    max_action: float = 5.0
+    loss_weight: float = 1.0
+    constrain_loss_dims: bool = True
+
+    time_dim: int = 32
+    num_blocks: int = 3
+    dropout_rate: float = 0.1
+    hidden_dim: int = 256
+    use_layer_norm: bool = True
+    flow_steps: int = 20
+    base_std: float = 1.0
+
+    def setup(self):
+        if self.pool_strategy == "use_map":
+            self.map_head = MAPHead()
+
+        self.flow_model = create_diffusion_model(
+            self.action_dim * self.action_horizon,
+            time_dim=self.time_dim,
+            num_blocks=self.num_blocks,
+            dropout_rate=self.dropout_rate,
+            hidden_dim=self.hidden_dim,
+            use_layer_norm=self.use_layer_norm,
+        )
+
+    def _embed(self, transformer_outputs: Dict[str, TokenGroup], train: bool) -> jax.Array:
+        token_group = transformer_outputs[self.readout_key]
+        assert token_group.tokens.ndim == 4, (
+            "Expected token_group.tokens to have shape (batch_size, window_size, num_tokens, embedding_size), "
+            f"but got shape {token_group.tokens.shape}"
+        )
+
+        if self.pool_strategy == "use_map":
+            return self.map_head(token_group, train=train)[:, :, 0]
+        if self.pool_strategy == "mean":
+            return token_group.tokens.mean(axis=-2)
+        if self.pool_strategy == "pass":
+            return token_group.tokens
+        raise ValueError(f"{self.pool_strategy} not implemented!")
+
+    def __call__(
+        self,
+        transformer_outputs: Dict[str, TokenGroup],
+        time: Optional[ArrayLike] = None,
+        current: Optional[ArrayLike] = None,
+        train: bool = True,
+    ) -> jax.Array:
+        embeddings = self._embed(transformer_outputs, train=train)
+
+        if (time is None or current is None) and not self.is_initializing():
+            raise ValueError("Must provide time and current action when calling flow head")
+        if self.is_initializing():
+            time = jnp.zeros((*embeddings.shape[:2], 1), dtype=jnp.float32)
+            current = jnp.zeros(
+                (*embeddings.shape[:2], self.action_dim * self.action_horizon),
+                dtype=jnp.float32,
+            )
+
+        if current.ndim == 4:
+            current = rearrange(current, "b w h a -> b w (h a)")
+
+        return self.flow_model(embeddings, current, time, train=train)
+
+    def loss(
+        self,
+        transformer_outputs: Dict[str, TokenGroup],
+        actions: ArrayLike,
+        timestep_pad_mask: ArrayLike,
+        action_pad_mask: ArrayLike,
+        action_head_mask: Optional[ArrayLike] = None,
+        train: bool = True,
+    ) -> Tuple[Array, Dict[str, Array]]:
+        if self.constrain_loss_dims:
+            actions = actions[:, :, : self.action_horizon, : self.action_dim]
+            action_pad_mask = action_pad_mask[:, :, : self.action_horizon, : self.action_dim]
+
+        actions_flat = rearrange(actions, "b w h a -> b w (h a)")
+        actions_flat = jnp.clip(actions_flat, -self.max_action, self.max_action)
+
+        rng = self.make_rng("dropout")
+        base_key, time_key = jax.random.split(rng)
+        base = self.base_std * jax.random.normal(base_key, actions_flat.shape)
+        time = jax.random.uniform(time_key, (*actions_flat.shape[:2], 1))
+
+        blended = time * actions_flat + (1.0 - time) * base
+        target = actions_flat - base
+
+        pred = self(
+            transformer_outputs,
+            time=time,
+            current=blended,
+            train=train,
+        )
+
+        if action_head_mask is None:
+            action_head_mask = jnp.ones(pred.shape[0], dtype=bool)
+
+        mask = rearrange(
+            (
+                timestep_pad_mask[:, :, None, None]
+                & action_pad_mask
+                & action_head_mask[:, None, None, None]
+            ),
+            "b w h a -> b w (h a)",
+        )
+
+        loss, metrics = continuous_loss(pred, target, mask, loss_type="mse")
+        return loss, metrics
+
+    def predict_action(
+        self,
+        transformer_outputs: Dict[str, TokenGroup],
+        rng: PRNGKey,
+        train: bool = True,
+        *args,
+        sample_shape: Tuple[int, ...] = (),
+        **kwargs,
+    ) -> jax.Array:
+        module, variables = self.unbind()
+
+        def sample_actions(rng):
+            rng, key = jax.random.split(rng)
+            tokens = transformer_outputs[self.readout_key].tokens
+            batch_size, window_size = tokens.shape[:2]
+            current = self.base_std * jax.random.normal(
+                key,
+                (
+                    batch_size,
+                    window_size,
+                    self.action_horizon * self.action_dim,
+                ),
+            )
+
+            dt = 1.0 / max(self.flow_steps, 1)
+
+            def scan_fn(current, step):
+                t = (step + 0.5) * dt
+                time = jnp.full((*current.shape[:2], 1), t, dtype=current.dtype)
+                velocity = module.apply(
+                    variables,
+                    transformer_outputs,
+                    time,
+                    current,
+                    train=train,
+                )
+                updated = current + dt * velocity
+                if self.clip_pred:
+                    updated = jnp.clip(updated, -self.max_action, self.max_action)
+                return updated, ()
+
+            steps = jnp.arange(self.flow_steps)
+            current, _ = jax.lax.scan(scan_fn, current, steps)
+
+            actions = rearrange(
+                current,
+                "b w (h a) -> b w h a",
+                h=self.action_horizon,
+                a=self.action_dim,
+            )
+            if self.clip_pred:
+                actions = jnp.clip(actions, -self.max_action, self.max_action)
+            return actions
+
+        n_samples = int(np.prod(sample_shape)) if sample_shape else 1
+        samples = jax.vmap(sample_actions)(jax.random.split(rng, n_samples))
+        samples = samples.reshape(sample_shape + samples.shape[1:])
+        return samples
