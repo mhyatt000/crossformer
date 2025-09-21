@@ -69,7 +69,7 @@ ignore = [ # exceptions to select
     "E722",  # do not use bare except
     # "E402",  # module import not at top of file
     "E501",  # line too long
-    "F401",
+    # "F401",
     "UP035",
     #
     "F722",   # Conflicts with array typing.
@@ -77,12 +77,15 @@ ignore = [ # exceptions to select
     "PD008",  # Lots of false positives.
     "ISC001", # Disabling to support ruff format.
 ]
-fixable = [ # whitelist potentially 'unsafe' linter fixes
+# whitelist potentially 'unsafe' linter fixes
+fixable = [ 
+    "I",
     "F401", # unused imports
     "UP006", # Use `list` instead of `List` for type annotation
     "UP007", # Use `X | Y` for type annotations
 ]
 unfixable = [] # blacklist linter fixes
+per-file-ignores = { "__init__.py" = ["F401"], "*/__init__.py" = ["F401"]}
 
 
 [tool.ruff.lint.isort]

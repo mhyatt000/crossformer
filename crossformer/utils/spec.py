@@ -1,6 +1,7 @@
+from collections.abc import Callable
 from functools import partial
 import importlib
-from typing import Any, Dict, Tuple, TypedDict, Union
+from typing import Any, TypedDict
 
 
 class ModuleSpec(TypedDict):
@@ -32,11 +33,11 @@ class ModuleSpec(TypedDict):
 
     module: str
     name: str
-    args: Tuple[Any, ...]
-    kwargs: Dict[str, Any]
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
 
     @staticmethod
-    def create(callable_or_full_name: Union[str, callable], *args, **kwargs) -> "ModuleSpec":  # type: ignore
+    def create(callable_or_full_name: str | Callable, *args, **kwargs) -> "ModuleSpec":  # type: ignore
         """Create a module spec from a callable or import string.
 
         Args:
