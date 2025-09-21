@@ -2,17 +2,16 @@ from dataclasses import dataclass, field
 from functools import partial
 import json
 import logging
-import os
+from pathlib import Path
 from typing import Callable, Mapping, Optional
 
 import flax
-from flax.training import orbax_utils
 import jax
 import jax.numpy as jnp
 import numpy as np
-import orbax.checkpoint
-import tensorflow as tf
+import orbax.checkpoint as ocp
 import tqdm
+import wandb
 import xgym
 from xgym.rlds.util import add_col, apply_persp, perspective_projection, remove_col
 from xgym.rlds.util.render import render_openpose
@@ -23,16 +22,6 @@ from crossformer.data.oxe import HEAD_TO_DATASET
 from crossformer.data.utils.text_processing import TextProcessor
 from crossformer.utils.train_utils import TrainState
 from crossformer.utils.typing import Any, Data, Sequence
-import wandb
-
-
-
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Optional
-import logging
-import jax
-import orbax.checkpoint as ocp
 
 
 
@@ -73,54 +62,9 @@ def create_validation_dataset(
 
 @dataclass
 class SaveCallback(Callback):
-    """Callback that saves checkpoints to `save_dir`. If `save_dir` is None, does nothing."""
+    """Callback that saves checkpoints under ``save_dir``."""
 
-    save_dir: Optional[str]
-
-    def __post_init__(self):
-        if self.save_dir is None:
-            return
-
-        if not self.save_dir.startswith("gs://"):
-            self.save_dir = os.path.abspath(self.save_dir)
-        if jax.process_index() == 0:
-            tf.io.gfile.makedirs(self.save_dir)
-            logging.info(f"Created {self.save_dir}")
-
-        # make checkpointers
-        # only keep latest full TrainState
-        self.state_checkpointer = orbax.checkpoint.CheckpointManager(
-            tf.io.gfile.join(self.save_dir, "state"),
-            orbax.checkpoint.PyTreeCheckpointer(),
-            options=orbax.checkpoint.CheckpointManagerOptions(
-                max_to_keep=1,
-            ),
-        )
-        # keep every params checkpoint
-        self.params_checkpointer = orbax.checkpoint.CheckpointManager(
-            self.save_dir,
-            orbax.checkpoint.PyTreeCheckpointer(),
-        )
-
-    def __call__(self, train_state: TrainState, step: int):
-        if self.save_dir is not None:
-            train_state.model.save_pretrained(
-                step, checkpoint_manager=self.params_checkpointer
-            )
-            self.state_checkpointer.save(
-                step,
-                train_state,
-                {"save_args": orbax_utils.save_args_from_target(train_state)},
-            )
-
-
-@dataclass
-class SaveCallback(Callback):
-    """Callback that saves checkpoints to `save_dir`.
-    updated for orbax==0.1.9 orbax-checkpoint==0.11.24
-    """
-
-    save_dir: Optional[Path]
+    save_dir: Optional[Path | str]
 
     def __post_init__(self):
         if self.save_dir is None:
@@ -138,9 +82,10 @@ class SaveCallback(Callback):
         # --- Managers ---
         # 1. Keep only the latest full TrainState
         self.ckpt_path = self.save_dir / "state"
+        self.params_path = self.save_dir / "params"
         self.state_mngr = ocp.CheckpointManager(
             self.ckpt_path,
-            {"state": ocp.StandardCheckpointer()},
+            item_handlers={"state": ocp.StandardCheckpointHandler()},
             options=ocp.CheckpointManagerOptions(
                 max_to_keep=1,
                 enable_async_checkpointing=True,
@@ -150,8 +95,8 @@ class SaveCallback(Callback):
 
         # 2. Keep all params-only checkpoints
         self.params_mngr = ocp.CheckpointManager(
-            self.save_dir / "params",
-            {"params": ocp.StandardCheckpointer()},
+            self.params_path,
+            item_handlers={"params": ocp.StandardCheckpointHandler()},
             options=ocp.CheckpointManagerOptions(
                 max_to_keep=None,  # unlimited
                 enable_async_checkpointing=True,
@@ -159,7 +104,7 @@ class SaveCallback(Callback):
             ),
         )
 
-    def __call__(self, train_state, step: int):
+    def __call__(self, train_state: TrainState, step: int):
         if self.save_dir is None:
             return
 
@@ -179,11 +124,13 @@ class SaveCallback(Callback):
 
     def wait(self):
         """Wait until all async checkpointing is done."""
+        if self.save_dir is None:
+            return
         self.params_mngr.wait_until_finished()
         self.state_mngr.wait_until_finished()
 
 
-    def save_extra(self, train_state):
+    def save_extra(self, train_state: TrainState):
         if not jax.process_index() == 0:
             return
         model = train_state.model
