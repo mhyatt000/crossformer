@@ -27,7 +27,9 @@ def simple_stats(tmp_path: Path) -> metadata.DatasetStatistics:
     return stats
 
 
-def test_array_statistics_roundtrip(simple_stats: metadata.DatasetStatistics, tmp_path: Path):
+def test_array_statistics_roundtrip(
+    simple_stats: metadata.DatasetStatistics, tmp_path: Path
+):
     json_path = tmp_path / "stats.json"
     json_path.write_text(json.dumps(simple_stats.to_json()))
     loaded = metadata.DatasetStatistics.from_json(json.loads(json_path.read_text()))
@@ -36,7 +38,9 @@ def test_array_statistics_roundtrip(simple_stats: metadata.DatasetStatistics, tm
     assert "proprio_arm" in loaded.proprio
 
 
-def test_compute_dataset_statistics_caches_results(simple_stats: metadata.DatasetStatistics, tmp_path: Path):
+def test_compute_dataset_statistics_caches_results(
+    simple_stats: metadata.DatasetStatistics, tmp_path: Path
+):
     cache_files = list(tmp_path.glob("dataset_statistics_*.json"))
     assert len(cache_files) == 1
     cached = metadata.compute_dataset_statistics(
@@ -50,10 +54,14 @@ def test_compute_dataset_statistics_caches_results(simple_stats: metadata.Datase
     assert cached.num_trajectories == simple_stats.num_trajectories
 
 
-def test_normalize_action_and_proprio_with_mask(simple_stats: metadata.DatasetStatistics):
+def test_normalize_action_and_proprio_with_mask(
+    simple_stats: metadata.DatasetStatistics,
+):
     trajectory = {
         "action": np.array([[0.0, 1.0], [2.0, 3.0]], dtype=np.float32),
-        "observation": {"proprio_arm": np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)},
+        "observation": {
+            "proprio_arm": np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        },
     }
     normalized = metadata.normalize_action_and_proprio(
         trajectory,
@@ -69,10 +77,14 @@ def test_normalize_action_and_proprio_with_mask(simple_stats: metadata.DatasetSt
     assert np.allclose(normalized["observation"]["proprio_arm"].mean(), 0.0, atol=1e-5)
 
 
-def test_normalize_action_and_proprio_bounds_mode(simple_stats: metadata.DatasetStatistics):
+def test_normalize_action_and_proprio_bounds_mode(
+    simple_stats: metadata.DatasetStatistics,
+):
     trajectory = {
         "action": np.array([[0.0, 1.0], [2.0, 3.0]], dtype=np.float32),
-        "observation": {"proprio_arm": np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)},
+        "observation": {
+            "proprio_arm": np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+        },
     }
     normalized = metadata.normalize_action_and_proprio(
         trajectory,
@@ -82,10 +94,12 @@ def test_normalize_action_and_proprio_bounds_mode(simple_stats: metadata.Dataset
         skip_norm_keys=["proprio_arm"],
     )
     assert normalized["observation"]["proprio_arm"].shape == (2, 2)
-    assert np.all((-1.001 <= normalized["action"]) & (normalized["action"] <= 1.001))
+    assert np.all((normalized["action"] >= -1.001) & (normalized["action"] <= 1.001))
 
 
-def test_normalize_action_and_proprio_invalid_type(simple_stats: metadata.DatasetStatistics):
+def test_normalize_action_and_proprio_invalid_type(
+    simple_stats: metadata.DatasetStatistics,
+):
     with pytest.raises(ValueError):
         metadata.normalize_action_and_proprio(
             {"action": np.zeros((2, 2), dtype=np.float32)},
@@ -95,7 +109,9 @@ def test_normalize_action_and_proprio_invalid_type(simple_stats: metadata.Datase
         )
 
 
-def test_normalize_action_and_proprio_mask_length_mismatch(simple_stats: metadata.DatasetStatistics):
+def test_normalize_action_and_proprio_mask_length_mismatch(
+    simple_stats: metadata.DatasetStatistics,
+):
     with pytest.raises(ValueError):
         metadata.normalize_action_and_proprio(
             {"action": np.zeros((2, 3), dtype=np.float32)},

@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from conftest import make_synthetic_trajectory
+from conftest import standardize_synthetic
 import numpy as np
 import pytest
 
 from crossformer.data.grain import builders
-from crossformer.data.grain.tests.conftest import make_synthetic_trajectory, standardize_synthetic
 from crossformer.utils.spec import ModuleSpec
 
 
@@ -39,7 +40,9 @@ def dataset_config(tmp_path: Path) -> builders.GrainDatasetConfig:
     )
 
 
-def test_build_trajectory_dataset_applies_standardization(dataset_config: builders.GrainDatasetConfig):
+def test_build_trajectory_dataset_applies_standardization(
+    dataset_config: builders.GrainDatasetConfig,
+):
     dataset, stats = builders.build_trajectory_dataset(dataset_config)
     assert len(dataset) == 2
     first = dataset[0]
@@ -95,10 +98,12 @@ def test_sample_match_key_finds_patterns():
         builders._sample_match_key(traj, "missing*")
 
 
-def test_load_dataset_statistics_from_mapping(dataset_config: builders.GrainDatasetConfig):
-    dataset, stats = builders.build_trajectory_dataset(dataset_config)
+def test_load_dataset_statistics_from_mapping(
+    dataset_config: builders.GrainDatasetConfig,
+):
+    _, stats = builders.build_trajectory_dataset(dataset_config)
     mapping = stats.to_json()
     dataset_config.dataset_statistics = mapping
     dataset_config.force_recompute_dataset_statistics = False
-    dataset2, stats2 = builders.build_trajectory_dataset(dataset_config)
+    _, stats2 = builders.build_trajectory_dataset(dataset_config)
     assert np.allclose(stats2.action.mean, stats.action.mean)

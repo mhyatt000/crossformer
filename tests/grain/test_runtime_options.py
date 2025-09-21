@@ -1,7 +1,8 @@
 import grain.python as gp
 import pytest
 
-from crossformer.data.grain import sharding, threading
+from crossformer.data.grain import sharding
+from crossformer.data.grain import threading
 
 
 def test_create_shard_options_defaults():
@@ -12,7 +13,9 @@ def test_create_shard_options_defaults():
 
 
 def test_create_shard_options_with_parameters():
-    options = sharding.create_shard_options(shard_count=4, shard_index=2, drop_remainder=True)
+    options = sharding.create_shard_options(
+        shard_count=4, shard_index=2, drop_remainder=True
+    )
     assert options.shard_index == 2
     assert options.shard_count == 4
     assert options.drop_remainder is True

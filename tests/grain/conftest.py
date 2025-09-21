@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
+
 import numpy as np
+
+import crossformer
 
 
 def make_synthetic_trajectory(length: int, *, language: str, seed: int = 0) -> dict:
@@ -35,6 +37,5 @@ def standardize_synthetic(traj: dict) -> dict:
     return traj
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[4]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+if str(crossformer.ROOT) not in sys.path:
+    sys.path.insert(0, str(crossformer.ROOT))

@@ -3,10 +3,13 @@ from __future__ import annotations
 import itertools
 from pathlib import Path
 
+from conftest import make_synthetic_trajectory
+from conftest import standardize_synthetic
 import pytest
 
-from crossformer.data.grain import builders, pipelines, transforms
-from crossformer.data.grain.tests.conftest import make_synthetic_trajectory, standardize_synthetic
+from crossformer.data.grain import builders
+from crossformer.data.grain import pipelines
+from crossformer.data.grain import transforms
 from crossformer.utils.spec import ModuleSpec
 
 
@@ -51,7 +54,9 @@ def test_make_single_dataset_pipeline(pipeline_config: builders.GrainDatasetConf
             "goal_relabeling_strategy": "uniform",
             "max_action": 10.0,
             "max_proprio": 10.0,
-            "post_chunk_transforms": [ModuleSpec.create(transforms.zero_out_future_proprio)],
+            "post_chunk_transforms": [
+                ModuleSpec.create(transforms.zero_out_future_proprio)
+            ],
             "head_to_dataset": {"arm": [pipeline_config.name]},
         },
         shuffle_buffer_size=3,
@@ -132,4 +137,6 @@ def test_make_interleaved_dataset_invalid_weights(tmp_path: Path):
     )
 
     with pytest.raises(ValueError):
-        pipelines.make_interleaved_dataset([cfg], train=False, sample_weights=[0.5, 0.5])
+        pipelines.make_interleaved_dataset(
+            [cfg], train=False, sample_weights=[0.5, 0.5]
+        )

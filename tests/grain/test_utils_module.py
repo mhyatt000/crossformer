@@ -46,7 +46,10 @@ def test_is_padding_scalar_cases(value, expected):
 
 
 def test_is_padding_nested_dict_combines_masks():
-    nested = {"a": np.zeros((2,), dtype=np.float32), "b": np.array(["", ""], dtype="<U1")}
+    nested = {
+        "a": np.zeros((2,), dtype=np.float32),
+        "b": np.array(["", ""], dtype="<U1"),
+    }
     mask = utils.is_padding(nested)
     assert np.array_equal(mask, np.array([True, True]))
 
