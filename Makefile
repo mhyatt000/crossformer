@@ -33,7 +33,7 @@ test: ## Run pytest
 	$(UV) run pytest -ra
 
 cov: ## Run pytest with coverage (honors [tool.coverage.*])
-	$(UV) run pytest --cov --cov-report=term-missing
+	$(UV) run pytest -v --cov --cov-report=term-missing
 
 clean: clean-build clean-pyc ## Remove build, pycache, coverage artifacts
 

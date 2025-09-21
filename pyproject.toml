@@ -71,7 +71,7 @@ select = [  # list of rule codes Ruff should check
     "PERF", # perflint: safe micro-optimizations
     "ISC",  # implicit string concatenation checks (see ignore for ISC001)
     "RUF",  # Ruff-specific rules (e.g., remove unused `# noqa`)
-    "RUF059", # Unpacked variable is never used
+    # "RUF059", # Unpacked variable is never used
     #
     "T10",  # flake8-debugger: breakpoint()/pdb/ipdb/etc.
     "T20",  # flake8-print: print()/pprint()
