@@ -52,7 +52,9 @@ def _load_pickle(path: Path) -> LoaderResult:
 
 def _load_numpy(path: Path) -> LoaderResult:
     # Try np.load; allow pickled objects for flexibility
-    with np.load(path, allow_pickle=True) as npz:  # works for .npz; for raw .npy np.load returns array
+    with np.load(
+        path, allow_pickle=True
+    ) as npz:  # works for .npz; for raw .npy np.load returns array
         return {k: npz[k] for k in npz.files}
 
 
@@ -181,7 +183,10 @@ def _leaf_spec_for_value(x: Any) -> Any:
         elems = list(x)
         if not elems:
             return "list(empty)"
-        specs = [_leaf_spec_for_value(e) if not isinstance(e, Mapping) else infer_spec(e) for e in elems]
+        specs = [
+            _leaf_spec_for_value(e) if not isinstance(e, Mapping) else infer_spec(e)
+            for e in elems
+        ]
         return _reduce_to_union(specs)
     return type(x).__name__
 
@@ -209,8 +214,14 @@ def _merge_leaf(a: Any, b: Any) -> Any:
         and set(a.keys()) == {"shape", "dtype"}
         and set(b.keys()) == {"shape", "dtype"}
     ):
-        shape = a["shape"] if a["shape"] == b["shape"] else list({tuple(a["shape"]), tuple(b["shape"])})
-        dtype = a["dtype"] if a["dtype"] == b["dtype"] else list({a["dtype"], b["dtype"]})
+        shape = (
+            a["shape"]
+            if a["shape"] == b["shape"]
+            else list({tuple(a["shape"]), tuple(b["shape"])})
+        )
+        dtype = (
+            a["dtype"] if a["dtype"] == b["dtype"] else list({a["dtype"], b["dtype"]})
+        )
         return {"shape": shape, "dtype": dtype}
     # Otherwise produce a union
     return _reduce_to_union([a, b])
@@ -219,7 +230,10 @@ def _merge_leaf(a: Any, b: Any) -> Any:
 def _reduce_to_union(values: Sequence[Any]) -> Any:
     """Reduce a list of leaf/spec values into a compact union representation."""
     # Normalize dicts recursively
-    if all(isinstance(v, Mapping) and not ({"shape", "dtype"} <= set(v.keys())) for v in values):
+    if all(
+        isinstance(v, Mapping) and not ({"shape", "dtype"} <= set(v.keys()))
+        for v in values
+    ):
         # All are nested specs → deep-merge
         merged: dict[str, Any] = {}
         for v in values:
@@ -244,7 +258,9 @@ def _merge_any(a: Any, b: Any) -> Any:
     if (
         isinstance(a, Mapping)
         and isinstance(b, Mapping)
-        and not (set(a.keys()) == {"shape", "dtype"} and set(b.keys()) == {"shape", "dtype"})
+        and not (
+            set(a.keys()) == {"shape", "dtype"} and set(b.keys()) == {"shape", "dtype"}
+        )
     ):
         # Deep merge for nested specs
         keys = set(a.keys()) | set(b.keys())

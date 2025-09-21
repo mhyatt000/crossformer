@@ -167,7 +167,9 @@ class ArrayRecordBuilder:
         # shards = sorted(Path().glob(_shard_glob(self.root, self.name)))
         shards = sorted(self.root.joinpath(self.name).glob("data-*.arrayrecord"))
 
-        needs_build = existing is None or existing.get("schema_fingerprint") != fp or not shards
+        needs_build = (
+            existing is None or existing.get("schema_fingerprint") != fp or not shards
+        )
 
         if needs_build:
             self._build_from_stream(build_fn)
@@ -209,7 +211,9 @@ class ArrayRecordBuilder:
 
     def spec(self, arr) -> Spec:
         return jax.tree.map(
-            lambda x: (x.shape, x.dtype.name) if hasattr(x, "shape") else type(x).__name__,
+            lambda x: (x.shape, x.dtype.name)
+            if hasattr(x, "shape")
+            else type(x).__name__,
             arr,
         )
 
@@ -268,7 +272,9 @@ class ArrayRecordBuilder:
         # shard_paths = sorted(Path().glob(_shard_glob(self.root, self.name)))
         shard_paths = sorted((self.root / self.name).glob("data-*.arrayrecord"))
         if not shard_paths:
-            raise FileNotFoundError(f"No ArrayRecord shards found under {self.root / self.name}.")
+            raise FileNotFoundError(
+                f"No ArrayRecord shards found under {self.root / self.name}."
+            )
         self._ds = ArrayRecordDataSource([str(p) for p in shard_paths])
         if self._meta is None:
             # best-effort: reconstruct minimal meta
@@ -308,7 +314,9 @@ def stream_tiny(total=250, shape=(128,)):
 
 
 class ChunkedIndexSampler(grain.Sampler):
-    def __init__(self, num_records: int, chunk: int = 16384, shuffle: bool = False, seed: int = 0):
+    def __init__(
+        self, num_records: int, chunk: int = 16384, shuffle: bool = False, seed: int = 0
+    ):
         self._n = num_records
         self._chunk = int(chunk)
         self._shuffle = shuffle
@@ -431,20 +439,24 @@ def main():
     index_sampler_example = grain.IndexSampler(
         num_records=len(ds),
         num_epochs=1,
-        shard_options=grain.ShardOptions(shard_index=0, shard_count=1, drop_remainder=True),
+        shard_options=grain.ShardOptions(
+            shard_index=0, shard_count=1, drop_remainder=True
+        ),
         shuffle=False,
         seed=0,
     )
-    chunked_sampler = ChunkedIndexSampler(num_records=len(ds), chunk=16384, shuffle=False, seed=0)
+    chunked_sampler = ChunkedIndexSampler(
+        num_records=len(ds), chunk=16384, shuffle=False, seed=0
+    )
 
     """
     3) Tune knobs (quick wins)
-    chunk size: start at 8_192–32_768. Faster disks/net → larger chunks.
+    chunk size: start at 8_192-32_768. Faster disks/net → larger chunks.
     worker_count:
-    If I/O-bound (network/disk): 2–8 is often plenty.
-    If decode-bound (lots of msgpack/NumPy): up to number of cores (or 2× if workers are processes).
-    worker_buffer_size: 2–8; raise if your pipeline consumer is bursty.
-    group_size (writer): prefer 32–256 for streaming training; 1 only for heavy random access.
+    If I/O-bound (network/disk): 2-8 is often plenty.
+    If decode-bound (lots of msgpack/NumPy): up to number of cores (or 2x if workers are processes).
+    worker_buffer_size: 2-8; raise if your pipeline consumer is bursty.
+    group_size (writer): prefer 32-256 for streaming training; 1 only for heavy random access.
     """
 
     loader = grain.DataLoader(

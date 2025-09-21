@@ -55,7 +55,7 @@ dev = [
 
 [tool.ruff]
 target-version = "py311"
-line-length = 120
+# line-length = 120
 
 [tool.ruff.lint]
 # https://docs.astral.sh/ruff/rules/
@@ -96,11 +96,13 @@ fixable = [
     "UP006",  # Use `list` instead of `List` for type annotation
     "UP007",  # Use `X | Y` for type annotations
     "UP045",  # Use `X | None` for type annotations
+    "UP028", # Replace `yield` over `for` loop with `yield from`
     "C4",     # comprehension cleanups
     "SIM",    # simplify obvious boolean/control-flow patterns
     "PIE",    # tiny safe cleanups
     "PERF",   # safe micro-optimizations
-    "RUF100",  # remove unused `# noqa`
+    "RUF100", # remove unused `# noqa`
+    "RUF001", # String contains ambiguous `–` (EN DASH). Did you mean `-` (HYPHEN-MINUS)?
     "B",    # flake8-bugbear: likely bugs / risky patterns
     "PTH",  # flake8-use-pathlib: prefer pathlib.Path over os.path/open
 ]
@@ -111,11 +113,10 @@ unfixable = [] # blacklist linter fixes
 "tests/**"       = ["T201","T203"] # allow print/pprint in tests
 
 [tool.ruff.lint.isort]
-profile = "black"
-order_by_type = "False"
+order-by-type = false
 force-single-line = true
 force-sort-within-sections = true
-line_length = 120
+# line-length = 120
 single-line-exclusions = ["collections.abc", "typing", "typing_extensions"]
 # known-third-party = ["wandb"]
 

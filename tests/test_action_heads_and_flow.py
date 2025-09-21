@@ -1,20 +1,23 @@
 import sys
 from types import SimpleNamespace
 
-import pytest
 import jax
 import jax.numpy as jnp
+import pytest
 
+# @codex what is the purpose of this block? jax>=0.5.3
 if not hasattr(jax.config, "define_bool_state"):
     try:
         from jax._src.config import bool_state as _bool_state
     except ImportError:  # pragma: no cover - fallback for older versions
+
         def _bool_state(name, default, _help):
             setattr(jax.config, name, default)
             return default
 
     jax.config.define_bool_state = _bool_state
 
+# @codex re: above
 if "jax.experimental.maps" not in sys.modules:
     dummy_env = SimpleNamespace(
         physical_mesh=SimpleNamespace(devices=SimpleNamespace(shape=()))
@@ -24,17 +27,16 @@ if "jax.experimental.maps" not in sys.modules:
     setattr(jax.experimental, "maps", maps_module)
 
 if not hasattr(jax.nn, "normalize"):
+
     def _normalize(x, axis=-1, epsilon=1e-12):
         norm = jnp.linalg.norm(x, axis=axis, keepdims=True)
         return x / jnp.maximum(norm, epsilon)
 
     jax.nn.normalize = _normalize
 
-from crossformer.model.components.action_heads import (
-    ContinuousActionHead,
-    DiffusionActionHead,
-    FlowMatchingActionHead,
-)
+from crossformer.model.components.action_heads import ContinuousActionHead
+from crossformer.model.components.action_heads import DiffusionActionHead
+from crossformer.model.components.action_heads import FlowMatchingActionHead
 from crossformer.model.components.base import TokenGroup
 
 
@@ -91,7 +93,9 @@ def test_continuous_action_head_forward_and_masks():
     actions = mean
     actions_modified = actions.at[1].add(0.5)
 
-    timestep_mask, action_mask = make_masks(batch_size, window_size, horizon, action_dim)
+    timestep_mask, action_mask = make_masks(
+        batch_size, window_size, horizon, action_dim
+    )
 
     masked_loss, metrics = head.apply(
         variables,
@@ -152,7 +156,9 @@ def test_diffusion_action_head_end_to_end():
         head.apply(variables, transformer_outputs, train=False)
 
     time = jnp.zeros((batch_size, window_size, 1), dtype=jnp.float32)
-    noisy = jnp.zeros((batch_size, window_size, horizon * action_dim), dtype=jnp.float32)
+    noisy = jnp.zeros(
+        (batch_size, window_size, horizon * action_dim), dtype=jnp.float32
+    )
     eps = head.apply(
         variables,
         transformer_outputs,
@@ -162,8 +168,12 @@ def test_diffusion_action_head_end_to_end():
     )
     assert eps.shape == (batch_size, window_size, horizon * action_dim)
 
-    timestep_mask, action_mask = make_masks(batch_size, window_size, horizon, action_dim)
-    actions = jnp.zeros((batch_size, window_size, horizon, action_dim), dtype=jnp.float32)
+    timestep_mask, action_mask = make_masks(
+        batch_size, window_size, horizon, action_dim
+    )
+    actions = jnp.zeros(
+        (batch_size, window_size, horizon, action_dim), dtype=jnp.float32
+    )
     actions_modified = actions.at[1].add(1.0)
 
     rng = jax.random.PRNGKey(0)
@@ -240,7 +250,9 @@ def test_flow_matching_action_head_end_to_end():
         head.apply(variables, transformer_outputs, train=False)
 
     time = jnp.full((batch_size, window_size, 1), 0.5, dtype=jnp.float32)
-    current = jnp.zeros((batch_size, window_size, horizon, action_dim), dtype=jnp.float32)
+    current = jnp.zeros(
+        (batch_size, window_size, horizon, action_dim), dtype=jnp.float32
+    )
     velocity = head.apply(
         variables,
         transformer_outputs,
@@ -250,8 +262,12 @@ def test_flow_matching_action_head_end_to_end():
     )
     assert velocity.shape == (batch_size, window_size, horizon * action_dim)
 
-    timestep_mask, action_mask = make_masks(batch_size, window_size, horizon, action_dim)
-    actions = jnp.zeros((batch_size, window_size, horizon, action_dim), dtype=jnp.float32)
+    timestep_mask, action_mask = make_masks(
+        batch_size, window_size, horizon, action_dim
+    )
+    actions = jnp.zeros(
+        (batch_size, window_size, horizon, action_dim), dtype=jnp.float32
+    )
     actions_modified = actions.at[1].add(1.0)
 
     rng = jax.random.PRNGKey(5)
