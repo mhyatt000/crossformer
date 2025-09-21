@@ -47,8 +47,10 @@ dependencies = [
 [dependency-groups]
 dev = [
     "coverage>=7.10.6",
+    "hypothesis>=6.139.2",
     "pre-commit==3.3.3",
     "pytest>=8.4.2",
+    "pytest-cov>=7.0.0",
 ]
 
 [tool.ruff]
@@ -78,7 +80,7 @@ ignore = [ # exceptions to select
     "ISC001", # Disabling to support ruff format.
 ]
 # whitelist potentially 'unsafe' linter fixes
-fixable = [ 
+fixable = [
     "I",
     "F401", # unused imports
     "UP006", # Use `list` instead of `List` for type annotation
@@ -167,7 +169,7 @@ addopts = "-q --maxfail=1 --disable-warnings"
 testpaths = ["tests"]
 
 [tool.coverage.run]
-source = ["src/yourpkg"]
+source = ["crossformer"]
 branch = true
 
 [tool.coverage.report]
