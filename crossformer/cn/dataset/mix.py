@@ -1,18 +1,15 @@
 from dataclasses import dataclass
+from typing import Sequence
+
 import tyro
-from enum import Enum
-import os
-from pathlib import Path
-from typing import *
 
-from crossformer.cn.base import CN, default
-
+from crossformer.cn.base import CN
 from crossformer.cn.dataset.types import Head
 
 
 @dataclass
 class DataSource(CN):
-    REGISTRY: ClassVar[Dict[str, "DataSource"]] = {}
+    REGISTRY: ClassVar[dict[str, "DataSource"]] = {}
 
     name: str = tyro.MISSING
     head: Head = tyro.MISSING
@@ -39,14 +36,14 @@ class MultiDataSource(DataSource):
     """Data Mix Configuration"""
 
     data: Sequence[DataSource] = tyro.MISSING
-    weights: List[float] = tyro.MISSING
+    weights: list[float] = tyro.MISSING
     head: str = Head.MULTI
 
     def __post_init__(self):
         msg = "Datasets and weights must be same length."
         assert len(self.data) == len(self.weights), msg
 
-    def flatten(self) -> List[Tuple[str, float]]:
+    def flatten(self) -> list[tuple[str, float]]:
         """for each d in dataset, flatten recursively  and multiply the contents by its weight"""
         out = []
         for d, w in zip(self.data, self.weights):
@@ -59,6 +56,7 @@ XGYM = [
     TFDS(name="xgym_duck_single", head=Head.SINGLE),
     TFDS(name="xgym_lift_single", head=Head.SINGLE),
     TFDS(name="xgym_stack_single", head=Head.SINGLE),
+    TFDS(name="xgym_sweep_single", head=Head.SINGLE),
 ]
 
 # multi source
