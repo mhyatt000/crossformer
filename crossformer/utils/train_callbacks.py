@@ -1,9 +1,10 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field
 from functools import partial
 import json
 import logging
 from pathlib import Path
-from typing import Callable, Mapping, Optional
+from typing import Callable, Mapping
 
 import flax
 import jax
@@ -11,18 +12,18 @@ import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
 import tqdm
-import wandb
-import xgym
-from xgym.rlds.util import add_col, apply_persp, perspective_projection, remove_col
-from xgym.rlds.util.render import render_openpose
-from xgym.viz.mano import overlay_palm, overlay_pose
+from xgym.rlds.util import apply_persp
+from xgym.rlds.util import perspective_projection
+from xgym.viz.mano import overlay_palm
 
 from crossformer.data.dataset import make_single_dataset
 from crossformer.data.oxe import HEAD_TO_DATASET
 from crossformer.data.utils.text_processing import TextProcessor
 from crossformer.utils.train_utils import TrainState
-from crossformer.utils.typing import Any, Data, Sequence
-
+from crossformer.utils.typing import Any
+from crossformer.utils.typing import Data
+from crossformer.utils.typing import Sequence
+import wandb
 
 
 class Callback:
@@ -64,7 +65,7 @@ def create_validation_dataset(
 class SaveCallback(Callback):
     """Callback that saves checkpoints under ``save_dir``."""
 
-    save_dir: Optional[Path | str]
+    save_dir: Path | str | None
 
     def __post_init__(self):
         if self.save_dir is None:
@@ -85,7 +86,8 @@ class SaveCallback(Callback):
         self.params_path = self.save_dir / "params"
         self.state_mngr = ocp.CheckpointManager(
             self.ckpt_path,
-            item_handlers={"state": ocp.StandardCheckpointHandler()},
+            ocp.StandardCheckpointer(),
+            # {"state": ocp.StandardCheckpointer()},
             options=ocp.CheckpointManagerOptions(
                 max_to_keep=1,
                 enable_async_checkpointing=True,
@@ -95,8 +97,9 @@ class SaveCallback(Callback):
 
         # 2. Keep all params-only checkpoints
         self.params_mngr = ocp.CheckpointManager(
-            self.params_path,
-            item_handlers={"params": ocp.StandardCheckpointHandler()},
+            self.save_dir / "params",
+            ocp.StandardCheckpointer(),
+            # {"params": ocp.StandardCheckpointer()},
             options=ocp.CheckpointManagerOptions(
                 max_to_keep=None,  # unlimited
                 enable_async_checkpointing=True,
@@ -111,7 +114,10 @@ class SaveCallback(Callback):
         # Save params every step
         self.params_mngr.save(
             step,
-            args={"params": ocp.args.StandardSave(train_state.model.params)},
+            args=ocp.args.StandardSave(
+                item=train_state.model.params,
+                # save_args=orbax_utils.save_args_from_target(self.params),
+            ),
         )
         self.save_extra(train_state)
 
@@ -119,7 +125,10 @@ class SaveCallback(Callback):
         if self.state_mngr.should_save(step):
             self.state_mngr.save(
                 step,
-                args={"state": ocp.args.StandardSave(train_state)},
+                args=ocp.args.StandardSave(
+                    item=train_state,
+                    # save_args= orbax_utils.save_args_from_target(train_state),
+                ),
             )
 
     def wait(self):
@@ -129,9 +138,8 @@ class SaveCallback(Callback):
         self.params_mngr.wait_until_finished()
         self.state_mngr.wait_until_finished()
 
-
     def save_extra(self, train_state: TrainState):
-        if not jax.process_index() == 0:
+        if jax.process_index() != 0:
             return
         model = train_state.model
 
@@ -157,8 +165,7 @@ class SaveCallback(Callback):
                 )
 
 
-
-def remove_text(tasks: Data, zero_text_encoding: Optional[Data]):
+def remove_text(tasks: Data, zero_text_encoding: Data | None):
     """Replaces language encoding inside task dict with that of the empty string.
 
     zero_text_encoding = jax.tree_map(lambda x: x[0], text_processor.encode([""]))
@@ -203,7 +210,7 @@ def remove_images(tasks: Data):
 class ValidationCallback(Callback):
     loss_fn: Callable
     process_batch_fn: Callable[[Data], Data]
-    text_processor: Optional[TextProcessor]
+    text_processor: TextProcessor | None
     val_dataset_kwargs_list: Sequence[Mapping[str, Any]]
     dataset_kwargs: Mapping[str, Any]
     val_shuffle_buffer_size: int
@@ -282,7 +289,6 @@ class ValidationCallback(Callback):
 
 @dataclass
 class VisCallback(ValidationCallback):
-
     stats: dict = field(default_factory=dict)
 
     def __call__(self, train_state: TrainState, step: int):
@@ -299,10 +305,10 @@ class VisCallback(ValidationCallback):
 
                 if name in HEAD_TO_DATASET["mano"]:
                     # print(metric.keys())
-                    k = list(metric.keys())[0]
-                    assert (
-                        "vis" in metric[k]
-                    ), "dont use VisCallback if no vis key in metric"
+                    k = next(iter(metric.keys()))[0]
+                    assert "vis" in metric[k], (
+                        "dont use VisCallback if no vis key in metric"
+                    )
                     vis = {k: v.pop("vis") for k, v in metric.items()}[k]
 
                     # NOTE you might want/need to use more of the dataset_kwargs
@@ -350,15 +356,12 @@ class VisCallback(ValidationCallback):
         # TODO ndimentional vmap and jit all the np functions
         videos = []
         for i in range(b):  # samples of batch
-
             imgs = []
             for j in range(w):  # windows of time
-
                 img = batch["observation"]["image_primary"][i, j]
 
                 p3d = joints[i, j, :3]
                 for k in range(-1, h):  # horizons of prediction
-
                     if k == -1:
                         grip = joints[i, j, -1]
                     else:
