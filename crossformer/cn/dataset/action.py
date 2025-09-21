@@ -2,7 +2,7 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 # from crossformer.data.oxe.oxe_standardization_transforms import OXE_STANDARDIZATION_TRANSFORMS
-from typing import Callable, Sequence
+from typing import Callable, ClassVar, Sequence
 
 from crossformer.cn.base import CN, default
 from crossformer.cn.dataset.mix import DataSource

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Sequence
+from typing import ClassVar, Sequence
 
 import tyro
 
