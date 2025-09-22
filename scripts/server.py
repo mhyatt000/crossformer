@@ -1,56 +1,20 @@
-"""
-A server for hosting a CrossFormer model for inference.
-
-On action server: pip install uvicorn fastapi json-numpy
-On client: pip install requests json-numpy
-
-On client:
-
-import requests
-import json_numpy
-from json_numpy import loads
-json_numpy.patch()
-
-Reset and provide the task before starting the rollout:
-
-requests.post("http://serverip:port/reset", json={"text": ...})
-
-Sample an action:
-
-action = loads(
-    requests.post(
-        "http://serverip:port/query",
-        json={"observation": ...},
-    ).json()
-)
-"""
-
-import os
-import os.path as osp
-
-import json_numpy
-
-json_numpy.patch()
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+import os
 from pathlib import Path
-import time
-import traceback
-from typing import Any, Dict, Optional, Union
 
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
 import jax
 import numpy as np
+from rich.pretty import pprint
 import tensorflow as tf
 import tyro
-import uvicorn
+from webpolicy.deploy.base_policy import BasePolicy
+from webpolicy.deploy.server import WebsocketPolicyServer as Server
 
+from crossformer.cn.base import default
 from crossformer.model.crossformer_model import CrossFormerModel
 
-
-def json_response(obj):
-    return JSONResponse(json_numpy.dumps(obj))
+tf.config.set_visible_devices([], "GPU")
 
 
 def resize(img, size=(224, 224)):
@@ -73,23 +37,15 @@ def stack_and_pad(history: deque, num_obs: int):
     return full_obs
 
 
-from rich.pretty import pprint  
-
 @dataclass
-class ServerCN:
-    """Server configuration"""
-
-    models: Union[str, list]  # comma separated models as name : id : step
+class PolicyConfig:
+    models: str | list = ""  # comma separated models as name : id : step
     task: str = tyro.MISSING  # task to perform
 
     # path to BAFL_SAVE or weights dir
-    weights: Union[str, Path] = os.environ.get("BAFL_SAVE", ".")
-
-    host: str = "0.0.0.0"  # host to run on
-    port: int = 8001  # port to run on
+    weights: str | Path = os.environ.get("BAFL_SAVE", ".")
 
     def __post_init__(self):
-
         assert self.models, "Please provide a model"
         assert self.task, "Please provide a task"
         if isinstance(self.models, str):
@@ -100,12 +56,57 @@ class ServerCN:
         self.models = [(n, str(self.weights / id), s) for n, id, s in self.models]
 
 
-class HttpServer:
-    def __init__(self, paths, cfg: Optional[ServerCN] = None):
+@dataclass
+class ServerConfig:
+    """Server configuration"""
+
+    policy: PolicyConfig = default(PolicyConfig())
+    host: str = "0.0.0.0"  # host to run on
+    port: int = 8001  # port to run on
+
+
+def make_exbatch(name, dataset_name):
+    exbatch = {
+        "observation": {
+            "proprio_bimanual": np.zeros((14,)),
+            "proprio_single": np.zeros((6,)),
+            "image_primary": np.zeros((224, 224, 3)),
+            "image_high": np.zeros((224, 224, 3)),
+            "image_side": np.zeros((224, 224, 3)),
+            "image_left_wrist": np.zeros((224, 224, 3)),
+            # "image_right_wrist": np.zeros((224, 224, 3)),
+        },
+        "modality": "l",  # l for language or v for vision
+        "ensemble": True,
+        "model": name,
+        "dataset_name": dataset_name,
+    }
+    return exbatch
+
+
+TASKS = {
+    "duck": {
+        "text": "put the ducks in the bowl",
+        "dataset_name": "xgym_duck_single",
+    },
+    "stack": {
+        "text": "stack all the blocks vertically ",
+        "dataset_name": "xgym_stack_single",
+    },
+    "lift": {
+        "text": "pick up the red block",
+        "dataset_name": "xgym_lift_single",
+    },
+    "play": {"text": "pick up any object", "dataset_name": "xgym_play_single"},
+}
+
+
+class Policy(BasePolicy):
+    def __init__(self, cfg: PolicyConfig):
         self.cfg = cfg
 
-        self.models = dict()
-        for name, path, step in paths:
+        self.models = {}
+        for name, path, step in cfg.models:
             self.models[name] = CrossFormerModel.load_pretrained(path, step=step)
         self.head_name = "single_arm"
         self.pred_horizon = 4
@@ -114,176 +115,123 @@ class HttpServer:
         self.task = None
         self.rng = jax.random.PRNGKey(0)
 
-        self.tasks = {
-            "duck": {
-                "text": "put the ducks in the bowl",
-                "dataset_name": "xgym_duck_single",
-            },
-            "stack": {
-                "text": "stack all the blocks vertically ",
-                "dataset_name": "xgym_stack_single",
-            },
-            "lift": {
-                "text": "pick up the red block",
-                "dataset_name": "xgym_lift_single",
-            },
-            "play": {"text": "pick up any object", "dataset_name": "xgym_play_single"},
-        }
-        self.dataset_name = self.tasks[cfg.task]["dataset_name"]
-        self.text = self.tasks[cfg.task]["text"]
+        self.dataset_name = TASKS[cfg.task]["dataset_name"]
+        self.text = TASKS[cfg.task]["text"]
 
         self.reset_history()
 
         # trigger compilation
-        for name in self.models.keys():
+        for name in self.models:
             payload = {
                 "text": self.text,
                 "model": name,
             }
             self.reset(payload)
-            payload = {
-                "observation": {
-                    "proprio_bimanual": np.zeros((14,)),
-                    "proprio_single": np.zeros((6,)),
-                    "image_primary": np.zeros((224, 224, 3)),
-                    "image_high": np.zeros((224, 224, 3)),
-                    "image_side": np.zeros((224, 224, 3)),
-                    "image_left_wrist": np.zeros((224, 224, 3)),
-                    # "image_right_wrist": np.zeros((224, 224, 3)),
-                },
-                "modality": "l",  # l for language or v for vision
-                "ensemble": True,
-                "model": name,
-                "dataset_name": self.dataset_name,
-            }
 
             for _ in range(self.horizon):
-                start = time.time()
-                print(self.sample_actions(payload))
-                print(time.time() - start)
+                print(self.infer(make_exbatch(name, self.dataset_name)))
 
         self.reset_history()
-
-    def run(self, port=8001, host="0.0.0.0"):
-        self.app = FastAPI()
-        self.app.post("/query")(self.sample_actions)
-        self.app.post("/reset")(self.reset)
-        uvicorn.run(self.app, host=host, port=port)
 
     def reset_history(self):
         self.history = deque(maxlen=self.horizon)
         self.num_obs = 0
         self.act_history = deque(maxlen=self.pred_horizon)
 
-    def reset(self, payload: Dict[Any, Any]):
-        model_name = payload.get("model", "crossformer")
+    def reset(self, payload: dict):
+        name = payload.get("model", "crossformer")
         if "goal" in payload:
             goal_img = resize(payload["goal"]["image_primary"])
             goal = {"image_primary": goal_img[None]}
-            self.task = self.models[model_name].create_tasks(goals=goal)
+            self.task = self.models[name].create_tasks(goals=goal)
         elif "text" in payload:
             text = payload["text"]
             self.text = text
-            self.task = self.models[model_name].create_tasks(texts=[text])
+            self.task = self.models[name].create_tasks(texts=[text])
         else:
-            raise ValueError
+            return {"reset": False, "error": "No goal or text provided"}
 
         self.reset_history()
 
-        return "reset"
+        return {"reset": True}
 
-    def sample_actions(self, payload: Dict[Any, Any]):
-        try:
+    def infer(self, payload: dict):
+        name = payload.get("model", "crossformer")
 
-            model_name = payload.get("model", "crossformer")
+        norm_stats = self.models[name].dataset_statistics[self.dataset_name]
+        unnorm_stats = self.models[name].dataset_statistics[self.dataset_name]
 
-            obs = payload["observation"]
-            for key in obs:
-                if "image" in key:
-                    obs[key] = resize(obs[key])
-                # NOTE... single proprio might fail if not processed accordingly
-                # normalize proprioception expect for bimanual proprioception
-                if "proprio" in key and not key == "proprio_bimanual":
-                    proprio_normalization_statistics = self.models[
-                        model_name
-                    ].dataset_statistics[self.dataset_name][key]
-                    obs[key] = (obs[key] - proprio_normalization_statistics["mean"]) / (
-                        proprio_normalization_statistics["std"]
-                    )
+        obs = payload["observation"]
+        for key in obs:
+            if "image" in key:
+                obs[key] = resize(obs[key])
+            # NOTE... single proprio might fail if not processed accordingly
+            # normalize proprioception expect for bimanual proprioception
+            if "proprio" in key and key != "proprio_bimanual":
+                obs[key] = (obs[key] - norm_stats[key]["mean"]) / (
+                    norm_stats[key]["std"]
+                )
 
-            self.history.append(obs)
-            self.num_obs += 1
-            obs = stack_and_pad(self.history, self.num_obs)
+        self.history.append(obs)
+        self.num_obs += 1
+        obs = stack_and_pad(self.history, self.num_obs)
 
-            # add batch dim
-            obs = jax.tree.map(lambda x: x[None], obs)
+        obs = jax.tree.map(lambda x: x[None], obs)  # add batch dim
 
-            unnormalization_statistics = self.models[model_name].dataset_statistics[
-                self.dataset_name
-            ]["action"]
+        self.rng, key = jax.random.split(self.rng)
+        actions = self.models[name].sample_actions(
+            obs,
+            self.task,
+            unnorm_stats["action"],
+            head_name=self.head_name,
+            rng=key,
+        )
+        print(actions.shape)
+        actions = actions[0, -1]  # one batch, last window
 
-            self.rng, key = jax.random.split(self.rng)
-            actions = self.models[model_name].sample_actions(
-                obs,
-                self.task,
-                unnormalization_statistics,
-                head_name=self.head_name,
-                rng=key,
-            )
-            print(actions.shape)
-            actions = actions[0, -1] # one batch, last window
+        actions = np.array(actions)
+        print(f"actions: {actions.shape}")
 
-            actions = np.array(actions)
-            print(f"actions: {actions.shape}")
+        # whether to temporally ensemble the action predictions or return the full chunk
+        if not payload.get("ensemble", True):
+            return {"action": actions}
 
-            # whether to temporally ensemble the action predictions or return the full chunk
-            if not payload.get("ensemble", True):
-                return json_response(actions)
+        self.act_history.append(actions[: self.pred_horizon])
+        num_actions = len(self.act_history)
+        print(f"num_actions: {num_actions}")
 
-            self.act_history.append(actions[: self.pred_horizon])
-            num_actions = len(self.act_history)
-            print(f"num_actions: {num_actions}")
+        # select the predicted action for the current step from the history of action chunk predictions
+        curr_act_preds = np.stack(
+            [
+                pred_actions[i]
+                for (i, pred_actions) in zip(
+                    range(num_actions - 1, -1, -1), self.act_history
+                )
+            ]
+        )
 
-            # select the predicted action for the current step from the history of action chunk predictions
-            curr_act_preds = np.stack(
-                [
-                    pred_actions[i]
-                    for (i, pred_actions) in zip(
-                        range(num_actions - 1, -1, -1), self.act_history
-                    )
-                ]
-            )
+        # more recent predictions get exponentially *less* weight than older predictions
+        weights = np.exp(-self.exp_weight * np.arange(num_actions))
+        weights = weights / weights.sum()
+        # compute the weighted average across all predictions for this timestep
+        action = np.sum(weights[:, None] * curr_act_preds, axis=0)
 
-            # more recent predictions get exponentially *less* weight than older predictions
-            weights = np.exp(-self.exp_weight * np.arange(num_actions))
-            weights = weights / weights.sum()
-            # compute the weighted average across all predictions for this timestep
-            action = np.sum(weights[:, None] * curr_act_preds, axis=0)
-
-            return json_response(action)
-        except:
-            print(traceback.format_exc())
-            return "error"
+        return {"action": action}
 
 
-def main(cfg: ServerCN):
+def main(cfg: ServerConfig):
+    pprint(cfg)
 
-    tf.config.set_visible_devices([], "GPU")
-
-
-    # DEPRICATE name, path, step
-    # root = osp.expanduser("~/data/bafl") # for carina
-    # paths = [
-    # ("crossformer", "hf://rail-berkeley/crossformer", None),
-    # v3
-    # ("bafl", osp.join(root, "experiment_20241203_193649"), 14_000), # v3-lift
-    # ("bafl", osp.join(root, "experiment_20241204_141047"), 150_000), # v3-lift
-    # ("bafl", osp.join(root, "experiment_20241211_173647"), 290_000),  # v3-lift
-    # ]
-
-    server = HttpServer(cfg.models, cfg=cfg)
-    server.run(cfg.port, cfg.host)
+    policy = Policy(cfg.policy)
+    server = Server(
+        policy,
+        host=cfg.host,
+        port=cfg.port,
+        metadata=None,
+    )
+    print("serving on", cfg.host, cfg.port)
+    server.serve_forever()
 
 
 if __name__ == "__main__":
-    main(tyro.cli(ServerCN))
+    main(tyro.cli(ServerConfig))

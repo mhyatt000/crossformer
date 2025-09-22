@@ -41,6 +41,7 @@ dependencies = [
     "grain==0.2.6",
     "array-record>=0.8.1",
     "msgpack>=1.1.1",
+    "webpolicy",
 ]
 
 
@@ -89,6 +90,7 @@ ignore = [ # exceptions to select
     "T201",   # We use print statements.
     "PD008",  # Lots of false positives.
     "ISC001", # Disabling to support ruff format.
+    "RUF009", # Do not perform function call in dataclass defaults
 ]
 # whitelist potentially 'unsafe' linter fixes
 fixable = [
@@ -181,3 +183,6 @@ branch = true
 [tool.coverage.report]
 fail_under = 80
 show_missing = true
+
+[tool.uv.sources]
+webpolicy = { git = "http://github.com/mhyatt000/webpolicy" }
