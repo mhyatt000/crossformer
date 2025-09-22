@@ -18,7 +18,6 @@ def default(data, **kwargs):
 
 
 
-
 @dataclass()
 class CN:
     name: str = ""

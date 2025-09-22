@@ -11,7 +11,7 @@ import tyro
 from webpolicy.deploy.base_policy import BasePolicy
 from webpolicy.deploy.server import WebsocketPolicyServer as Server
 
-from crossformer.cn.base import default
+from crossformer.cn.base import default, CN
 from crossformer.model.crossformer_model import CrossFormerModel
 
 tf.config.set_visible_devices([], "GPU")
@@ -39,25 +39,28 @@ def stack_and_pad(history: deque, num_obs: int):
 
 @dataclass
 class PolicyConfig:
-    models: str | list = ""  # comma separated models as name : id : step
-    task: str = tyro.MISSING  # task to perform
+    models: str | list  = "" # comma separated models as name : id : step
+    task: str | None = None # task to perform
 
     # path to BAFL_SAVE or weights dir
     weights: str | Path = os.environ.get("BAFL_SAVE", ".")
 
     def __post_init__(self):
-        assert self.models, "Please provide a model"
-        assert self.task, "Please provide a task"
-        if isinstance(self.models, str):
+        if self.models and isinstance(self.models, str):
             self.models = [m.split(":") for m in self.models.split(",")]
 
         self.weights = Path(self.weights).expanduser()
-        pprint(self.models)
         self.models = [(n, str(self.weights / id), s) for n, id, s in self.models]
+
+    def verify(self):
+        assert self.models, "Please provide a model"
+        assert self.task, "Please provide a task"
+        for name, path, step in self.models:
+            assert Path(path).exists(), f"Model path {path} does not exist"
 
 
 @dataclass
-class ServerConfig:
+class ServerConfig(CN):
     """Server configuration"""
 
     policy: PolicyConfig = default(PolicyConfig())
@@ -221,6 +224,7 @@ class Policy(BasePolicy):
 
 def main(cfg: ServerConfig):
     pprint(cfg)
+    cfg.policy.verify()
 
     policy = Policy(cfg.policy)
     server = Server(

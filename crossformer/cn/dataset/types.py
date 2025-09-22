@@ -51,6 +51,6 @@ HEAD2SPACE = {
     Head.BIMANUAL: ActionSpace.BI_POS_EULER,
     Head.QUADRUPED: ActionSpace.QUADRUPED,
     Head.NAV: ActionSpace.NAV,
-    Head.SINGLE: ActionSpace.POS_EULER, # JOINT
+    Head.SINGLE: ActionSpace.JOINT, 
     Head.MANO: ActionSpace.MANO,
 }
