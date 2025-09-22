@@ -11,7 +11,8 @@ import tyro
 from webpolicy.deploy.base_policy import BasePolicy
 from webpolicy.deploy.server import WebsocketPolicyServer as Server
 
-from crossformer.cn.base import default, CN
+from crossformer.cn.base import CN
+from crossformer.cn.base import default
 from crossformer.model.crossformer_model import CrossFormerModel
 
 tf.config.set_visible_devices([], "GPU")
@@ -39,8 +40,8 @@ def stack_and_pad(history: deque, num_obs: int):
 
 @dataclass
 class PolicyConfig:
-    models: str | list  = "" # comma separated models as name : id : step
-    task: str | None = None # task to perform
+    models: str | list = ""  # comma separated models as name : id : step
+    task: str | None = None  # task to perform
 
     # path to BAFL_SAVE or weights dir
     weights: str | Path = os.environ.get("BAFL_SAVE", ".")

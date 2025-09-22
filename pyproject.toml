@@ -95,7 +95,9 @@ ignore = [ # exceptions to select
     "T201",   # We use print statements.
     "PD008",  # Lots of false positives.
     "ISC001", # Disabling to support ruff format.
+    #
     "RUF009", # Do not perform function call in dataclass defaults
+    "PIE796", # Enum contains duplicate value:
 ]
 # whitelist potentially 'unsafe' linter fixes
 fixable = [

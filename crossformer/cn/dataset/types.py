@@ -2,7 +2,6 @@ from enum import Enum
 
 
 class ActionSpace(Enum):
-
     NONE = 0
     QUADRUPED = 12
     NAV = 2  # 2D
@@ -51,6 +50,6 @@ HEAD2SPACE = {
     Head.BIMANUAL: ActionSpace.BI_POS_EULER,
     Head.QUADRUPED: ActionSpace.QUADRUPED,
     Head.NAV: ActionSpace.NAV,
-    Head.SINGLE: ActionSpace.JOINT, 
+    Head.SINGLE: ActionSpace.JOINT,
     Head.MANO: ActionSpace.MANO,
 }

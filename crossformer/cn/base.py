@@ -1,12 +1,11 @@
-from dataclasses import asdict, dataclass, field, Field
+from dataclasses import asdict
+from dataclasses import dataclass
+from dataclasses import field
+from dataclasses import fields
+from dataclasses import is_dataclass
 from enum import Enum
 import logging
-from typing import Dict, Union, Any
-from dataclasses import is_dataclass, fields
-
-from omegaconf import OmegaConf
-from rich import print as pprint
-import tyro
+from typing import Any
 
 logger = logging.getLogger(__name__)
 logger.info("Importing crossformer.cn")
@@ -15,7 +14,6 @@ logger.info("Importing crossformer.cn")
 def default(data, **kwargs):
     """convenience function for field(default_factory=lambda: data)"""
     return field(default_factory=lambda: data, **kwargs)
-
 
 
 @dataclass()
@@ -34,7 +32,6 @@ class CN:
         return asdict(self)
 
     def serialize(self):
-
         def ser(obj: Any) -> Any:
             if is_dataclass(obj):
                 return {f.name: ser(getattr(obj, f.name)) for f in fields(obj)}
@@ -54,7 +51,7 @@ class CN:
 
         return ser(self)
 
-    def update(self, other: Union[Dict, type]):
+    def update(self, other: dict | type):
         if isinstance(other, CN):
             other = other.asdict()
 
