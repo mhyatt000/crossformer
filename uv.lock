@@ -381,6 +381,7 @@ dependencies = [
     { name = "array-record" },
     { name = "chex" },
     { name = "distrax" },
+    { name = "dlimp" },
     { name = "einops" },
     { name = "flax" },
     { name = "grain" },
@@ -430,6 +431,7 @@ requires-dist = [
     { name = "array-record", specifier = ">=0.8.1" },
     { name = "chex", specifier = ">=0.1.85" },
     { name = "distrax", specifier = "==0.1.5" },
+    { name = "dlimp", editable = "../dlimp" },
     { name = "einops", specifier = ">=0.6.1" },
     { name = "flax", specifier = ">=0.7.5" },
     { name = "grain", specifier = "==0.2.6" },
@@ -517,6 +519,19 @@ sdist = { url = "https://files.pythonhosted.org/packages/81/a7/d87f5c5caf2ae9e28
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d8/42/efa7985eefd516f273bc5557550539ebd687cc6a3a2a176d5e1f5b0398ca/distrax-0.1.5-py3-none-any.whl", hash = "sha256:5020f4b53a9a480d019c12e44292fbacb7de857cce478bc594dacf29519c61b7", size = 319716 },
 ]
+
+[[package]]
+name = "dlimp"
+version = "0.0.1"
+source = { editable = "../dlimp" }
+
+[package.metadata]
+requires-dist = [
+    { name = "pre-commit", marker = "extra == 'dev'", specifier = "==3.3.3" },
+    { name = "tqdm", marker = "extra == 'convert'" },
+    { name = "tqdm-multiprocess", marker = "extra == 'convert'", specifier = "==0.0.11" },
+]
+provides-extras = ["convert", "dev"]
 
 [[package]]
 name = "dm-tree"

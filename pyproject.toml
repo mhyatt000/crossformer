@@ -48,6 +48,7 @@ dependencies = [
     "array-record>=0.8.1",
     "msgpack>=1.1.1",
     "webpolicy",
+    "dlimp",
 ]
 
 [dependency-groups]
@@ -193,3 +194,4 @@ show_missing = true
 
 [tool.uv.sources]
 webpolicy = { git = "http://github.com/mhyatt000/webpolicy" }
+dlimp = { path = "../dlimp", editable = true }

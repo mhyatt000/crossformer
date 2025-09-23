@@ -1,4 +1,7 @@
 from collections import deque
+import jax.numpy as jnp
+import orbax.checkpoint as ocp
+from rich.pretty import pprint
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -19,8 +22,15 @@ tf.config.set_visible_devices([], "GPU")
 
 
 def resize(img, size=(224, 224)):
+    if stack:= len(img.shape) == 5: # flatten unflatten
+        n, m, h, w, c = img.shape
+        img = img.reshape(n * m, h, w, c)
+
     img = tf.image.resize(img, size=size, method="lanczos3", antialias=True)
-    return tf.cast(tf.clip_by_value(tf.round(img), 0, 255), tf.uint8).numpy()
+    img =  tf.cast(tf.clip_by_value(tf.round(img), 0, 255), tf.uint8).numpy()
+    if stack:
+        img = img.reshape(n, m, h, w, c)
+    return img
 
 
 def stack_and_pad(history: deque, num_obs: int):
@@ -30,7 +40,7 @@ def stack_and_pad(history: deque, num_obs: int):
     represent padding based on the number of observations seen so far (`num_obs`).
     """
     horizon = len(history)
-    full_obs = {k: np.stack([dic[k] for dic in history]) for k in history[0]}
+    full_obs = jax.tree.map(lambda *xs: np.stack(xs), *history)
     pad_length = horizon - min(num_obs, horizon)
     timestep_pad_mask = np.ones(horizon)
     timestep_pad_mask[:pad_length] = 0
@@ -69,26 +79,12 @@ class ServerConfig(CN):
     port: int = 8001  # port to run on
 
 
-def make_exbatch(name, dataset_name):
-    exbatch = {
-        "observation": {
-            "proprio_bimanual": np.zeros((14,)),
-            "proprio_single": np.zeros((6,)),
-            "image_primary": np.zeros((224, 224, 3)),
-            "image_high": np.zeros((224, 224, 3)),
-            "image_side": np.zeros((224, 224, 3)),
-            "image_left_wrist": np.zeros((224, 224, 3)),
-            # "image_right_wrist": np.zeros((224, 224, 3)),
-        },
-        "modality": "l",  # l for language or v for vision
-        "ensemble": True,
-        "model": name,
-        "dataset_name": dataset_name,
-    }
-    return exbatch
-
-
 TASKS = {
+    "sweep": {
+        "text": " sweep beans into the dustpan",
+        "dataset_name": "xgym_sweep_single",
+    },
+
     "duck": {
         "text": "put the ducks in the bowl",
         "dataset_name": "xgym_duck_single",
@@ -105,11 +101,14 @@ TASKS = {
 }
 
 
+def spec(tree):
+    return jax.tree.map(ocp.utils.to_shape_dtype_struct, tree)
+
 class Policy(BasePolicy):
     def __init__(self, cfg: PolicyConfig):
         self.cfg = cfg
 
-        self.models = {}
+        self.models : dict[str, CrossFormerModel]= {}
         for name, path, step in cfg.models:
             self.models[name] = CrossFormerModel.load_pretrained(path, step=step)
         self.head_name = "single_arm"
@@ -125,7 +124,7 @@ class Policy(BasePolicy):
         self.reset_history()
 
         # trigger compilation
-        for name in self.models:
+        for name,model in self.models.items():
             payload = {
                 "text": self.text,
                 "model": name,
@@ -133,7 +132,8 @@ class Policy(BasePolicy):
             self.reset(payload)
 
             for _ in range(self.horizon):
-                print(self.infer(make_exbatch(name, self.dataset_name)))
+                pprint(spec(model.example_batch))
+                print(self.infer(model.example_batch))
 
         self.reset_history()
 
@@ -178,19 +178,18 @@ class Policy(BasePolicy):
 
         self.history.append(obs)
         self.num_obs += 1
-        obs = stack_and_pad(self.history, self.num_obs)
-
-        obs = jax.tree.map(lambda x: x[None], obs)  # add batch dim
+        obs = stack_and_pad(self.history, self.num_obs) if self.horizon > 1 else obs
+        obs = jax.tree_map(lambda x: jax.device_put(jnp.asarray(x)), obs)
 
         self.rng, key = jax.random.split(self.rng)
         actions = self.models[name].sample_actions(
-            obs,
-            self.task,
-            unnorm_stats["action"],
+            observations = obs,
+            tasks = self.task,
+            unnormalization_statistics=unnorm_stats["action"],
             head_name=self.head_name,
             rng=key,
         )
-        print(actions.shape)
+        pprint(actions.shape)
         actions = actions[0, -1]  # one batch, last window
 
         actions = np.array(actions)
