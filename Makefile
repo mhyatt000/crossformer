@@ -30,10 +30,10 @@ format: ## Ruff format + lint
 	$(UV) run ruff check .
 
 test: ## Run pytest
-	$(UV) run pytest -ra
+	$(UV) run pytest -vv -s -ra
 
 cov: ## Run pytest with coverage (honors [tool.coverage.*])
-	$(UV) run pytest -v --cov --cov-report=term-missing
+	$(UV) run pytest -vv -s  --cov --cov-report=term-missing
 
 clean: clean-build clean-pyc ## Remove build, pycache, coverage artifacts
 
