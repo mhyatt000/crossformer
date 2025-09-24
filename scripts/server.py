@@ -1,13 +1,12 @@
 from collections import deque
-import jax.numpy as jnp
-import orbax.checkpoint as ocp
-from rich.pretty import pprint
 from dataclasses import dataclass
 import os
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import numpy as np
+import orbax.checkpoint as ocp
 from rich.pretty import pprint
 import tensorflow as tf
 import tyro
@@ -22,12 +21,12 @@ tf.config.set_visible_devices([], "GPU")
 
 
 def resize(img, size=(224, 224)):
-    if stack:= len(img.shape) == 5: # flatten unflatten
+    if stack := len(img.shape) == 5:  # flatten unflatten
         n, m, h, w, c = img.shape
         img = img.reshape(n * m, h, w, c)
 
     img = tf.image.resize(img, size=size, method="lanczos3", antialias=True)
-    img =  tf.cast(tf.clip_by_value(tf.round(img), 0, 255), tf.uint8).numpy()
+    img = tf.cast(tf.clip_by_value(tf.round(img), 0, 255), tf.uint8).numpy()
     if stack:
         img = img.reshape(n, m, h, w, c)
     return img
@@ -50,24 +49,28 @@ def stack_and_pad(history: deque, num_obs: int):
 
 @dataclass
 class PolicyConfig:
-    models: str | list = ""  # comma separated models as name : id : step
+    path: str | None = None
     task: str | None = None  # task to perform
+    step: int | None = None  # step to load
 
     # path to BAFL_SAVE or weights dir
     weights: str | Path = os.environ.get("BAFL_SAVE", ".")
 
+    """
     def __post_init__(self):
         if self.models and isinstance(self.models, str):
             self.models = [m.split(":") for m in self.models.split(",")]
 
         self.weights = Path(self.weights).expanduser()
         self.models = [(n, str(self.weights / id), s) for n, id, s in self.models]
+    """
 
     def verify(self):
         assert self.models, "Please provide a model"
         assert self.task, "Please provide a task"
-        for name, path, step in self.models:
-            assert Path(path).exists(), f"Model path {path} does not exist"
+        assert self.path and Path(self.path).resolve().expanduser().exists(), (
+            f"Model path {self.path} does not exist"
+        )
 
 
 @dataclass
@@ -84,7 +87,6 @@ TASKS = {
         "text": " sweep beans into the dustpan",
         "dataset_name": "xgym_sweep_single",
     },
-
     "duck": {
         "text": "put the ducks in the bowl",
         "dataset_name": "xgym_duck_single",
@@ -104,13 +106,12 @@ TASKS = {
 def spec(tree):
     return jax.tree.map(ocp.utils.to_shape_dtype_struct, tree)
 
+
 class Policy(BasePolicy):
     def __init__(self, cfg: PolicyConfig):
         self.cfg = cfg
 
-        self.models : dict[str, CrossFormerModel]= {}
-        for name, path, step in cfg.models:
-            self.models[name] = CrossFormerModel.load_pretrained(path, step=step)
+        self.model: CrossFormerModel = CrossFormerModel.load_pretrained(path, step=step)
         self.head_name = "single_arm"
         self.pred_horizon = 4
         self.exp_weight = 0
@@ -124,16 +125,12 @@ class Policy(BasePolicy):
         self.reset_history()
 
         # trigger compilation
-        for name,model in self.models.items():
-            payload = {
-                "text": self.text,
-                "model": name,
-            }
-            self.reset(payload)
+        payload = {"text": self.text, "model": name}
+        self.reset(payload)
 
-            for _ in range(self.horizon):
-                pprint(spec(model.example_batch))
-                print(self.infer(model.example_batch))
+        for _ in range(self.horizon):
+            pprint(spec(self.model.example_batch))
+            print(self.infer(self.model.example_batch))
 
         self.reset_history()
 
@@ -147,11 +144,11 @@ class Policy(BasePolicy):
         if "goal" in payload:
             goal_img = resize(payload["goal"]["image_primary"])
             goal = {"image_primary": goal_img[None]}
-            self.task = self.models[name].create_tasks(goals=goal)
+            self.task = self.model.create_tasks(goals=goal)
         elif "text" in payload:
             text = payload["text"]
             self.text = text
-            self.task = self.models[name].create_tasks(texts=[text])
+            self.task = self.model.create_tasks(texts=[text])
         else:
             return {"reset": False, "error": "No goal or text provided"}
 
@@ -160,12 +157,18 @@ class Policy(BasePolicy):
         return {"reset": True}
 
     def infer(self, payload: dict):
+        if payload.get("reset", False):
+            return self.reset(payload)
+
         name = payload.get("model", "crossformer")
 
-        norm_stats = self.models[name].dataset_statistics[self.dataset_name]
-        unnorm_stats = self.models[name].dataset_statistics[self.dataset_name]
+        norm_stats = self.model.dataset_statistics[self.dataset_name]
+        unnorm_stats = self.model.dataset_statistics[self.dataset_name]
 
         obs = payload["observation"]
+        obs["timestep_pad_mask"] = self.model.example_batch["observation"][
+            "timestep_pad_mask"
+        ]  # dummy
         for key in obs:
             if "image" in key:
                 obs[key] = resize(obs[key])
@@ -182,9 +185,9 @@ class Policy(BasePolicy):
         obs = jax.tree_map(lambda x: jax.device_put(jnp.asarray(x)), obs)
 
         self.rng, key = jax.random.split(self.rng)
-        actions = self.models[name].sample_actions(
-            observations = obs,
-            tasks = self.task,
+        actions = self.model.sample_actions(
+            observations=obs,
+            tasks=self.task,
             unnormalization_statistics=unnorm_stats["action"],
             head_name=self.head_name,
             rng=key,
@@ -193,7 +196,8 @@ class Policy(BasePolicy):
         actions = actions[0, -1]  # one batch, last window
 
         actions = np.array(actions)
-        print(f"actions: {actions.shape}")
+        pprint(spec({"action": actions}))
+        pprint(actions)
 
         # whether to temporally ensemble the action predictions or return the full chunk
         if not payload.get("ensemble", True):
