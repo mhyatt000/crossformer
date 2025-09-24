@@ -14,7 +14,7 @@ Two or three hand-computed cases (identity rotation, 90° axes) catch tons of bu
 # THINGS I DONT LIKE
 
 * testing stubs. they make it easy to write tests that pass, but obscure whether or not the production code truly passes.
-no excessive monkey patches
+no excessive monkey patches. especially, dont mock these: jax, tensorflow, pytorch, dlimp
 tests should not behave differently in test vs prod
 instead just import the original code and dependencies
 
