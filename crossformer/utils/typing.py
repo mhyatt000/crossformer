@@ -1,11 +1,11 @@
-from typing import Any, Mapping, Sequence, Union
+from typing import Any, Mapping, Sequence, TypeAlias
 
 import jax
 
-PRNGKey = jax.random.PRNGKey
-PyTree = Union[jax.typing.ArrayLike, Mapping[str, "PyTree"]]
-Config = Union[Any, Mapping[str, "Config"]]
-Params = Mapping[str, PyTree]
-Data = Mapping[str, PyTree]
-Shape = Sequence[int]
-Dtype = jax.typing.DTypeLike
+PRNGKey: TypeAlias = jax.Array  # keys are just arrays: jax.random.PRNGKey
+PyTree: TypeAlias = jax.typing.ArrayLike | Mapping[str, "PyTree"]
+Config: TypeAlias = Any | Mapping[str, "Config"]
+Params: TypeAlias = Mapping[str, PyTree]
+Data: TypeAlias = Mapping[str, PyTree]
+Shape: TypeAlias = Sequence[int]
+Dtype: TypeAlias = jax.typing.DTypeLike

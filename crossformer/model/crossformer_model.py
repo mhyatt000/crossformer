@@ -1,30 +1,31 @@
 from functools import partial
-from jax import tree_map, ShapeDtypeStruct
-import orbax.checkpoint as ocp
-from rich.pretty import pprint
-from pathlib import Path
 import json
 import logging
-from typing import Any, Optional, Tuple
+from pathlib import Path
+from typing import Any
 
 import flax
 from flax import struct
 from flax.training import orbax_utils
 import jax
+from jax import ShapeDtypeStruct
 from jax.experimental import multihost_utils
 import jax.numpy as jnp
 from jax.typing import ArrayLike
 import numpy as np
-import orbax.checkpoint
+from orbax import checkpoint as ocp
 import tensorflow as tf
 
-from orbax import checkpoint as ocp
 from crossformer.data.utils.data_utils import NormalizationType
 from crossformer.data.utils.text_processing import TextProcessor
 from crossformer.model.components.action_heads import ActionHead
 from crossformer.model.crossformer_module import CrossFormerModule
 from crossformer.utils.spec import ModuleSpec
-from crossformer.utils.typing import Config, Data, Params, PRNGKey, Sequence
+from crossformer.utils.typing import Config
+from crossformer.utils.typing import Data
+from crossformer.utils.typing import Params
+from crossformer.utils.typing import PRNGKey
+from crossformer.utils.typing import Sequence
 
 
 def _lookup_path(tree, path):
@@ -67,21 +68,23 @@ def _apply_sharding(target, sharding):
     return jax.tree_util.tree_unflatten(tree_def, placed)
 
 
-
 # Build your target params abstract as you do now (e.g., via model.init(...)).
 # Suppose that's `abstract` (same tree/keys as your live model variables).
+
 
 def _to_unsharded(x):
     # Drop sharding metadata; keep only shape/dtype
     return ShapeDtypeStruct(x.shape, x.dtype)
 
+
 def spec(tree):
     return jax.tree.map(ocp.utils.to_shape_dtype_struct, tree)
+
 
 def restore_params(
     checkpoint_dir: str,
     params_shape,
-    step: Optional[int] = None,
+    step: int | None = None,
     sharding=None,
 ):
     """Restores a params pytree, optionally placing leaves with ``sharding``."""
@@ -98,15 +101,15 @@ def restore_params(
         target = _apply_sharding(target, sharding)
 
     _params = manager.restore(step)
-    _params['model']
+    _params["model"]
     print(_params.keys())
-    print(_params['model']['params'].keys())
-    return _params['model']['params']
+    print(_params["model"]["params"].keys())
+    return _params["model"]["params"]
 
     return manager.restore(
         step,
         args=ocp.args.StandardRestore(item=target),
-    )  
+    )
 
     # use new orbax API for flexible restore
     # beware rough edges
@@ -127,7 +130,6 @@ def restore_params(
     # params = manager.restore(step, args=ocp.args.StandardRestore(abstract))
     params = manager.restore(cpath)
     return
-
 
 
 @struct.dataclass
@@ -179,10 +181,10 @@ class CrossFormerModel:
     config: Config = struct.field(pytree_node=False)
     params: Params
     example_batch: Data
-    dataset_statistics: Optional[Data]
+    dataset_statistics: Data | None
 
     def create_tasks(
-        self, goals: Optional[Data] = None, texts: Optional[Sequence[str]] = None
+        self, goals: Data | None = None, texts: Sequence[str] | None = None
     ):
         """Creates tasks dict from goals and texts.
 
@@ -212,7 +214,7 @@ class CrossFormerModel:
             tasks["pad_mask_dict"].update(
                 {
                     k: np.zeros(batch_size, dtype=bool)
-                    for k in tasks.keys()
+                    for k in tasks
                     if k != "pad_mask_dict"
                 }
             )
@@ -283,13 +285,13 @@ class CrossFormerModel:
         self,
         observations: Data,
         tasks: Data,
-        unnormalization_statistics: Optional[Data] = None,
+        unnormalization_statistics: Data | None = None,
         normalization_type: NormalizationType = NormalizationType.NORMAL,
-        timestep_pad_mask: Optional[ArrayLike] = None,
+        timestep_pad_mask: ArrayLike | None = None,
         train: bool = False,
         argmax: bool = False,
-        sample_shape: Tuple[int, ...] = (),
-        rng: Optional[PRNGKey] = None,
+        sample_shape: tuple[int, ...] = (),
+        rng: PRNGKey | None = None,
         temperature: float = 1.0,
         head_name: str = "action",
     ):
@@ -366,7 +368,7 @@ class CrossFormerModel:
     def load_pretrained(
         cls,
         ckpt_path: str,
-        step: Optional[int] = None,
+        step: int | None = None,
     ) -> "CrossFormerModel":
         """Loads a model from a checkpoint that was saved via `save_pretrained`.
 
@@ -379,9 +381,7 @@ class CrossFormerModel:
                 raise ValueError(
                     "You can't set config['pretrained_step'] when loading from HuggingFace."
                 )
-            ckpt_path = _download_from_huggingface(
-                ckpt_path.removeprefix("hf://")
-            )
+            ckpt_path = _download_from_huggingface(ckpt_path.removeprefix("hf://"))
 
         # load config
         with Path(ckpt_path).joinpath("config.json").open("r") as f:
@@ -391,8 +391,13 @@ class CrossFormerModel:
             example_batch = flax.serialization.msgpack_restore(f.read())
 
         rep_shape = lambda x: flax.core.pretty_repr(jax.tree_map(lambda y: y.shape, x))
-        logging.debug( "Model was trained with observations: %s", rep_shape(example_batch["observation"]))
-        logging.debug( "Model was trained with tasks: %s", rep_shape(example_batch["task"]))
+        logging.debug(
+            "Model was trained with observations: %s",
+            rep_shape(example_batch["observation"]),
+        )
+        logging.debug(
+            "Model was trained with tasks: %s", rep_shape(example_batch["task"])
+        )
 
         # load dataset statistics
         with Path(ckpt_path).joinpath("dataset_statistics.json").open("r") as f:
@@ -431,8 +436,8 @@ class CrossFormerModel:
     def save_pretrained(
         self,
         step: int,
-        checkpoint_path: Optional[str] = None,
-        checkpoint_manager: Optional[orbax.checkpoint.CheckpointManager] = None,
+        checkpoint_path: str | None = None,
+        checkpoint_manager: ocp.CheckpointManager | None = None,
     ):
         """Saves a model, as well as corresponding metadata needed for `load_pretrained`. Takes either a
         pre-existing checkpoint manager (which already knows where to save the checkpoint) or a path to a
@@ -449,8 +454,8 @@ class CrossFormerModel:
                 "Must provide exactly one of checkpoint_path or checkpoint_manager."
             )
         if checkpoint_manager is None:
-            checkpoint_manager = orbax.checkpoint.CheckpointManager(
-                checkpoint_path, orbax.checkpoint.PyTreeCheckpointer()
+            checkpoint_manager = ocp.CheckpointManager(
+                checkpoint_path, ocp.PyTreeCheckpointer()
             )
         if checkpoint_path is None:
             checkpoint_path = str(checkpoint_manager._directory)
@@ -493,10 +498,10 @@ class CrossFormerModel:
         cls,
         config: Config,
         example_batch: Data,
-        text_processor: Optional[Any] = None,
+        text_processor: Any | None = None,
         verbose: bool = False,
-        rng: Optional[PRNGKey] = None,
-        dataset_statistics: Optional[Data] = None,
+        rng: PRNGKey | None = None,
+        dataset_statistics: Data | None = None,
     ):
         """Initializes a model with a fresh set of weights from a given config + example_batch.
 
@@ -539,6 +544,7 @@ class CrossFormerModel:
             config=config,
             dataset_statistics=dataset_statistics,
         )
+
 
 def _verify_shapes(
     pytree,
@@ -601,5 +607,3 @@ def _download_from_huggingface(huggingface_repo_id: str):
 
     folder = huggingface_hub.snapshot_download(huggingface_repo_id)
     return folder
-
-
