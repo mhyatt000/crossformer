@@ -1,6 +1,5 @@
 from collections import deque
 from dataclasses import dataclass
-import os
 from pathlib import Path
 
 import jax
@@ -53,10 +52,17 @@ class PolicyConfig:
     task: str | None = None  # task to perform
     step: int | None = None  # step to load
 
+    def verify(self):
+        # assert self.models, "Please provide a model"
+        assert self.task, "Please provide a task"
+        assert self.path and Path(self.path).resolve().expanduser().exists(), (
+            f"Model path {self.path} does not exist"
+        )
+
+    """
     # path to BAFL_SAVE or weights dir
     weights: str | Path = os.environ.get("BAFL_SAVE", ".")
 
-    """
     def __post_init__(self):
         if self.models and isinstance(self.models, str):
             self.models = [m.split(":") for m in self.models.split(",")]
@@ -64,13 +70,6 @@ class PolicyConfig:
         self.weights = Path(self.weights).expanduser()
         self.models = [(n, str(self.weights / id), s) for n, id, s in self.models]
     """
-
-    def verify(self):
-        assert self.models, "Please provide a model"
-        assert self.task, "Please provide a task"
-        assert self.path and Path(self.path).resolve().expanduser().exists(), (
-            f"Model path {self.path} does not exist"
-        )
 
 
 @dataclass
@@ -111,7 +110,9 @@ class Policy(BasePolicy):
     def __init__(self, cfg: PolicyConfig):
         self.cfg = cfg
 
-        self.model: CrossFormerModel = CrossFormerModel.load_pretrained(path, step=step)
+        self.model: CrossFormerModel = CrossFormerModel.load_pretrained(
+            cfg.path, step=cfg.step
+        )
         self.head_name = "single_arm"
         self.pred_horizon = 4
         self.exp_weight = 0
@@ -123,10 +124,7 @@ class Policy(BasePolicy):
         self.text = TASKS[cfg.task]["text"]
 
         self.reset_history()
-
-        # trigger compilation
-        payload = {"text": self.text, "model": name}
-        self.reset(payload)
+        self.reset({"text": self.text})  # trigger compilation
 
         for _ in range(self.horizon):
             pprint(spec(self.model.example_batch))

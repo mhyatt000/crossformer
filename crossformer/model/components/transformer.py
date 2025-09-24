@@ -1,12 +1,14 @@
 # adapted from https://github.com/google-research/vision_transformer/blob/main/vit_jax/models_vit.py
-from typing import Callable, Optional
+from typing import Callable
 
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
 
 from crossformer.model.components.base import TokenGroup
-from crossformer.utils.typing import Dtype, PRNGKey, Shape, Union
+from crossformer.utils.typing import Dtype
+from crossformer.utils.typing import PRNGKey
+from crossformer.utils.typing import Shape
 
 
 class AddPositionEmbs(nn.Module):
@@ -30,7 +32,7 @@ class AddPositionEmbs(nn.Module):
         """
         # inputs.shape is (batch_size, seq_len, emb_dim).
         assert inputs.ndim == 3, (
-            "Number of dimensions should be 3," " but it is: %d" % inputs.ndim
+            "Number of dimensions should be 3, but it is: %d" % inputs.ndim
         )
         pos_emb_shape = (1, inputs.shape[1], inputs.shape[2])
         pe = self.param("pos_embedding", self.posemb_init, pos_emb_shape)
@@ -42,11 +44,11 @@ class MlpBlock(nn.Module):
 
     mlp_dim: int
     dtype: Dtype = jnp.float32
-    out_dim: Optional[int] = None
+    out_dim: int | None = None
     dropout_rate: float = 0.1
-    kernel_init: Callable[
-        [PRNGKey, Shape, Dtype], jax.Array
-    ] = nn.initializers.xavier_uniform()
+    kernel_init: Callable[[PRNGKey, Shape, Dtype], jax.Array] = (
+        nn.initializers.xavier_uniform()
+    )
     bias_init: Callable[[PRNGKey, Shape, Dtype], jax.Array] = nn.initializers.normal(
         stddev=1e-6
     )
@@ -79,12 +81,12 @@ class MAPHead(nn.Module):
     From https://github.com/google-research/big_vision/blob/main/big_vision/models/vit.py
     """
 
-    mlp_dim: Optional[int] = None  # Defaults to 4x input dim
+    mlp_dim: int | None = None  # Defaults to 4x input dim
     num_heads: int = 8
     num_readouts: int = 1
 
     @nn.compact
-    def __call__(self, x: Union[jax.Array, TokenGroup], train=True):
+    def __call__(self, x: jax.Array | TokenGroup, train=True):
         if isinstance(x, TokenGroup):
             x, mask = x.tokens, x.mask
         else:
@@ -260,89 +262,89 @@ def common_transformer_sizes(transformer_size: str) -> (int, dict):
     }
 
     TRANSFORMER_SIZES = {
-        "dummy": dict(
-            num_layers=1,
-            mlp_dim=256,
-            num_attention_heads=2,
-            dropout_rate=0.1,
-            repeat_pos_enc=False,
-        ),
-        "vanilla": dict(
-            num_layers=4,
-            mlp_dim=1024,
-            num_attention_heads=8,
-            dropout_rate=0.1,
-            repeat_pos_enc=False,
-        ),
-        "detr": dict(
-            num_layers=12,  # techincally detr uses 6 enc + 6 dec
-            mlp_dim=2048,
-            num_attention_heads=8,
-            dropout_rate=0.1,
-            repeat_pos_enc=True,
-        ),
-        "detr_big": dict(
-            num_layers=24,  # techincally detr uses 6 enc + 6 dec
-            mlp_dim=4096,
-            num_attention_heads=16,
-            dropout_rate=0.1,
-            repeat_pos_enc=True,
-        ),
-        "vit_t": dict(
-            num_layers=12,
-            mlp_dim=768,
-            num_attention_heads=3,
-            dropout_rate=0.0,
-            repeat_pos_enc=False,
-        ),
-        "vit_s": dict(
-            num_layers=12,
-            mlp_dim=1536,
-            num_attention_heads=6,
-            dropout_rate=0.0,
-            repeat_pos_enc=False,
-        ),
-        "vit_b": dict(
-            num_layers=12,
-            mlp_dim=3072,
-            num_attention_heads=12,
-            dropout_rate=0.0,
-            repeat_pos_enc=False,
-        ),
-        "vit_l": dict(
-            num_layers=24,
-            mlp_dim=4096,
-            num_attention_heads=16,
-            dropout_rate=0.1,
-            repeat_pos_enc=False,
-        ),
-        "vit_h": dict(
-            num_layers=32,
-            mlp_dim=5120,
-            num_attention_heads=16,
-            dropout_rate=0.1,
-            repeat_pos_enc=False,
-        ),
-        "vint": dict(
-            num_layers=4,
-            mlp_dim=2048,
-            num_attention_heads=4,
-            dropout_rate=0.0,
-        ),
-        "vit_t_repeat": dict(
-            num_layers=12,
-            mlp_dim=768,
-            num_attention_heads=3,
-            dropout_rate=0.1,
-            repeat_pos_enc=True,
-        ),
-        "vit_s_repeat": dict(
-            num_layers=12,
-            mlp_dim=1536,
-            num_attention_heads=6,
-            dropout_rate=0.1,
-            repeat_pos_enc=True,
-        ),
+        "dummy": {
+            "num_layers": 1,
+            "mlp_dim": 256,
+            "num_attention_heads": 2,
+            "dropout_rate": 0.1,
+            "repeat_pos_enc": False,
+        },
+        "vanilla": {
+            "num_layers": 4,
+            "mlp_dim": 1024,
+            "num_attention_heads": 8,
+            "dropout_rate": 0.1,
+            "repeat_pos_enc": False,
+        },
+        "detr": {
+            "num_layers": 12,  # techincally detr uses 6 enc + 6 dec
+            "mlp_dim": 2048,
+            "num_attention_heads": 8,
+            "dropout_rate": 0.1,
+            "repeat_pos_enc": True,
+        },
+        "detr_big": {
+            "num_layers": 24,  # techincally detr uses 6 enc + 6 dec
+            "mlp_dim": 4096,
+            "num_attention_heads": 16,
+            "dropout_rate": 0.1,
+            "repeat_pos_enc": True,
+        },
+        "vit_t": {
+            "num_layers": 12,
+            "mlp_dim": 768,
+            "num_attention_heads": 3,
+            "dropout_rate": 0.0,
+            "repeat_pos_enc": False,
+        },
+        "vit_s": {
+            "num_layers": 12,
+            "mlp_dim": 1536,
+            "num_attention_heads": 6,
+            "dropout_rate": 0.0,
+            "repeat_pos_enc": False,
+        },
+        "vit_b": {
+            "num_layers": 12,
+            "mlp_dim": 3072,
+            "num_attention_heads": 12,
+            "dropout_rate": 0.0,
+            "repeat_pos_enc": False,
+        },
+        "vit_l": {
+            "num_layers": 24,
+            "mlp_dim": 4096,
+            "num_attention_heads": 16,
+            "dropout_rate": 0.1,
+            "repeat_pos_enc": False,
+        },
+        "vit_h": {
+            "num_layers": 32,
+            "mlp_dim": 5120,
+            "num_attention_heads": 16,
+            "dropout_rate": 0.1,
+            "repeat_pos_enc": False,
+        },
+        "vint": {
+            "num_layers": 4,
+            "mlp_dim": 2048,
+            "num_attention_heads": 4,
+            "dropout_rate": 0.0,
+        },
+        "vit_t_repeat": {
+            "num_layers": 12,
+            "mlp_dim": 768,
+            "num_attention_heads": 3,
+            "dropout_rate": 0.1,
+            "repeat_pos_enc": True,
+        },
+        "vit_s_repeat": {
+            "num_layers": 12,
+            "mlp_dim": 1536,
+            "num_attention_heads": 6,
+            "dropout_rate": 0.1,
+            "repeat_pos_enc": True,
+        },
     }
 
     TOKEN_DIMS = {

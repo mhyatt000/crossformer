@@ -84,6 +84,7 @@ select = [  # list of rule codes Ruff should check
     "T20",  # flake8-print: print()/pprint()
 ]
 ignore = [ # exceptions to select
+    "E741",   # ambiguous variable name (like l, O, I)
     "F841",   # assigned but unused variable
     "F821",   # undefined name
     "E731",   # do not assign a lambda (style preference)
@@ -91,6 +92,7 @@ ignore = [ # exceptions to select
     # "E402", # module import not at top of file
     "E501",   # line too long (let the formatter handle wrapping)
     "UP035",
+    "UP031", # Use format specifiers instead of percent format
     #
     "F722",   # Conflicts with array typing.
     "T201",   # We use print statements.
