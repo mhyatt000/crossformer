@@ -4,6 +4,14 @@ build-backend = "setuptools.build_meta"
 # https://docs.astral.sh/uv/concepts/projects/config/#build-systems
 # https://docs.astral.sh/uv/concepts/projects/config/#build-isolation
 
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["crossformer*"]
+exclude = ["wandb*", "experiments*", "notebooks*", "scripts*", "tests*"]
+
 [project]
 name = "crossformer"
 version = "0.1.0"
@@ -49,6 +57,7 @@ dependencies = [
     "msgpack>=1.1.1",
     "webpolicy",
     "dlimp",
+    "python-box>=7.3.2",
 ]
 
 [dependency-groups]
@@ -78,7 +87,6 @@ select = [  # list of rule codes Ruff should check
     "PERF", # perflint: safe micro-optimizations
     "ISC",  # implicit string concatenation checks (see ignore for ISC001)
     "RUF",  # Ruff-specific rules (e.g., remove unused `# noqa`)
-    # "RUF059", # Unpacked variable is never used
     #
     "T10",  # flake8-debugger: breakpoint()/pdb/ipdb/etc.
     "T20",  # flake8-print: print()/pprint()
@@ -100,6 +108,7 @@ ignore = [ # exceptions to select
     "ISC001", # Disabling to support ruff format.
     #
     "RUF009", # Do not perform function call in dataclass defaults
+    # "RUF059", # Unpacked variable is never used
     "PIE796", # Enum contains duplicate value:
 ]
 # whitelist potentially 'unsafe' linter fixes

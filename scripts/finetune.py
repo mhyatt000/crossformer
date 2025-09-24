@@ -1,13 +1,16 @@
 import datetime
 from functools import partial
-from typing import *  # noqa
+from typing import Any
 
 from absl import logging
+from box import Box
 import flax
 from flax.traverse_util import flatten_dict
 import jax
 from jax.experimental import multihost_utils
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.sharding import Mesh
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec
 from ml_collections import ConfigDict
 import optax
 from rich.pretty import pprint
@@ -16,27 +19,23 @@ import tqdm
 import tyro
 
 from crossformer import cn
-
-# make_oxe_dataset_kwargs_and_weights,
 from crossformer.data.oxe.oxe_standardization_transforms import (
     OXE_STANDARDIZATION_TRANSFORMS,
 )
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec
-from crossformer.utils.train_callbacks import (
-    SaveCallback,
-    VisCallback,
-)
-from crossformer.utils.train_utils import (
-    Timer,
-    TrainState,
-    check_config_diff,
-    create_optimizer,
-    merge_params,
-    process_text,
-)
+from crossformer.utils.train_callbacks import SaveCallback
+from crossformer.utils.train_callbacks import VisCallback
+from crossformer.utils.train_utils import check_config_diff
+from crossformer.utils.train_utils import create_optimizer
+from crossformer.utils.train_utils import merge_params
+from crossformer.utils.train_utils import process_text
+from crossformer.utils.train_utils import Timer
+from crossformer.utils.train_utils import TrainState
 import wandb
+
+# make_oxe_dataset_kwargs_and_weights,
 
 try:
     from jax_smi import initialise_tracking  # type: ignore
@@ -48,7 +47,9 @@ except ImportError:
 
 def set_wandb(cfg: cn.Train):
     # name = format_name_with_config( FLAGS.name, cfg.asdict())
-    time = datetime.datetime.now(cst := datetime.timezone(datetime.timedelta(hours=-6))).strftime("%m%d")
+    time = datetime.datetime.now(
+        cst := datetime.timezone(datetime.timedelta(hours=-6))
+    ).strftime("%m%d")
     # wandb_id = f"{cfg.name}_{time}"
     logging.warning(f"TODO use {cfg.wandb} config")
     run = wandb.init(
@@ -102,7 +103,9 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     replicated_sharding = NamedSharding(mesh, PartitionSpec())
 
     def shard(batch):
-        return multihost_utils.host_local_array_to_global_array(batch, mesh, PartitionSpec("batch"))
+        return multihost_utils.host_local_array_to_global_array(
+            batch, mesh, PartitionSpec("batch")
+        )
 
     # make sure each process loads different data
     tf.random.set_seed(cfg.seed + jax.process_index())
@@ -125,7 +128,9 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
             cfg.pretrained_path,
             step=cfg.pretrained_step,
         )
-        flat_config = flax.traverse_util.flatten_dict(pretrained_model.config, keep_empty_nodes=True)
+        flat_config = flax.traverse_util.flatten_dict(
+            pretrained_model.config, keep_empty_nodes=True
+        )
 
         flat_config = cfg.model.delete(flat_config)
 
@@ -163,6 +168,11 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     spec = lambda _x: jax.tree.map(lambda arr: (arr.shape, str(arr.dtype)), _x)
     pprint(spec(example_batch))
 
+    from crossformer.utils.callbacks.inspect import InspectCallback
+
+    callbacks = Box(inspect=InspectCallback(log_every=100))
+    _ = callbacks.inspect(example_batch)
+
     #
     # Load Pretrained Model
     #
@@ -192,7 +202,9 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     if cfg.optimizer.frozen_keys is None:
         cfg.optimizer.frozen_keys = model.config["optimizer"]["frozen_keys"]
 
-    tx, lr_callable, param_norm_callable = create_optimizer(params, **cfg.optimizer.create())
+    tx, lr_callable, param_norm_callable = create_optimizer(
+        params, **cfg.optimizer.create()
+    )
     train_state = TrainState.create(model=model, tx=tx, rng=rng)
 
     #
@@ -206,13 +218,15 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
             cfg.wandb.group or "",
             cfg.name,
         )
-        wandb.config.update(dict(save_dir=save_dir), allow_val_change=True)
+        wandb.config.update({"save_dir": save_dir}, allow_val_change=True)
         logging.info(f"Saving to {save_dir}")
         save_callback = SaveCallback(save_dir)
 
         # Add window_size to top of config, to make eval easier
         new_config = ConfigDict(model.config)
-        new_config["window_size"] = example_batch["observation"]["timestep_pad_mask"].shape[1]
+        new_config["window_size"] = example_batch["observation"][
+            "timestep_pad_mask"
+        ].shape[1]
         model = model.replace(config=new_config)
 
         logging.warning("WARNING: not saving config to disk")
@@ -226,7 +240,9 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         save_callback = SaveCallback(None)
         logging.warning("save_dir not passed in, not saving checkpoints")
 
-    wandb.config.update(dict(example_batch_spec=spec(example_batch)), allow_val_change=True)
+    wandb.config.update(
+        {"example_batch_spec": spec(example_batch)}, allow_val_change=True
+    )
 
     #
     # Define loss, train_step, and eval_step
@@ -253,7 +269,9 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
             )
 
             # weight loss by number of samples from each head
-            head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(batch["action"])
+            head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(
+                batch["action"]
+            )
             action_loss += head_loss * head_sample_fraction * head.loss_weight
             action_metrics[head_name] = head_metrics
         action_metrics["total_loss"] = action_loss
@@ -268,7 +286,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     )
     def train_step(state: TrainState, batch):
         rng, dropout_rng = jax.random.split(state.rng)
-        (loss, info), grads = jax.value_and_grad(loss_fn, has_aux=True)(
+        (_, info), grads = jax.value_and_grad(loss_fn, has_aux=True)(
             state.model.params, batch, dropout_rng, train=True
         )
         grad_norm = optax.global_norm(grads)
@@ -316,7 +334,9 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
             )
 
             # weight loss by number of samples from each head
-            head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(batch["action"])
+            head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(
+                batch["action"]
+            )
             action_loss += head_loss * head_sample_fraction * head.loss_weight
             action_metrics[head_name] = head_metrics
 
@@ -362,11 +382,17 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         with timer("train"):
             train_state, update_info = train_step(train_state, batch)
 
+        maybe: dict[str, Any] = callbacks.inspect.every(batch=batch, step=i)
+        update_info.update(maybe)
+
         timer.tock("total")
 
         if (i + 1) % cfg.log_interval == 0:
             update_info = jax.device_get(update_info)
-            wandb_log({"training": update_info, "timer": timer.get_average_times()}, step=i)
+            wandb_log(
+                {"training": update_info, "timer": timer.get_average_times()}, step=i
+            )
+            # pprint(update_info)
 
         if (i) % cfg.eval_interval == 0:  # eval on i=0 for comparison
             logging.info("Evaluating...")

@@ -10,7 +10,7 @@ repos:
         exclude: ^examples/
       - id: check-case-conflict
       - id: check-merge-conflict
-      - id: end-of-file-fixer
+        # - id: end-of-file-fixer
       - id: trailing-whitespace
       - id: detect-private-key
       - id: debug-statements

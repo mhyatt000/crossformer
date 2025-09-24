@@ -1,19 +1,17 @@
 from functools import partial
 import json
 import logging
-from pathlib import Path
 from typing import Any
 
 import flax
 from flax import struct
 from flax.training import orbax_utils
 import jax
-from jax import ShapeDtypeStruct
 from jax.experimental import multihost_utils
 import jax.numpy as jnp
 from jax.typing import ArrayLike
 import numpy as np
-from orbax import checkpoint as ocp
+import orbax.checkpoint
 import tensorflow as tf
 
 from crossformer.data.utils.data_utils import NormalizationType
@@ -26,110 +24,6 @@ from crossformer.utils.typing import Data
 from crossformer.utils.typing import Params
 from crossformer.utils.typing import PRNGKey
 from crossformer.utils.typing import Sequence
-
-
-def _lookup_path(tree, path):
-    node = tree
-    for entry in path:
-        if isinstance(entry, jax.tree_util.DictKey):
-            node = node[entry.key]
-        elif isinstance(entry, jax.tree_util.GetAttrKey):
-            node = getattr(node, entry.attr)
-        elif isinstance(entry, jax.tree_util.SequenceKey):
-            node = node[entry.idx]
-        else:
-            raise TypeError(f"Unsupported path entry: {entry}.")
-    return node
-
-
-def _zeros_from_spec(spec):
-    try:
-        return np.zeros(spec.shape, spec.dtype)
-    except (TypeError, ValueError, AttributeError):
-        return jnp.zeros(spec.shape, spec.dtype)
-
-
-def _apply_sharding(target, sharding):
-    if isinstance(sharding, jax.sharding.Sharding):
-        return jax.tree_util.tree_map(lambda x: jax.device_put(x, sharding), target)
-
-    (path_leaves, tree_def) = jax.tree_util.tree_flatten_with_path(target)
-    sharding_flat = []
-    for path, _ in path_leaves:
-        try:
-            shard = _lookup_path(sharding, path)
-        except (AttributeError, KeyError, IndexError, TypeError) as err:
-            raise ValueError("Sharding tree does not match params tree.") from err
-        sharding_flat.append(shard)
-
-    placed = []
-    for (_, value), shard in zip(path_leaves, sharding_flat):
-        placed.append(jax.device_put(value, shard) if shard is not None else value)
-    return jax.tree_util.tree_unflatten(tree_def, placed)
-
-
-# Build your target params abstract as you do now (e.g., via model.init(...)).
-# Suppose that's `abstract` (same tree/keys as your live model variables).
-
-
-def _to_unsharded(x):
-    # Drop sharding metadata; keep only shape/dtype
-    return ShapeDtypeStruct(x.shape, x.dtype)
-
-
-def spec(tree):
-    return jax.tree.map(ocp.utils.to_shape_dtype_struct, tree)
-
-
-def restore_params(
-    checkpoint_dir: str,
-    params_shape,
-    step: int | None = None,
-    sharding=None,
-):
-    """Restores a params pytree, optionally placing leaves with ``sharding``."""
-    manager = ocp.CheckpointManager(checkpoint_dir, ocp.StandardCheckpointer())
-    # cp = ocp.Checkpointer(ocp.PyTreeCheckpointHandler()) # new API
-    step = manager.latest_step() if step is None else step
-    if step is None:
-        raise ValueError(f"No checkpoints found in {checkpoint_dir}.")
-
-    target = jax.tree_util.tree_map(_zeros_from_spec, params_shape)
-    # target = tree_map(_to_unsharded, target)
-
-    if sharding is not None:
-        target = _apply_sharding(target, sharding)
-
-    _params = manager.restore(step)
-    _params["model"]
-    print(_params.keys())
-    print(_params["model"]["params"].keys())
-    return _params["model"]["params"]
-
-    return manager.restore(
-        step,
-        args=ocp.args.StandardRestore(item=target),
-    )
-
-    # use new orbax API for flexible restore
-    # beware rough edges
-    target = jax.tree_util.tree_map(jnp.zeros_like, params_shape)
-    sharding = jax.sharding.NamedSharding(
-        jax.sharding.Mesh(jax.devices(), ("model",)),
-        jax.sharding.PartitionSpec(
-            None,
-        ),
-    )
-    doshard = lambda x: jax.device_put(x, sharding)
-    target = jax.tree.map(doshard, target)
-    abstract = jax.tree.map(ocp.utils.to_shape_dtype_struct, target)
-
-    manager = ocp.CheckpointManager(ckpt_path, ocp.StandardCheckpointer())
-    # structure = manager.item_metadata(step)
-    # target = jax.tree_util.tree_map(lambda x: np.zeros(x.shape), structure)
-    # params = manager.restore(step, args=ocp.args.StandardRestore(abstract))
-    params = manager.restore(cpath)
-    return
 
 
 @struct.dataclass
@@ -367,45 +261,57 @@ class CrossFormerModel:
     @classmethod
     def load_pretrained(
         cls,
-        ckpt_path: str,
+        checkpoint_path: str,
         step: int | None = None,
     ) -> "CrossFormerModel":
         """Loads a model from a checkpoint that was saved via `save_pretrained`.
 
         Args:
-            ckpt_path (str): A path to either a directory of checkpoints or a single checkpoint.
+            checkpoint_path (str): A path to either a directory of checkpoints or a single checkpoint.
             step (int, optional): If multiple checkpoints are present, which one to load. Defaults to the latest.
         """
-        if ckpt_path.startswith("hf://"):
+        if checkpoint_path.startswith("hf://"):
             if step:
                 raise ValueError(
                     "You can't set config['pretrained_step'] when loading from HuggingFace."
                 )
-            ckpt_path = _download_from_huggingface(ckpt_path.removeprefix("hf://"))
+            checkpoint_path = _download_from_huggingface(
+                checkpoint_path.removeprefix("hf://")
+            )
 
         # load config
-        with Path(ckpt_path).joinpath("config.json").open("r") as f:
+        with tf.io.gfile.GFile(
+            tf.io.gfile.join(checkpoint_path, "config.json"), "r"
+        ) as f:
             config = json.load(f)
+
         # load example batch
-        with Path(ckpt_path).joinpath("example_batch.msgpack").open("rb") as f:
+        with tf.io.gfile.GFile(
+            tf.io.gfile.join(checkpoint_path, "example_batch.msgpack"), "rb"
+        ) as f:
             example_batch = flax.serialization.msgpack_restore(f.read())
 
-        rep_shape = lambda x: flax.core.pretty_repr(jax.tree_map(lambda y: y.shape, x))
         logging.debug(
             "Model was trained with observations: %s",
-            rep_shape(example_batch["observation"]),
+            flax.core.pretty_repr(
+                jax.tree_map(jnp.shape, example_batch["observation"])
+            ),
         )
         logging.debug(
-            "Model was trained with tasks: %s", rep_shape(example_batch["task"])
+            "Model was trained with tasks: %s",
+            flax.core.pretty_repr(jax.tree_map(jnp.shape, example_batch["task"])),
         )
 
         # load dataset statistics
-        with Path(ckpt_path).joinpath("dataset_statistics.json").open("r") as f:
+        with tf.io.gfile.GFile(
+            tf.io.gfile.join(checkpoint_path, "dataset_statistics.json"), "r"
+        ) as f:
             dataset_statistics = json.load(f)
             dataset_statistics = jax.tree_map(
                 np.array, dataset_statistics, is_leaf=lambda x: not isinstance(x, dict)
             )
 
+        # create model def (a CrossFormerModule)
         module = CrossFormerModule.create(**config["model"])
 
         # infer params shape without actually doing any computation
@@ -417,7 +323,68 @@ class CrossFormerModel:
         params_shape = jax.eval_shape(
             partial(module.init, train=False), jax.random.PRNGKey(0), *init_args
         )["params"]
-        params = restore_params(ckpt_path, params_shape, step)
+
+        """ original
+        # restore params, checking to make sure the shape matches
+        checkpointer = orbax.checkpoint.CheckpointManager(
+        checkpoint_path, orbax.checkpoint.PyTreeCheckpointer()
+        step = step if step is not None else checkpointer.latest_step()
+
+        import os
+        import orbax.checkpoint as ocp
+        if True:
+            try:
+                os.remove(f"{checkpoint_path}/{step}/default/_sharding")
+            except:
+                pass
+
+            manager = ocp.CheckpointManager(checkpoint_path, ocp.PyTreeCheckpointer())
+
+            structure = manager.item_metadata(step)
+            params = manager.restore(
+                step,
+                restore_kwargs={
+                    "restore_args": jax.tree_map(
+                        lambda _: ocp.RestoreArgs(restore_type=np.ndarray), structure
+                    )
+                },
+            )
+
+        else:
+            params = checkpointer.restore(step, params_shape)
+        """
+
+        # use new orbax API for flexible restore
+        # beware rough edges
+        from orbax import checkpoint as ocp
+
+        target = jax.tree_util.tree_map(jnp.zeros_like, params_shape)
+        sharding = jax.sharding.NamedSharding(
+            jax.sharding.Mesh(jax.devices(), ("model",)),
+            jax.sharding.PartitionSpec(
+                None,
+            ),
+        )
+        doshard = lambda x: jax.device_put(x, sharding)
+        spec = lambda x: (x.shape, x.dtype)
+        target = jax.tree.map(doshard, target)
+        abstract = jax.tree.map(ocp.utils.to_shape_dtype_struct, target)
+
+        manager = ocp.CheckpointManager(checkpoint_path, ocp.StandardCheckpointer())
+        # structure = manager.item_metadata(step)
+        # target = jax.tree_util.tree_map(lambda x: np.zeros(x.shape), structure)
+        params = manager.restore(step, args=ocp.args.StandardRestore(abstract))
+
+        """ this is original from crossformer... has problem with 4gpu->2gpu server
+        original=False
+        if original:
+            # restore params, checking to make sure the shape matches
+            checkpointer = orbax.checkpoint.CheckpointManager(
+                checkpoint_path, orbax.checkpoint.PyTreeCheckpointer()
+            )
+            step = step if step is not None else checkpointer.latest_step()
+            params = checkpointer.restore(step, params_shape)
+        """
 
         if config["text_processor"] is not None:
             text_processor = ModuleSpec.instantiate(config["text_processor"])()
@@ -437,7 +404,7 @@ class CrossFormerModel:
         self,
         step: int,
         checkpoint_path: str | None = None,
-        checkpoint_manager: ocp.CheckpointManager | None = None,
+        checkpoint_manager: orbax.checkpoint.CheckpointManager | None = None,
     ):
         """Saves a model, as well as corresponding metadata needed for `load_pretrained`. Takes either a
         pre-existing checkpoint manager (which already knows where to save the checkpoint) or a path to a
@@ -454,8 +421,8 @@ class CrossFormerModel:
                 "Must provide exactly one of checkpoint_path or checkpoint_manager."
             )
         if checkpoint_manager is None:
-            checkpoint_manager = ocp.CheckpointManager(
-                checkpoint_path, ocp.PyTreeCheckpointer()
+            checkpoint_manager = orbax.checkpoint.CheckpointManager(
+                checkpoint_path, orbax.checkpoint.PyTreeCheckpointer()
             )
         if checkpoint_path is None:
             checkpoint_path = str(checkpoint_manager._directory)
@@ -517,7 +484,13 @@ class CrossFormerModel:
         module = CrossFormerModule.create(**config["model"])
         rng = rng if rng is not None else jax.random.PRNGKey(0)
         example_batch = multihost_utils.process_allgather(example_batch)
-        example_batch = jax.tree_map(lambda x: x[:1], example_batch)
+        example_batch = jax.tree_map(lambda x: x[0][:1], example_batch)
+
+        from orbax import checkpoint as ocp
+        from rich.pretty import pprint
+
+        spec = lambda tree: jax.tree.map(ocp.utils.to_shape_dtype_struct, tree)
+        pprint(spec(example_batch))
 
         init_args = (
             example_batch["observation"],
