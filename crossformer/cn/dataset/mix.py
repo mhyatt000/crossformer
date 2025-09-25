@@ -5,6 +5,11 @@ import tyro
 
 from crossformer.cn.base import CN
 from crossformer.cn.dataset.types import Head
+from crossformer.data.oxe.oxe_dataset_configs import OXE_DATASET_CONFIGS
+from crossformer.data.oxe.oxe_dataset_mixes import HEAD_TO_DATASET
+from crossformer.data.oxe.oxe_standardization_transforms import (
+    OXE_STANDARDIZATION_TRANSFORMS,
+)
 
 
 @dataclass
@@ -16,6 +21,16 @@ class DataSource(CN):
 
     def __post_init__(self):
         self.REGISTRY[self.name] = self
+        members = {
+            dataset
+            for datasets in HEAD_TO_DATASET.values()
+            for dataset in datasets
+        }
+        assert self.name in members, f"{self.name} missing from HEAD_TO_DATASET"
+        assert self.name in OXE_DATASET_CONFIGS, f"{self.name} missing OXE config"
+        assert (
+            self.name in OXE_STANDARDIZATION_TRANSFORMS
+        ), f"{self.name} missing OXE standardization"
 
     def flatten(self):
         return [(self.name, 1.0)]
