@@ -196,10 +196,6 @@ class ArrayRecordBuilder:
 
         n = len(self._ds)
         chunk = 16_384
-        byte = 1
-        mb = 1_048_576
-        chunk = 14 * mb
-        print(len(self))
 
         for s in range(0, n, chunk):
             e = min(s + chunk, n)

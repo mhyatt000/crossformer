@@ -2,6 +2,8 @@ from pathlib import Path
 
 BASE = Path(__file__).parent.parent
 
+ROOT = BASE
+
 HOME = Path.home()
 MANO_DIR = HOME / "_DATA/data/"
 MANO_CFG = {
