@@ -1,13 +1,11 @@
-from arec import ArrayRecordBuilder, unpack_record
+from arec import ArrayRecordBuilder
+from arec import unpack_record
 import grain
 from grain._src.python import options as grain_options
 import jax
 import numpy as np
 from rich.pretty import pprint
 from tqdm import tqdm
-
-# import jax.profiler
-# jax.profiler.start_trace("/tmp/jax_trace")
 
 
 class ResizeAndCrop(grain.transforms.Map):
@@ -43,7 +41,9 @@ def spec(x):
 
 h = 4  # horizon
 batch_size = 256
-read_options = grain_options.ReadOptions(num_threads=10, prefetch_buffer_size=8 * batch_size)
+read_options = grain_options.ReadOptions(
+    num_threads=10, prefetch_buffer_size=8 * batch_size
+)
 
 ds = (
     # You can also use a shortcut grain.MapDataset.range for
@@ -82,10 +82,8 @@ ds = ds.to_iter_dataset(read_options=performance_config.read_options)
 # pprint(ds[0])
 # pprint(list(ds[:5]))
 
-i = 0
-for x in tqdm(ds, total=len(store) / (256 * 4)):
+for i, x in tqdm(enumerate(ds), total=len(store) / (256 * 4)):
     pprint(spec(x))
-    i += 1
     # if i >= 10:
     # break
 
