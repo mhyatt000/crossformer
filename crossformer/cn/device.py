@@ -51,4 +51,4 @@ class Slurm(Cluster):
     def __post_init__(self):
         if self.nodelist:
             self.nodelist = self.parse_nodelist(self.nodelist)
-             assert len(self.nodelist) == self.num_nodes, "num_nodes != len(nodelist)"
+            assert len(self.nodelist) == self.num_nodes, "num_nodes != len(nodelist)"
