@@ -1,12 +1,25 @@
 """config nodes"""
 
-from dataclasses import Field, dataclass, field
+from dataclasses import dataclass
+from dataclasses import Field
+from dataclasses import field
 import enum
 from enum import Enum
 import logging
 import os
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Type, TypeVar, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+)
 
 import flax
 from rich import print as pprint
@@ -14,28 +27,31 @@ from six import u
 import tyro
 
 from crossformer.cn import wab
-from crossformer.cn.base import CN, default
-from crossformer.cn.dataset import (
-    Dataset,
-    DataSource,
-    Head,
-    MultiDataSource,
-    transform,
-)
-from crossformer.cn.dataset.action import HEAD2SPACE, DataPrep, DataSpec
+from crossformer.cn.base import CN
+from crossformer.cn.base import default
+from crossformer.cn.dataset import Dataset
+from crossformer.cn.dataset import DataSource
+from crossformer.cn.dataset import Head
+from crossformer.cn.dataset import MultiDataSource
+from crossformer.cn.dataset import transform
+from crossformer.cn.dataset.action import DataPrep
+from crossformer.cn.dataset.action import DataSpec
+from crossformer.cn.dataset.action import HEAD2SPACE
 from crossformer.cn.eval import Eval
 from crossformer.cn.optim import Optimizer
 from crossformer.cn.rollout import Rollout
 from crossformer.cn.wab import Wandb
-from crossformer.data.oxe import HEAD_TO_DATASET, ActionDim
-from crossformer.model.components.action_heads import (
-    ActionHead,
-    DiffusionActionHead,
-    FlowMatchingActionHead,
-    L1ActionHead,
-)
-from crossformer.model.components.tokenizers import ImageTokenizer, LowdimObsTokenizer
-from crossformer.model.components.vit_encoders import ResNet26, ResNet26FILM
+from crossformer.data.oxe import ActionDim
+from crossformer.data.oxe import HEAD_TO_DATASET
+from crossformer.model.components.action_heads import ActionHead
+from crossformer.model.components.action_heads import DiffusionActionHead
+from crossformer.model.components.action_heads import FlowMatchingActionHead
+from crossformer.model.components.action_heads import L1ActionHead
+from crossformer.model.components.tokenizers import ImageTokenizer
+from crossformer.model.components.tokenizers import LowdimObsTokenizer
+from crossformer.model.components.transformer import common_transformer_sizes
+from crossformer.model.components.vit_encoders import ResNet26
+from crossformer.model.components.vit_encoders import ResNet26FILM
 from crossformer.utils.spec import ModuleSpec
 
 logger = logging.getLogger(__name__)
@@ -51,8 +67,8 @@ class ModuleE(Enum):
 @dataclass
 class HeadFactory(CN):
     horizon: int = 4
-    module: ModuleE = ModuleE.L1
-    steps: int = 0  # diffusion steps
+    module: ModuleE = ModuleE.FLOW
+    steps: int = 20  # diffusion/flow steps
 
     def __post_init__(self):
         if self.module == ModuleE.DIFFUSION:
@@ -66,14 +82,14 @@ class HeadFactory(CN):
         self.dim = HEAD2SPACE[h]
 
     def kwargs(self):
-        d = dict(
-            pool_strategy="use_map",
-            clip_pred=False,
-            loss_weight=1.0,
-            constrain_loss_dims=True,
-            readout_key=f"readout_{self.name}",
-            num_preds=0,  # force to use dim * horizon
-        )
+        d = {
+            "pool_strategy": "use_map",
+            "clip_pred": False,
+            "loss_weight": 1.0,
+            "constrain_loss_dims": True,
+            "readout_key": f"readout_{self.name}",
+            "num_preds": 0,  # force to use dim * horizon
+        }
         if self.module == ModuleE.DIFFUSION:
             d["diffusion_steps"] = self.steps
         if self.module == ModuleE.FLOW:
@@ -93,6 +109,21 @@ class HeadFactory(CN):
 _SINGLE = "single_arm"
 
 
+class Size(Enum):
+    DUMMY = "dummy"
+    VANILLA = "vanilla"
+    DETR = "detr"
+    VIT_T = "vit_t"
+    VIT_S = "vit_s"
+    VIT_B = "vit_b"
+    VIT_L = "vit_l"
+    VIT_H = "vit_h"
+    VINT = "vint"
+    VIT_T_REPEAT = "vit_t_repeat"
+    VIT_S_REPEAT = "vit_s_repeat"
+    DETR_BIG = "detr_big"
+
+
 @dataclass
 class ModelFactory(CN):
     im: Sequence[str] = default(["primary", "left_wrist"])
@@ -101,6 +132,7 @@ class ModelFactory(CN):
     # which heads to create
     heads: Sequence[str] = default([_SINGLE, "bimanual", "mano"])
 
+    size: Size = Size.DETR
     single: HeadFactory = HeadFactory(name=_SINGLE).field()
     bimanual: HeadFactory = HeadFactory(name="bimanual").field()
     mano: HeadFactory = HeadFactory(name="mano").field()
@@ -109,24 +141,39 @@ class ModelFactory(CN):
     def create(self) -> dict[str, Any]:
         """create the model config"""
 
-        tok = {k: self.make_obs_im(k) for k in self.im} | {k: self.make_obs_proprio(k) for k in self.proprio}
-
-        heads = {v.name: v for v in [self.single, self.bimanual, self.mano] if v.name in self.heads}
-        assert len(heads) > 0, "No heads selected"
-        model = dict(
-            observation_tokenizers=tok,
-            heads={k: v.create() for k, v in heads.items()},
-            readouts={k: v.horizon for k, v in heads.items()},
+        token_embedding_size, transformer_kwargs = common_transformer_sizes(
+            self.size.value
         )
+
+        encoder = self.make_obs_im_encoder()
+        im = {k: self.make_obs_im(k, encoder=encoder) for k in self.im}
+        prop = {k: self.make_obs_proprio(k) for k in self.proprio}
+        tok = im | prop
+
+        heads = {
+            v.name: v
+            for v in [self.single, self.bimanual, self.mano]
+            if v.name in self.heads
+        }
+        assert len(heads) > 0, "No heads selected"
+        model = {
+            "observation_tokenizers": tok,
+            "heads": {k: v.create() for k, v in heads.items()},
+            "readouts": {k: v.horizon for k, v in heads.items()},
+            "token_embedding_size": token_embedding_size,
+            "transformer_kwargs": transformer_kwargs,
+        }
         return {"model": model}
 
     def spec(self) -> dict[str, Any]:
         "simplified keys that can be used to delete old model config"
         model = self.create()["model"]
         model = {
-            "observation_tokenizers": {k: v["module"] for k, v in model["observation_tokenizers"].items()},
+            "observation_tokenizers": {
+                k: v["module"] for k, v in model["observation_tokenizers"].items()
+            },
             "heads": {k: v["module"] for k, v in model["heads"].items()},
-            "readouts": {k: v for k, v in model["readouts"].items()},
+            "readouts": dict(model["readouts"].items()),
         }
         return {"model": model}
 
@@ -147,19 +194,16 @@ class ModelFactory(CN):
             """see if a is inside b"""
             if len(a) > len(b):
                 return False
-            for _a, _b in zip(a, b[: len(a)]):
-                if _a != _b:
-                    return False
-            return True
+            return all(_a == _b for _a, _b in zip(a, b[: len(a)]))
 
         mykeys = self.flatten()  # keep any keys already shared
         # delete model: observation_tokenizers, heads, readouts
-        deletespec = set([m[:2] for m in mykeys])
+        deletespec = {m[:2] for m in mykeys}
 
         for c in list(flat.keys()):
-            if any([inside(m, c) for m in mykeys]):
+            if any(inside(m, c) for m in mykeys):
                 continue
-            if any([inside(d, c) for d in deletespec]):
+            if any(inside(d, c) for d in deletespec):
                 print(f"del: {'.'.join(c)}")
                 del flat[c]
 
@@ -167,17 +211,28 @@ class ModelFactory(CN):
 
     def make_obs_proprio(self, key: str):
         """create observation tokenizer for proprio"""
-        return ModuleSpec.create(LowdimObsTokenizer, obs_keys=[f"proprio_{key}"], dropout_rate=0.2)
+        return ModuleSpec.create(
+            LowdimObsTokenizer, obs_keys=[f"proprio_{key}"], dropout_rate=0.2
+        )
 
-    def make_obs_im(self, key: str):
+    def make_obs_im(self, keys: str | Sequence[str], encoder=None):
         """create observation tokenizer for image"""
+        if isinstance(keys, str):
+            keys = [keys]
+        if encoder is None:
+            encoder = self.make_obs_im_encoder()
+
         return ModuleSpec.create(
             ImageTokenizer,
-            obs_stack_keys=[f"image_{key}"],
-            task_stack_keys=[f"image_{key}"],
+            obs_stack_keys=[f"image_{k}" for k in keys],
+            task_stack_keys=[f"image_{k}" for k in keys],
             task_film_keys=["language_instruction"],
-            encoder=ModuleSpec.create(ResNet26FILM),
+            encoder=encoder,
         )
+
+    def make_obs_im_encoder(self):
+        """create image encoder"""
+        return ModuleSpec.create(ResNet26FILM)
 
     def max_horizon(self) -> int:
         h = 0
