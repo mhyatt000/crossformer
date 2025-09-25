@@ -14,7 +14,11 @@ from crossformer.cn.dataset.mix import DataSource
 from crossformer.cn.dataset.types import ActionRep
 from crossformer.cn.dataset.types import ActionSpace
 from crossformer.cn.dataset.types import HEAD2SPACE
+from crossformer.data.oxe.oxe_dataset_configs import OXE_DATASET_CONFIGS
 from crossformer.data.oxe.oxe_dataset_configs import ProprioDim
+from crossformer.data.oxe.oxe_standardization_transforms import (
+    OXE_STANDARDIZATION_TRANSFORMS,
+)
 from crossformer.data.utils.data_utils import NormalizationType
 from crossformer.utils.spec import ModuleSpec
 
@@ -76,7 +80,14 @@ class DataSpec(CN):
     action_encoding: ActionSpace = ActionSpace.NONE
 
     def __post_init__(self):
+        parent_post_init = getattr(super(), "__post_init__", None)
+        if parent_post_init:
+            parent_post_init()
         self.REGISTRY[self.name] = self
+        assert self.name in OXE_DATASET_CONFIGS, f"{self.name} missing OXE config"
+        assert self.name in OXE_STANDARDIZATION_TRANSFORMS, (
+            f"{self.name} missing OXE standardization"
+        )
 
     @property
     def action_space(self):

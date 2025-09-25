@@ -1,12 +1,14 @@
 import itertools
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from jax.scipy.spatial.transform import Rotation
 import numpy as np
 import tensorflow as tf
 
-from crossformer.cn.dataset.action import XGYM, DataSpec
 from crossformer.cn.dataset.types import ActionRep, ActionSpace
+
+if TYPE_CHECKING:
+    from crossformer.cn.dataset.action import DataSpec, XGYM
 
 METRIC_WAYPOINT_SPACING = {
     "cory_hall": 0.06,
@@ -141,6 +143,8 @@ def xgym_mano_dataset_transform(trajectory: dict[str, Any]) -> dict[str, Any]:
 def xgym_single_dataset_transform(trajectory: dict[str, Any]) -> dict[str, Any]:
     obs = trajectory.pop("observation")
     images = obs.pop("image")
+
+    from crossformer.cn.dataset.action import DataSpec, XGYM
 
     xcfg = DataSpec.REGISTRY["xgym_stack_single"]
     assert isinstance(xcfg, XGYM)
