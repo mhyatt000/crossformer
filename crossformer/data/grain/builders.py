@@ -5,14 +5,19 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 import fnmatch
+from functools import partial
 import json
+import logging
 from typing import Any
 
-import numpy as np
 import grain.python as gp
+import numpy as np
+from tqdm import tqdm
 
 from crossformer.data.grain import metadata, utils
 from crossformer.utils.spec import ModuleSpec
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_callable(spec_or_fn: ModuleSpec | Callable | None) -> Callable | None:
@@ -31,7 +36,7 @@ def _resolve_callable(spec_or_fn: ModuleSpec | Callable | None) -> Callable | No
 
 
 def _resolve_source(
-    source: Sequence[dict] | gp.RandomAccessDataSource | Callable[[], Any]
+    source: Sequence[dict] | gp.RandomAccessDataSource | Callable[[], Any],
 ) -> Sequence[dict] | gp.RandomAccessDataSource:
     if callable(source):
         return _resolve_source(source())
@@ -55,7 +60,9 @@ def _iter_source(source: Sequence[dict] | gp.RandomAccessDataSource) -> Iterable
 def _sample_match_key(traj: Mapping[str, Any], template: str) -> Any:
     matches = [key for key in traj if fnmatch.fnmatch(key, template)]
     if not matches:
-        raise ValueError(f"No keys match template {template!r}; available keys: {traj.keys()}")
+        raise ValueError(
+            f"No keys match template {template!r}; available keys: {traj.keys()}"
+        )
     return traj[matches[0]]
 
 
@@ -70,7 +77,9 @@ class GrainDatasetConfig:
     proprio_obs_dims: Mapping[str, int] | None = None
     language_key: str | None = None
     action_proprio_normalization_type: str = metadata.NormalizationType.NORMAL
-    dataset_statistics: metadata.DatasetStatistics | Mapping[str, Any] | str | None = None
+    dataset_statistics: metadata.DatasetStatistics | Mapping[str, Any] | str | None = (
+        None
+    )
     statistics_save_dir: str | None = None
     force_recompute_dataset_statistics: bool = False
     action_normalization_mask: Sequence[bool] | None = None
@@ -78,6 +87,8 @@ class GrainDatasetConfig:
     skip_norm: bool = False
     skip_norm_keys: Sequence[str] = ()
     seed: int = 0
+
+    debug: bool = False
 
 
 def _restructure_trajectory(
@@ -93,9 +104,20 @@ def _restructure_trajectory(
     if "observation" not in traj or "action" not in traj:
         raise ValueError("Trajectory must contain 'observation' and 'action' keys.")
 
-    action = np.asarray(traj["action"], dtype=np.float32)
+    # from rich.pretty import pprint
+    # from crossformer.utils.spec import spec
+    # pprint(spec(traj))
+
+    # action = np.asarray(traj["action"], dtype=np.float32)
+
+    # @codex add some action processing fn here.
+    # in place of hard coded action definition
+
+    # concat traj proprio joints and proprio gripper
+    proprio = traj["observation"]["proprio"]
+    action = np.concatenate([proprio["joints"], proprio["gripper"]])
     traj_len = action.shape[0]
-    if traj_len == 0:
+    if action.ndim == 1 or traj_len == 0:
         return {}
 
     old_obs = traj["observation"]
@@ -114,11 +136,15 @@ def _restructure_trajectory(
             new_obs[key] = np.asarray(old_obs[old])
     if config.proprio_obs_keys is not None:
         if config.proprio_obs_dims is None:
-            raise ValueError("proprio_obs_dims must be provided when proprio_obs_keys is set.")
+            raise ValueError(
+                "proprio_obs_dims must be provided when proprio_obs_keys is set."
+            )
         for new, old in config.proprio_obs_keys.items():
             key = f"proprio_{new}"
             if old is None:
-                new_obs[key] = np.zeros((traj_len, config.proprio_obs_dims[new]), dtype=np.float32)
+                new_obs[key] = np.zeros(
+                    (traj_len, config.proprio_obs_dims[new]), dtype=np.float32
+                )
             else:
                 new_obs[key] = np.asarray(old_obs[old], dtype=np.float32)
 
@@ -177,10 +203,13 @@ def build_trajectory_dataset(
 
     source = _resolve_source(config.source)
     standardize = _resolve_callable(config.standardize_fn)
-    filter_functions = [fn for fn in (_resolve_callable(fn) for fn in config.filter_fns) if fn]
+    filter_functions = [
+        fn for fn in (_resolve_callable(fn) for fn in config.filter_fns) if fn
+    ]
 
     processed: list[dict] = []
-    for raw_traj in _iter_source(source):
+    bar = partial(tqdm, desc="Processing trajectories", total=len(source), unit="ep")
+    for raw_traj in bar(_iter_source(source)):
         if filter_functions and any(not fn(raw_traj) for fn in filter_functions):
             continue
         traj = _restructure_trajectory(
@@ -192,6 +221,9 @@ def build_trajectory_dataset(
         if not traj:
             continue
         processed.append(traj)
+
+        if config.debug and len(processed) % 1000 == 0:
+            break
 
     proprio_keys = [
         f"proprio_{key}"
@@ -221,4 +253,3 @@ def build_trajectory_dataset(
     )
     dataset.dataset_statistics = stats  # type: ignore[attr-defined]
     return dataset, stats
-

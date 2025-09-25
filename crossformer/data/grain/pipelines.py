@@ -6,11 +6,11 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
 import grain.python as gp
-import grain.python.experimental as gpexp
+import numpy as np
 
 from crossformer.data.grain import builders, transforms
+from crossformer.data.oxe import HEAD_TO_DATASET
 from crossformer.utils.spec import ModuleSpec
 
 
@@ -37,6 +37,15 @@ def _filter_language_present(traj: dict) -> bool:
     return np.any(language != "")
 
 
+def _proprio_within_bounds(traj: dict, max_proprio: float) -> bool:
+    for key, value in traj.get("observation", {}).items():
+        if key.startswith("proprio") and not np.all(
+            np.abs(np.asarray(value)) <= max_proprio
+        ):
+            return False
+    return True
+
+
 def apply_trajectory_transforms(
     dataset: gp.MapDataset,
     *,
@@ -53,7 +62,6 @@ def apply_trajectory_transforms(
     max_action_dim: int | None = None,
     max_proprio_dim: int | None = None,
     post_chunk_transforms: Sequence[ModuleSpec | Callable] = (),
-    head_to_dataset: Mapping[str, Sequence[str]] | None = None,
     seed: int = 0,
 ) -> gp.MapDataset:
     """Applies trajectory level transforms mirroring the TensorFlow pipeline."""
@@ -67,13 +75,6 @@ def apply_trajectory_transforms(
         )
 
     if max_proprio is not None:
-        def _proprio_within_bounds(traj: dict) -> bool:
-            for key, value in traj.get("observation", {}).items():
-                if key.startswith("proprio"):
-                    if not np.all(np.abs(np.asarray(value)) <= max_proprio):
-                        return False
-            return True
-
         dataset = dataset.filter(_proprio_within_bounds)
 
     dataset = dataset.map(transforms.add_pad_mask_dict)
@@ -99,7 +100,9 @@ def apply_trajectory_transforms(
 
     if train and subsample_length is not None:
         dataset = dataset.random_map(
-            lambda traj, rng: transforms.subsample(traj, length=subsample_length, rng=rng)
+            lambda traj, rng: transforms.subsample(
+                traj, length=subsample_length, rng=rng
+            )
         )
 
     dataset = dataset.map(
@@ -113,7 +116,7 @@ def apply_trajectory_transforms(
 
     dataset = dataset.map(
         lambda traj: transforms.add_head_action_mask(
-            traj, head_to_dataset=head_to_dataset
+            traj, head_to_dataset=HEAD_TO_DATASET
         )
     )
 
@@ -281,8 +284,9 @@ def make_interleaved_dataset(
         mixture_dataset = mixture_dataset.repeat()
 
     if batch_size is not None:
-        mixture_dataset = mixture_dataset.batch(batch_size, drop_remainder=drop_remainder)
+        mixture_dataset = mixture_dataset.batch(
+            batch_size, drop_remainder=drop_remainder
+        )
 
     mixture_dataset.dataset_statistics = statistics  # type: ignore[attr-defined]
     return GrainDataset(dataset=mixture_dataset, statistics=statistics)
-
