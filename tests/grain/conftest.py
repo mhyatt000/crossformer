@@ -37,5 +37,7 @@ def standardize_synthetic(traj: dict) -> dict:
     return traj
 
 
-if str(crossformer.ROOT) not in sys.path:
-    sys.path.insert(0, str(crossformer.ROOT))
+root_path = getattr(crossformer, "ROOT", crossformer.BASE)
+
+if str(root_path) not in sys.path:
+    sys.path.insert(0, str(root_path))

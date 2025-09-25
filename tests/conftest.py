@@ -14,7 +14,10 @@ import numpy as np  # noqa: E402
 # Flax expects newer JAX builds that expose define_bool_state; alias to the
 # modern equivalent when running tests on newer releases.
 if not hasattr(jax.config, "define_bool_state"):
-    jax.config.define_bool_state = jax_internal_config.bool_state
+    fallback = getattr(jax_internal_config, "bool_state", None)
+    if fallback is None:
+        fallback = jax_internal_config.define_bool_state
+    jax.config.define_bool_state = fallback
 
 # Recent JAX versions removed jax.experimental.maps, but Flax still imports it.
 if "jax.experimental.maps" not in sys.modules:
