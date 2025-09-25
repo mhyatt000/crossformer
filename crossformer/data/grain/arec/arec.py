@@ -225,6 +225,7 @@ class ArrayRecordBuilder:
         count = 0
         shard_idx = 0
         writer: ArrayRecordWriter | None = None
+        last_sample: Any | None = None
 
         def open_writer(si: int):
             p = _shard_path(self.root, self.name, si)
@@ -236,15 +237,20 @@ class ArrayRecordBuilder:
                 blob = pack_record(sample)
                 writer.write(blob)
                 count += 1
+                last_sample = sample
                 if count % self.shard_size == 0:
                     writer.close()
                     shard_idx += 1
                     writer = open_writer(shard_idx)
 
-            dataspec = self.spec(sample)
-            with (root / "spec.json").open("w", encoding="utf-8") as f:
-                pprint(dataspec)
-                json.dump(dataspec, f, ensure_ascii=False, indent=2)
+            spec_path = root / "spec.json"
+            if last_sample is not None:
+                dataspec = self.spec(last_sample)
+                with spec_path.open("w", encoding="utf-8") as f:
+                    pprint(dataspec)
+                    json.dump(dataspec, f, ensure_ascii=False, indent=2)
+            elif spec_path.exists():
+                spec_path.unlink()
 
         finally:
             if writer is not None:
