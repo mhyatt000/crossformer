@@ -181,6 +181,7 @@ OXE_DATASET_CONFIGS = {
     "xgym_lift_single": xgym,
     "xgym_duck_single": xgym,
     "xgym_stack_single": xgym,
+    "xgym_sweep_single": xgym,
     "xgym_play_single": xgym,
     "xgym_single": xgym,
     # "rlds_oakink": mano,  # OAK INK Dataset
