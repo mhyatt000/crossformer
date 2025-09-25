@@ -14,6 +14,7 @@ HEAD_TO_DATASET = {
         "xgym_lift_single",
         "xgym_stack_single",
         "xgym_duck_single",
+        "xgym_sweep_single",
         #
         "berkeley_mvp_converted_externally_to_rlds",
         "nyu_rot_dataset_converted_externally_to_rlds",
@@ -150,5 +151,5 @@ OXE_NAMED_MIXES = {
     "xstack": [("xgym_stack_single", 1.0), ("xgym_stack_mano", 1.0)],
     "xduck": [("xgym_duck_single", 1.0), ("xgym_duck_mano", 1.0)],
     #
-    **{k: [(k, 1.0)] for k in sum(list(HEAD_TO_DATASET.values()), [])},
+    **{k: [(k, 1.0)] for sublist in HEAD_TO_DATASET.values() for k in sublist},  # o(n)
 }

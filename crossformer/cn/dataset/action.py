@@ -1,12 +1,19 @@
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict
+from dataclasses import dataclass
+from dataclasses import fields
 from pathlib import Path
 
 # from crossformer.data.oxe.oxe_standardization_transforms import OXE_STANDARDIZATION_TRANSFORMS
 from typing import Callable, ClassVar, Sequence
 
-from crossformer.cn.base import CN, default
+import tyro
+
+from crossformer.cn.base import CN
+from crossformer.cn.base import default
 from crossformer.cn.dataset.mix import DataSource
-from crossformer.cn.dataset.types import HEAD2SPACE, ActionRep, ActionSpace
+from crossformer.cn.dataset.types import ActionRep
+from crossformer.cn.dataset.types import ActionSpace
+from crossformer.cn.dataset.types import HEAD2SPACE
 from crossformer.data.oxe.oxe_dataset_configs import ProprioDim
 from crossformer.data.utils.data_utils import NormalizationType
 from crossformer.utils.spec import ModuleSpec
@@ -78,7 +85,9 @@ class DataSpec(CN):
 
 @dataclass
 class XGYM(DataSpec):
-    image_obs_keys: IMOBS = IMOBS(primary="worm", high="overhead", side="side", left_wrist="wrist").field()
+    image_obs_keys: IMOBS = IMOBS(
+        primary="worm", high="overhead", side="side", left_wrist="wrist"
+    ).field()
     depth_obs_keys: DIMOBS = DIMOBS().field()
     proprio_obs_keys: POBS = POBS(single="proprio").field()
     # state_obs_keys: []
@@ -137,7 +146,9 @@ taco_play = BasicDataSpec(
     image_obs_keys=IMOBS(primary="rgb_static"),
     depth_obs_keys=DIMOBS(primary="depth_static", wrist="depth_gripper"),
 )
-taco_extra = BasicDataSpec(name="taco_extra", image_obs_keys=IMOBS(primary="rgb_static"))
+taco_extra = BasicDataSpec(
+    name="taco_extra", image_obs_keys=IMOBS(primary="rgb_static")
+)
 jaco_play = BasicDataSpec(name="jaco_play")
 
 bcable = BasicDataSpec(
@@ -214,14 +225,18 @@ class DataPrep(CN):
     load_language: bool = True  # y/n load language instructions
 
     skip_norm_keys: list[str] = default([])
-    force_recompute_dataset_statistics: bool = True
+    force_recompute_dataset_statistics: bool = tyro.MISSING
     action_proprio_normalization_type: NormalizationType = NormalizationType.NORMAL
 
     def __post_init__(self):
         self.loc = str(self.loc)
-        assert self.load_camera_views, f"Must specify at least one camera view to load for {self.name}"
+        assert self.load_camera_views, (
+            f"Must specify at least one camera view to load for {self.name}"
+        )
 
-        if missing_keys := (set(self.load_camera_views) - set(self.spec.image_obs_keys)):
+        if missing_keys := (
+            set(self.load_camera_views) - set(self.spec.image_obs_keys)
+        ):
             raise ValueError(
                 f"Cannot load {self.name} with views {missing_keys} since they are not available inside {self.spec}"
             )
@@ -229,15 +244,25 @@ class DataPrep(CN):
         try:
             _ = self.norm_mask
         except KeyError:
-            raise ValueError(f"Cannot load {self.name} with unsupported action encoding {self.spec.action_encoding}")
+            raise ValueError(
+                f"Cannot load {self.name} with unsupported action encoding {self.spec.action_encoding}"
+            )
 
     @property
     def image_obs_keys(self):
-        return {k: v for k, v in self.spec.image_obs_keys.items() if k in self.load_camera_views}
+        return {
+            k: v
+            for k, v in self.spec.image_obs_keys.items()
+            if k in self.load_camera_views
+        }
 
     @property
     def depth_obs_keys(self):
-        d = {k: v for k, v in self.spec.depth_obs_keys.items() if k in self.load_camera_views}
+        d = {
+            k: v
+            for k, v in self.spec.depth_obs_keys.items()
+            if k in self.load_camera_views
+        }
         return d if self.load_depth else None
 
     @property
