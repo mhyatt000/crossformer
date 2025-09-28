@@ -15,16 +15,20 @@ without introducing TensorFlow as a dependency.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any, Iterable, Optional, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any, Iterable, Optional
 
 import numpy as np
+from scipy import ndimage
 
 from crossformer.data.grain import utils
 
 
 ArrayDict = dict[str, Any]
 Trajectory = dict[str, Any]
+
+
+_INTERPOLATION_TO_ORDER = {"nearest": 0, "bilinear": 1}
 
 
 def _ensure_array(value: Any) -> np.ndarray:
@@ -245,6 +249,102 @@ def flatten_trajectory(traj: Trajectory) -> Iterable[dict[str, Any]]:
                 for head, mask in traj["action_head_masks"].items()
             }
         yield frame
+
+
+def _normalize_resize_size(size: int | tuple[int, int]) -> tuple[int, int]:
+    if isinstance(size, int):
+        if size <= 0:
+            raise ValueError("resize dimension must be positive")
+        return size, size
+    if len(size) != 2:
+        raise ValueError("size must be an int or a length-2 tuple")
+    height, width = (int(dim) for dim in size)
+    if height <= 0 or width <= 0:
+        raise ValueError("resize dimensions must be positive")
+    return height, width
+
+
+def _is_image_like(value: Any) -> bool:
+    array = _ensure_array(value)
+    return array.ndim >= 3 and array.shape[-1] in {1, 3, 4}
+
+
+def _resize_image_array(
+    value: Any,
+    *,
+    size: tuple[int, int],
+    order: int,
+) -> np.ndarray:
+    array = _ensure_array(value)
+    if array.ndim < 3:
+        raise ValueError("Expected image-like array with channel dimension")
+    height_axis = array.ndim - 3
+    width_axis = array.ndim - 2
+    zoom_factors = [1.0] * array.ndim
+    zoom_factors[height_axis] = size[0] / array.shape[height_axis]
+    zoom_factors[width_axis] = size[1] / array.shape[width_axis]
+    working_array = array
+    orig_dtype = working_array.dtype
+    if np.issubdtype(orig_dtype, np.integer):
+        working_array = working_array.astype(np.float32)
+    resized = ndimage.zoom(working_array, zoom_factors, order=order)
+    if np.issubdtype(orig_dtype, np.integer):
+        info = np.iinfo(orig_dtype)
+        resized = np.clip(np.rint(resized), info.min, info.max).astype(orig_dtype)
+    else:
+        resized = resized.astype(orig_dtype)
+    return resized
+
+
+def resize_frame_images(
+    frame: dict[str, Any],
+    *,
+    size: int | tuple[int, int],
+    keys: Sequence[str] | None = None,
+    interpolation: str = "bilinear",
+) -> dict[str, Any]:
+    """Resizes image-like observations inside ``frame`` to ``size``.
+
+    Parameters
+    ----------
+    frame:
+        Frame dictionary emitted by :func:`flatten_trajectory`.
+    size:
+        Target spatial resolution.  Accepts an integer for square resizing or a
+        ``(height, width)`` tuple for non-square outputs.
+    keys:
+        Optional observation keys to resize.  When ``None`` the transform
+        automatically selects keys whose arrays end with a channel dimension of
+        size ``1``, ``3`` or ``4`` (``rgb``/``rgba``/single channel images).
+    interpolation:
+        Either ``"nearest"`` or ``"bilinear"``.
+    """
+
+    order = _INTERPOLATION_TO_ORDER.get(interpolation)
+    if order is None:
+        raise ValueError(
+            f"Unsupported interpolation '{interpolation}'. "
+            f"Expected one of {sorted(_INTERPOLATION_TO_ORDER)}"
+        )
+    target_size = _normalize_resize_size(size)
+    frame = utils.clone_structure(frame)
+    observations = frame.get("observation")
+    if not isinstance(observations, dict):
+        return frame
+    if keys is None:
+        keys = [
+            key
+            for key, value in observations.items()
+            if key != "pad_mask_dict" and _is_image_like(value)
+        ]
+    for key in keys:
+        if key not in observations:
+            continue
+        observations[key] = _resize_image_array(
+            observations[key], size=target_size, order=order
+        )
+    frame["observation"] = observations
+    return frame
 
 
 def drop_empty_language(traj: Trajectory) -> Trajectory:
