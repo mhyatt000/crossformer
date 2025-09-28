@@ -1,11 +1,11 @@
+from __future__ import annotations
+
 import dataclasses
 from dataclasses import dataclass
-import functools
-import logging
-import platform
-from typing import Any
 
 import tyro
+
+from . import CN
 
 """
 import etils.epath as epath
@@ -33,7 +33,6 @@ import openpi.training.weight_loaders as _weight_loaders
 
 # import openpi.training.config as _config
 
-from . import CN
 
 @dataclass
 class SubConfig:

@@ -1,8 +1,9 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
-from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
 
 from crossformer.cn.base import CN
+
 
 @dataclass()
 class Rollout(CN):

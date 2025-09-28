@@ -1,8 +1,7 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 import os
-from enum import Enum
-from logging import setLoggerClass
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
 
 from crossformer.cn.base import CN
 
@@ -28,7 +27,7 @@ class Slurm(Cluster):
         slurm = {k.replace("SLURM_JOB_", "").lower(): v for k, v in slurm.items()}
 
         num_nodes = int(slurm.get("num_nodes", 1))
-        nodelist = slurm.get("nodelist", None)
+        nodelist = slurm.get("nodelist")
 
         return Slurm(num_nodes=num_nodes, nodelist=nodelist)
 
@@ -44,11 +43,10 @@ class Slurm(Cluster):
                 prefix, suffix = node.split("[")
                 suffix = suffix.replace("]", "")
                 start, end = suffix.split("-")
-                for i in range(int(start), int(end) + 1):
-                    nodes.append(f"{prefix}{i}")
+                nodes += [f"{prefix}{i}" for i in range(int(start), int(end) + 1)]
         return nodes
 
     def __post_init__(self):
         if self.nodelist:
             self.nodelist = self.parse_nodelist(self.nodelist)
-             assert len(self.nodelist) == self.num_nodes, "num_nodes != len(nodelist)"
+            assert len(self.nodelist) == self.num_nodes, "num_nodes != len(nodelist)"

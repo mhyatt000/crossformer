@@ -1,8 +1,8 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
-from rich.pretty import pprint
 from enum import Enum
 import logging
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
 
 from crossformer.cn.base import CN
 
@@ -18,12 +18,12 @@ class LearningRate(CN):
     first: float = 0.0  # initial value
     peak: float = 3e-4  # peak value
     warmup_steps: int = 2000  # num steps to reach peak
-    decay_steps: Optional[int] = None  # max_steps
+    decay_steps: int | None = None  # max_steps
     last: float = 1e-7  # final value
 
     def __post_init__(self):
-        assert self.name in ["linear", "cosine", "exponential", 'rsqrt']
-        logger.warn(f" decay is none: { self.decay_steps is None}")
+        assert self.name in ["linear", "cosine", "exponential", "rsqrt"]
+        logger.warn(f" decay is none: {self.decay_steps is None}")
         logger.warn("TODO make scheduler")
 
     def create(self):
@@ -37,9 +37,8 @@ class LearningRate(CN):
 
 @dataclass
 class Cosine(LearningRate):
-
     name: str = "cosine"
-    decay_steps: Optional[int] = None  # max_steps
+    decay_steps: int | None = None  # max_steps
 
     def create(self):
         # assert decay here
@@ -49,7 +48,6 @@ class Cosine(LearningRate):
 
 @dataclass
 class RSQRT(LearningRate):
-
     name: str = "rsqrt"
     timescale: float = 1e4
 
@@ -76,7 +74,7 @@ class Optimizer(CN):
     lr: LearningRate = LearningRate(name="cosine").field()
     weight_decay: float = 0.01
     clip_gradient: float = 1.0
-    frozen_keys: Optional[List[str]] = None
+    frozen_keys: list[str] | None = None
     grad_accumulation_steps: int = 1  # if using, adjust max_steps accordingly
     mode: FreezeMode = FreezeMode.FULL
 

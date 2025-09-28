@@ -1,23 +1,19 @@
-from dataclasses import dataclass, field, Field
-from rich import print as pprint
+from __future__ import annotations
 
-from enum import Enum
+from dataclasses import dataclass, Field, field, is_dataclass
 from functools import partial, wraps
 import inspect
 from pathlib import Path
 from typing import (
     Any,
     Callable,
-    Dict,
     get_args,
     get_origin,
-    List,
-    Optional,
-    Tuple,
-    Type,
     TypeVar,
     Union,
 )
+
+from rich import print as pprint
 
 # import hydra
 # from hydra.core.config_store import ConfigStore
@@ -53,8 +49,7 @@ def store(cls):
     group = get_group(cls)
 
     def wrapper(cls):
-
-        logger.debug(f"store {dict(name=name, group=group)}")
+        logger.debug(f"store { {'name': name, 'group': group} }")
         CS.store(name=name, node=cls, group=group)
         return cls
 
@@ -67,10 +62,7 @@ def isCN(typ):
         pass
 
 
-from dataclasses import is_dataclass
-
-
-def anno2default(k, anno) -> Dict[str, Any]:
+def anno2default(k, anno) -> dict[str, Any]:
     """convert type annotation to default value
     - output is a dict where k is field name and v is default value(s)
     - these dicts get stacked into List[Dict[str, Any]] in CNMeta
@@ -123,7 +115,7 @@ def expand_defaults(thing):
         return str(thing)
     if isinstance(thing, (str, int, float, bool, type(None))):
         return thing
-    raise NotImplemented(f"unknown type {type(thing)}")
+    raise NotImplementedError(f"unknown type {type(thing)}")
 
 
 class CNMeta(type):
@@ -134,7 +126,6 @@ class CNMeta(type):
     logger.warn("TODO: CNMeta needs fix to ignore list and dict")
 
     def __new__(cls, name, bases, class_dict):
-
         # auto wrap with default_factory
         N = (
             lambda k, v: k.startswith("_")
@@ -164,9 +155,9 @@ class CNMeta(type):
         # Attach the defaults list to the class
         # Add List[Any] annotation to appease dataclass
         if len(defaults) > 1:  # condition is meaningless
-            logger.debug(f"{dict(defaults=defaults)}")
+            logger.debug(f"{ {'defaults': defaults} }")
             anno = class_dict.get("__annotations__", {})
-            anno["defaults"] = List[Any]
+            anno["defaults"] = list[Any]
             class_dict["__annotations__"] = anno
 
             class_dict["defaults"] = default(expand_defaults(defaults), repr=False)
@@ -215,7 +206,7 @@ def tryex(fn):
     return decorator
 
 
-def asdataclass(target: Type[T]):
+def asdataclass(target: type[T]):
     """
     Decorator to ensure that a Hydra configuration object is converted to the given type.
     https://github.com/facebookresearch/hydra/issues/981 for info
@@ -229,16 +220,16 @@ def asdataclass(target: Type[T]):
 
     def decorator(func: Callable[[T], None]) -> target:
         @wraps(func)
-        def wrapper(cfg: Union[DictConfig, T], *args, **kwargs):
+        def wrapper(cfg: DictConfig | T, *args, **kwargs):
             # Convert cfg to the target type if it's a DictConfig
             # if isinstance(cfg, (DictConfig, dict)):
             # cfg = instantiate(cfg)
             cfg: target = OmegaConf.to_object(cfg)  # ._clean()
             pprint(cfg)
 
-            assert isinstance(
-                cfg, target
-            ), f"cfg must be of type {target}, got {type(cfg)}"
+            assert isinstance(cfg, target), (
+                f"cfg must be of type {target}, got {type(cfg)}"
+            )
             return func(cfg, *args, **kwargs)
 
         return wrapper
