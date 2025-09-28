@@ -1,10 +1,12 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from enum import Enum
 import logging
 from typing import Any
 
 from crossformer.cn.base import CN, default
-from crossformer.data.oxe import HEAD_TO_DATASET, ActionDim
+from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +43,10 @@ class TrajectoryTransform(CN):
         logger.warn("TODO: ensure max dims are truly the max")
         logger.warn("TODO: define goal relabeling strategies")
 
-    def create(self):
+    def create(self, with_head_to_dataset=True):
         d = self.asdict()
-        d["head_to_dataset"] = HEAD_TO_DATASET
+        if with_head_to_dataset:
+            d["head_to_dataset"] = HEAD_TO_DATASET
         d.pop("name")
         d["goal_relabeling_strategy"] = self.goal_relabeling_strategy.value
         return d

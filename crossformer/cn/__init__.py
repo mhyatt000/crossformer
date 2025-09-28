@@ -1,8 +1,8 @@
 """config nodes"""
 
-from dataclasses import dataclass
-from dataclasses import Field
-from dataclasses import field
+from __future__ import annotations
+
+from dataclasses import dataclass, Field, field
 import enum
 from enum import Enum
 import logging
@@ -27,31 +27,23 @@ from six import u
 import tyro
 
 from crossformer.cn import wab
-from crossformer.cn.base import CN
-from crossformer.cn.base import default
-from crossformer.cn.dataset import Dataset
-from crossformer.cn.dataset import DataSource
-from crossformer.cn.dataset import Head
-from crossformer.cn.dataset import MultiDataSource
-from crossformer.cn.dataset import transform
-from crossformer.cn.dataset.action import DataPrep
-from crossformer.cn.dataset.action import DataSpec
-from crossformer.cn.dataset.action import HEAD2SPACE
+from crossformer.cn.base import CN, default
+from crossformer.cn.dataset import Dataset, DataSource, Head, MultiDataSource, transform
+from crossformer.cn.dataset.action import DataPrep, DataSpec, HEAD2SPACE
 from crossformer.cn.eval import Eval
 from crossformer.cn.optim import Optimizer
 from crossformer.cn.rollout import Rollout
 from crossformer.cn.wab import Wandb
-from crossformer.data.oxe import ActionDim
-from crossformer.data.oxe import HEAD_TO_DATASET
-from crossformer.model.components.action_heads import ActionHead
-from crossformer.model.components.action_heads import DiffusionActionHead
-from crossformer.model.components.action_heads import FlowMatchingActionHead
-from crossformer.model.components.action_heads import L1ActionHead
-from crossformer.model.components.tokenizers import ImageTokenizer
-from crossformer.model.components.tokenizers import LowdimObsTokenizer
+from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
+from crossformer.model.components.action_heads import (
+    ActionHead,
+    DiffusionActionHead,
+    FlowMatchingActionHead,
+    L1ActionHead,
+)
+from crossformer.model.components.tokenizers import ImageTokenizer, LowdimObsTokenizer
 from crossformer.model.components.transformer import common_transformer_sizes
-from crossformer.model.components.vit_encoders import ResNet26
-from crossformer.model.components.vit_encoders import ResNet26FILM
+from crossformer.model.components.vit_encoders import ResNet26, ResNet26FILM
 from crossformer.utils.spec import ModuleSpec
 
 logger = logging.getLogger(__name__)

@@ -1,18 +1,28 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from enum import Enum
 import logging
 import os
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+)
 
 from crossformer.cn.base import CN, default
 from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
 
 from .frame import FrameTransform
 from .traj import TrajectoryTransform
-
-import logging
-from typing import *
 
 logger = logging.getLogger(__name__)
 
@@ -34,14 +44,14 @@ class KeepProb(Enum):
 
 @dataclass()
 class Transform(CN):
-    REGISTRY: ClassVar[Dict[str, "Transform"]] = {}
+    REGISTRY: ClassVar[dict[str, Transform]] = default({})
 
     # TODO rename to seq
     traj: TrajectoryTransform = TrajectoryTransform(name="").field()
 
     frame: FrameTransform = FrameTransform(name="").field()
 
-    skip_norm_keys: List[str] = default(["proprio_bimanual", "proprio_mano"])
+    skip_norm_keys: list[str] = default(["proprio_bimanual", "proprio_mano"])
 
     task_cond: Modality = Modality.MULTI  # alias for modality
     keep_image_prob: float = 0.5
@@ -49,13 +59,13 @@ class Transform(CN):
     def __post_init__(self):
         self.REGISTRY[self.name] = self
 
-        keep: Dict[Modality, float] = {
+        keep: dict[Modality, float] = {
             Modality.IMG: 1.0,
             Modality.LANG: 0.0,
             Modality.MULTI: 0.5,
         }
         if self.keep_image_prob != keep[self.task_cond]:
             self.keep_image_prob = keep[self.task_cond]
-            logger.info(f"Post init override", keep_image_prob=self.keep_image_prob)
+            logger.info("Post init override", keep_image_prob=self.keep_image_prob)
 
         logger.warn("TODO: separate configs from tensorflow dependency")
