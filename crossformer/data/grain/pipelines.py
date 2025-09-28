@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 import grain.python as gp
@@ -186,12 +187,20 @@ def make_single_dataset(
     train: bool,
     traj_transform_kwargs: dict[str, Any] | None = None,
     frame_transforms: Sequence[ModuleSpec | Callable] = (),
+    resize_frames_to: int | tuple[int, int] | None = None,
+    resize_frame_keys: Sequence[str] | None = None,
+    resize_interpolation: str = "bilinear",
     shuffle_buffer_size: int | None = None,
     batch_size: int | None = None,
     drop_remainder: bool = False,
     seed: int = 0,
 ) -> GrainDataset:
-    """Builds a dataset of frames for a single dataset configuration."""
+    """Builds a dataset of frames for a single dataset configuration.
+
+    When ``resize_frames_to`` is provided the image observations within each
+    frame are resized via :func:`transforms.resize_frame_images` before applying
+    any additional ``frame_transforms``.
+    """
 
     traj_dataset, stats = builders.build_trajectory_dataset(config)
     traj_kwargs = dict(traj_transform_kwargs or {})
@@ -200,7 +209,18 @@ def make_single_dataset(
     )
 
     frame_dataset: gp.IterDataset = _FlattenIterDataset(traj_dataset)
-    frame_dataset = apply_frame_transforms(frame_dataset, frame_transforms)
+    combined_transforms: list[ModuleSpec | Callable] = []
+    if resize_frames_to is not None:
+        combined_transforms.append(
+            partial(
+                transforms.resize_frame_images,
+                size=resize_frames_to,
+                keys=resize_frame_keys,
+                interpolation=resize_interpolation,
+            )
+        )
+    combined_transforms.extend(frame_transforms)
+    frame_dataset = apply_frame_transforms(frame_dataset, combined_transforms)
 
     if shuffle_buffer_size and shuffle_buffer_size > 1:
         frame_dataset = _BufferShuffleIterDataset(
@@ -225,11 +245,18 @@ def make_interleaved_dataset(
     shuffle_buffer_size: int = 1,
     traj_transform_kwargs: dict[str, Any] | None = None,
     frame_transforms: Sequence[ModuleSpec | Callable] = (),
+    resize_frames_to: int | tuple[int, int] | None = None,
+    resize_frame_keys: Sequence[str] | None = None,
+    resize_interpolation: str = "bilinear",
     batch_size: int | None = None,
     drop_remainder: bool = False,
     seed: int = 0,
 ) -> GrainDataset:
-    """Creates a weighted mixture of datasets similar to the TensorFlow pipeline."""
+    """Creates a weighted mixture of datasets similar to the TensorFlow pipeline.
+
+    Resizing is performed independently for every dataset when
+    ``resize_frames_to`` is specified.
+    """
 
     if not configs:
         raise ValueError("At least one dataset configuration must be provided.")
@@ -242,6 +269,9 @@ def make_interleaved_dataset(
             train=train,
             traj_transform_kwargs=traj_transform_kwargs,
             frame_transforms=frame_transforms,
+            resize_frames_to=resize_frames_to,
+            resize_frame_keys=resize_frame_keys,
+            resize_interpolation=resize_interpolation,
             shuffle_buffer_size=None,
             batch_size=None,
             seed=seed,

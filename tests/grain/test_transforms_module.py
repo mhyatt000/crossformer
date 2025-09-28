@@ -119,6 +119,23 @@ def test_flatten_trajectory_emits_frames(base_trajectory):
     assert first["dataset_name"] == "demo"
 
 
+def test_resize_frame_images_square(base_trajectory):
+    frame = next(transforms.flatten_trajectory(base_trajectory))
+    resized = transforms.resize_frame_images(frame, size=32)
+    rgb = resized["observation"]["rgb"]
+    assert rgb.shape[1:3] == (32, 32)
+    assert rgb.dtype == np.uint8
+    original = frame["observation"]["rgb"]
+    assert original.shape[1:3] == (4, 4)
+
+
+def test_resize_frame_images_rectangle(base_trajectory):
+    frame = next(transforms.flatten_trajectory(base_trajectory))
+    resized = transforms.resize_frame_images(frame, size=(16, 8))
+    rgb = resized["observation"]["rgb"]
+    assert rgb.shape[1:3] == (16, 8)
+
+
 def test_drop_empty_language_raises():
     traj = {
         "action": np.zeros((2, 1)),
