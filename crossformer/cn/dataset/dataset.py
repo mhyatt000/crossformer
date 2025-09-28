@@ -1,24 +1,22 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
-from crossformer.data.dataset import make_interleaved_dataset, make_single_dataset
-from crossformer.utils.spec import ModuleSpec
-from rich.pretty import pprint
-import jax
-import tyro
 from enum import Enum
-import logging
-import os
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
+from typing import Callable
+
+import jax
+from rich.pretty import pprint
 
 from crossformer.cn.base import CN, default
-from crossformer.cn.dataset.transform import Transform
-from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
-from crossformer.data.oxe.oxe_dataset_mixes import OXE_NAMED_MIXES
-
-
+from crossformer.cn.dataset.action import DataPrep
 from crossformer.cn.dataset.mix import DataSource, MultiDataSource
-from crossformer.cn.dataset.action import DataPrep, HEAD2SPACE
-
+from crossformer.cn.dataset.transform import Transform
+from crossformer.cn.dataset.transform.frame import FrameTransform
+from crossformer.cn.dataset.transform.traj import TrajectoryTransform
+from crossformer.data.dataset import make_interleaved_dataset
+from crossformer.data.oxe import HEAD_TO_DATASET
+from crossformer.data.oxe.oxe_dataset_mixes import OXE_NAMED_MIXES
 
 _ = Transform(name="default")
 
@@ -30,7 +28,7 @@ class Reader(CN):
     # location of tensorflow_datasets
     loc: Path | str = (Path().home() / "tensorflow_datasets").expanduser()
 
-    load_camera_views: List[str] = default(["primary", "side", "high", "left_wrist"])
+    load_camera_views: list[str] = default(["primary", "side", "high", "left_wrist"])
     load_proprio: bool = True
     load_depth: bool = False
 
@@ -46,7 +44,7 @@ class Loader(CN):
 
     threads_traj_transform: int = 48
     threads_traj_read: int = 48
-    threads_frame_transform: Optional[int] = None
+    threads_frame_transform: int | None = 32  # None
 
     prefetch: int = 64  # number prefetch batches
 
@@ -56,8 +54,8 @@ class Loader(CN):
         return self.global_batch_size // jax.process_count()
 
 
-DataSourceE = Enum("DataSourceE", {k: v for k, v in DataSource.REGISTRY.items()})
-TransformE = Enum("TransformE", {k: v for k, v in Transform.REGISTRY.items()})
+DataSourceE = Enum("DataSourceE", dict(DataSource.REGISTRY.items()))
+TransformE = Enum("TransformE", dict(Transform.REGISTRY.items()))
 
 
 @dataclass()
@@ -79,13 +77,20 @@ class Dataset(CN):
     reader: Reader = Reader().field()
     loader: Loader = Loader().field()
 
-    def __post__init__(self):
+    @property
+    def traj(self) -> TrajectoryTransform:
+        return self.transform.traj
 
+    @property
+    def frame(self) -> FrameTransform:
+        return self.transform.frame
+
+    def __post__init__(self):
         # assert self.mix in DataSourceE, f"Mix {self.mix} not registered."
 
         # ensure that each dataset has a head
         is_valid = [
-            any([d in dsets for head, dsets in HEAD_TO_DATASET.items()])
+            any(d in dsets for head, dsets in HEAD_TO_DATASET.items())
             for d, weight in OXE_NAMED_MIXES[self.mix]
         ]
         assert all(is_valid), f"Dataset in mix: {self.mix} doesn't have assigned head."
@@ -103,11 +108,11 @@ class Dataset(CN):
         """return the global batch size for this dataset"""
         return self.loader.global_batch_size
 
-    def kwargs_list(self, oxe_fns: Dict[str, Callable]):
+    def kwargs_list(self, oxe_fns: dict[str, Callable]):
         """makes just the dataset_kwargs_list in crossformer spec"""
 
-        data_weights: List[Tuple[str, float]] = self.mix.value.flatten()
-        data_prep: List[DataPrep] = [
+        data_weights: list[tuple[str, float]] = self.mix.value.flatten()
+        data_prep: list[DataPrep] = [
             DataPrep(
                 name=d,
                 weight=w,
@@ -126,23 +131,23 @@ class Dataset(CN):
         return dks, data_prep
 
     def kwargs(self):
-        """ all other "generic" kwargs """
+        """all other "generic" kwargs"""
         frame = self.transform.frame.create(self.reader.load_camera_views)
         seq = self.transform.traj.create()
-        out = dict(
-            shuffle_buffer_size=self.loader.shuffle_buffer,
-            batch_size=self.bs,
+        out = {
+            "shuffle_buffer_size": self.loader.shuffle_buffer,
+            "batch_size": self.bs,
             #
-            traj_transform_kwargs=seq,
-            frame_transform_kwargs=frame,
+            "traj_transform_kwargs": seq,
+            "frame_transform_kwargs": frame,
             #
             # # balance_weights=None,
-            traj_transform_threads=self.loader.threads_traj_transform,
-            traj_read_threads=self.loader.threads_traj_read,
-        )
+            "traj_transform_threads": self.loader.threads_traj_transform,
+            "traj_read_threads": self.loader.threads_traj_read,
+        }
         return out
 
-    def create(self, oxe_fns: Dict[str, Callable], train: bool = True):
+    def create(self, oxe_fns: dict[str, Callable], train: bool = True):
         """create the dataset"""
 
         #
@@ -150,16 +155,11 @@ class Dataset(CN):
         # TODO: why do we use transform.traj.task_augment_strategy: 'delete_task_conditioning'?
         #
 
-        # print()
-        # pprint(dks)
         dks, data_prep = self.kwargs_list(oxe_fns=oxe_fns)
         frame = self.transform.frame.create(self.reader.load_camera_views)
         seq = self.transform.traj.create()
 
-        # pprint(frame)
-        # pprint(seq)
-        # print()
-
+        pprint(dks)
         dataset = make_interleaved_dataset(
             dataset_kwargs_list=dks,
             sample_weights=[d.weight for d in data_prep],

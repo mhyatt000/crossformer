@@ -1,7 +1,20 @@
+from __future__ import annotations
+
 from collections.abc import Callable
 from functools import partial
 import importlib
 from typing import Any, TypedDict
+
+import jax
+
+
+def spec(tree: dict[str, Any]) -> dict[str, Any]:
+    """Create a spec dictionary for the given tree structure."""
+
+    def toshape(x):
+        return x.shape if getattr(x, "shape", None) is not None else x
+
+    return jax.tree.map(toshape, tree)
 
 
 class ModuleSpec(TypedDict):
@@ -37,7 +50,7 @@ class ModuleSpec(TypedDict):
     kwargs: dict[str, Any]
 
     @staticmethod
-    def create(callable_or_full_name: str | Callable, *args, **kwargs) -> "ModuleSpec":  # type: ignore
+    def create(callable_or_full_name: str | Callable, *args, **kwargs) -> ModuleSpec:  # type: ignore
         """Create a module spec from a callable or import string.
 
         Args:
@@ -58,7 +71,7 @@ class ModuleSpec(TypedDict):
         return ModuleSpec(module=module, name=name, args=args, kwargs=kwargs)
 
     @staticmethod
-    def instantiate(spec: "ModuleSpec"):  # type: ignore
+    def instantiate(spec: ModuleSpec):  # type: ignore
         if set(spec.keys()) != {"module", "name", "args", "kwargs"}:
             raise ValueError(
                 f"Expected ModuleSpec, but got {spec}. "
@@ -68,7 +81,7 @@ class ModuleSpec(TypedDict):
         return partial(cls, *spec["args"], **spec["kwargs"])
 
     @staticmethod
-    def to_string(spec: "ModuleSpec"):  # type: ignore
+    def to_string(spec: ModuleSpec):  # type: ignore
         return (
             f"{spec['module']}:{spec['name']}"
             f"({', '.join(spec['args'])}"
