@@ -1,7 +1,8 @@
 # Written by Dibya
 # from perceiver_jax import Perceiver
+from __future__ import annotations
+
 import logging
-from typing import Dict, Optional
 
 import flax.linen as nn
 import jax
@@ -78,10 +79,10 @@ class CrossFormerTransformer(nn.Module):
 
     """
 
-    observation_tokenizers: Dict[str, nn.Module]
-    task_tokenizers: Dict[str, nn.Module]
-    readouts: Dict[str, int]
-    transformer_kwargs: Dict
+    observation_tokenizers: dict[str, nn.Module]
+    task_tokenizers: dict[str, nn.Module]
+    readouts: dict[str, int]
+    transformer_kwargs: dict
     token_embedding_size: int
     max_horizon: int
     repeat_task_tokens: bool
@@ -92,10 +93,10 @@ class CrossFormerTransformer(nn.Module):
         observations: Data,
         tasks: Data,
         timestep_pad_mask: jax.Array,
-        readouts: Optional[Sequence[str]] = None,
+        readouts: Sequence[str] | None = None,
         train: bool = False,
         verbose: bool = False,
-    ) -> Dict[str, TokenGroup]:
+    ) -> dict[str, TokenGroup]:
         """
         Args:
             observations: A dictionary containing observation data for a batch of trajectory windows.
@@ -121,12 +122,14 @@ class CrossFormerTransformer(nn.Module):
         # Check that all inputs are valid
         #
 
-        assert set(readouts).issubset(
-            set(self.readouts.keys())
-        ), "readouts must be specified in the model config"
+        assert set(readouts).issubset(set(self.readouts.keys())), (
+            "readouts must be specified in the model config"
+        )
 
         batch_size, horizon = jax.tree_util.tree_leaves(observations)[0].shape[:2]
-        assert horizon <= self.max_horizon, "horizon must be <= max_horizon"
+        assert horizon <= self.max_horizon, (
+            f"horizon must be <= max_horizon - {horizon} <= {self.max_horizon}"
+        )
         assert jax.tree_util.tree_all(
             jax.tree_map(lambda x: x.shape[1] == horizon, observations)
         ), "observations must have the same horizon"
@@ -367,7 +370,7 @@ class CrossFormerModule(nn.Module):
     """
 
     crossformer_transformer: CrossFormerTransformer
-    heads: Dict[str, nn.Module]
+    heads: dict[str, nn.Module]
 
     def __call__(
         self, observations, tasks, timestep_pad_mask, train=True, verbose=False
@@ -398,15 +401,15 @@ class CrossFormerModule(nn.Module):
     @classmethod
     def create(
         cls,
-        observation_tokenizers: Dict[str, ModuleSpec],
-        task_tokenizers: Dict[str, ModuleSpec],
-        heads: Dict[str, ModuleSpec],
-        readouts: Dict[str, int],
-        transformer_kwargs: Dict,
+        observation_tokenizers: dict[str, ModuleSpec],
+        task_tokenizers: dict[str, ModuleSpec],
+        heads: dict[str, ModuleSpec],
+        readouts: dict[str, int],
+        transformer_kwargs: dict,
         token_embedding_size: int,
         max_horizon: int,
         repeat_task_tokens: bool = False,
-    ) -> "CrossFormerModule":
+    ) -> CrossFormerModule:
         """
         Canonical way to create an CrossFormerModule from configuration.
 

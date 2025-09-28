@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 from collections import defaultdict
 from contextlib import contextmanager
 from fnmatch import fnmatch
 import logging
 import time
-from typing import Callable, List, Optional
+from typing import Callable
 
 import flax
 from flax import struct
@@ -241,7 +243,7 @@ def create_lr_schedule(name: str, **kwargs):
 def freeze_weights(
     tx: optax.GradientTransformation,
     params_or_params_shape: Params,
-    frozen_keys: List[str],
+    frozen_keys: list[str],
     return_partitions: bool = False,
 ):
     """
@@ -259,7 +261,7 @@ def freeze_weights(
     param_partitions = flax.traverse_util.path_aware_map(
         lambda path, v: (
             "frozen"
-            if any([fnmatch(".".join(path), key) for key in frozen_keys])
+            if any(fnmatch(".".join(path), key) for key in frozen_keys)
             else "trainable"
         ),
         params_or_params_shape,
@@ -423,7 +425,7 @@ def merge_params(target_params: Params, pretrained_params: Params) -> Params:
     return target_params
 
 
-def process_text(batch: Data, text_processor: Optional[TextProcessor]) -> Data:
+def process_text(batch: Data, text_processor: TextProcessor | None) -> Data:
     """Encodes the language instruction inside the tasks for a batch.
 
     If the text processor is None, removes language entirely from the tasks.
@@ -457,7 +459,7 @@ def hf_weights_loader(params, hf_model):
 
     def find_and_replace(params, key, replacement):
         nonlocal replaced
-        for k in params.keys():
+        for k in params:
             if k == key:
                 params[k] = replacement
                 print(f"Replaced {key} in params")
@@ -494,7 +496,7 @@ def siglip_weights_loader(
     translated_params = {tuple(k.split("/")): v for k, v in translated_params.items()}
     assert set(translated_params) - set(flat_params) == set()
     assert all(
-        [translated_params[k].shape == flat_params[k].shape for k in translated_params]
+        translated_params[k].shape == flat_params[k].shape for k in translated_params
     )
     flat_params.update(translated_params)
     updated_params = flax.traverse_util.unflatten_dict(flat_params)
@@ -519,7 +521,7 @@ def resnet_26_loader(
     resnet_params = {
         tuple(k.split("/")): jnp.array(v)
         for k, v in resnet_params.items()
-        if k.startswith("block") or k.startswith("conv_root") or k.startswith("gn_root")
+        if k.startswith(("block", "conv_root", "gn_root"))
     }
 
     marked_keys = set()

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import datetime
 from functools import partial
 from typing import Any
@@ -8,9 +10,7 @@ import flax
 from flax.traverse_util import flatten_dict
 import jax
 from jax.experimental import multihost_utils
-from jax.sharding import Mesh
-from jax.sharding import NamedSharding
-from jax.sharding import PartitionSpec
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from ml_collections import ConfigDict
 import optax
 from rich.pretty import pprint
@@ -25,14 +25,15 @@ from crossformer.data.oxe.oxe_standardization_transforms import (
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec
-from crossformer.utils.train_callbacks import SaveCallback
-from crossformer.utils.train_callbacks import VisCallback
-from crossformer.utils.train_utils import check_config_diff
-from crossformer.utils.train_utils import create_optimizer
-from crossformer.utils.train_utils import merge_params
-from crossformer.utils.train_utils import process_text
-from crossformer.utils.train_utils import Timer
-from crossformer.utils.train_utils import TrainState
+from crossformer.utils.train_callbacks import SaveCallback, VisCallback
+from crossformer.utils.train_utils import (
+    check_config_diff,
+    create_optimizer,
+    merge_params,
+    process_text,
+    Timer,
+    TrainState,
+)
 import wandb
 
 # make_oxe_dataset_kwargs_and_weights,
@@ -382,15 +383,19 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         with timer("train"):
             train_state, update_info = train_step(train_state, batch)
 
-        maybe: dict[str, Any] = callbacks.inspect.every(batch=batch, step=i)
-        update_info.update(maybe)
+        maybe_inspect: dict[str, Any] = callbacks.inspect.every(batch=batch, step=i)
 
         timer.tock("total")
 
         if (i + 1) % cfg.log_interval == 0:
             update_info = jax.device_get(update_info)
             wandb_log(
-                {"training": update_info, "timer": timer.get_average_times()}, step=i
+                {
+                    "training": update_info,
+                    "inspect": maybe_inspect,
+                    "timer": timer.get_average_times(),
+                },
+                step=i,
             )
             # pprint(update_info)
 

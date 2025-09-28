@@ -1,8 +1,10 @@
 # Written by Dibya
+from __future__ import annotations
+
 from enum import Enum
 from fnmatch import fnmatch
 import logging
-from typing import Any, Dict, Mapping, Sequence, Tuple, Union
+from typing import Any, Mapping, Sequence
 
 import einops
 import flax
@@ -43,9 +45,9 @@ class PrefixGroup(TokenGroup):
     pos_enc: jax.typing.ArrayLike = None
 
     def __post_init__(self):
-        assert (
-            len(self.tokens.shape) == 3
-        ), "PrefixGroup tokens must be (batch, n_tokens, d)"
+        assert len(self.tokens.shape) == 3, (
+            "PrefixGroup tokens must be (batch, n_tokens, d)"
+        )
         assert len(self.mask.shape) == 2, "PrefixGroup mask must be (batch, n_tokens)"
 
 
@@ -61,15 +63,15 @@ class TimestepGroup(TokenGroup):
     pos_enc: jax.typing.ArrayLike = None
 
     def __post_init__(self):
-        assert (
-            len(self.tokens.shape) == 4
-        ), "TimestepGroup tokens must be (batch, horizon, n_tokens, d)"
-        assert (
-            len(self.mask.shape) == 3
-        ), "TimestepGroup mask must be (batch, horizon, n_tokens)"
+        assert len(self.tokens.shape) == 4, (
+            "TimestepGroup tokens must be (batch, horizon, n_tokens, d)"
+        )
+        assert len(self.mask.shape) == 3, (
+            "TimestepGroup mask must be (batch, horizon, n_tokens)"
+        )
 
 
-def find_match(pattern_dict: Dict[str, Any], name: str, default: Any) -> Any:
+def find_match(pattern_dict: dict[str, Any], name: str, default: Any) -> Any:
     """Find the first matching pattern in the dictionary, or return the default value."""
     for pattern, value in pattern_dict.items():
         if fnmatch(name, pattern):
@@ -89,14 +91,14 @@ class TokenMetadata:
     attention_rules: Mapping[str, AttentionRule]
 
     @classmethod
-    def create(cls, group: Union[PrefixGroup, TimestepGroup], timestep: int):
+    def create(cls, group: PrefixGroup | TimestepGroup, timestep: int):
         return cls(
             timestep=timestep,
             name=group.name,
             attention_rules=group.attention_rules,
         )
 
-    def should_attend_to(self, other_metadata: "TokenMetadata") -> bool:
+    def should_attend_to(self, other_metadata: TokenMetadata) -> bool:
         attention_rule = find_match(
             self.attention_rules, other_metadata.name, AttentionRule.NEVER
         )
@@ -124,7 +126,7 @@ class BlockTransformer(nn.Module):
     """A transformer that acts on multiple groups of tokens, which may attend to each other (in complex patterns)."""
 
     # Forwarded to Transformer
-    transformer_kwargs: Dict
+    transformer_kwargs: dict
     # Enforce that timestep causal structure is not broken (future timesteps can't attend to past timesteps)
     enforce_causal: bool = True
 
@@ -135,7 +137,7 @@ class BlockTransformer(nn.Module):
         timestep_groups: Sequence[TimestepGroup],
         train: bool,
         verbose: bool = False,
-    ) -> Tuple[Sequence[PrefixGroup], Sequence[TimestepGroup]]:
+    ) -> tuple[Sequence[PrefixGroup], Sequence[TimestepGroup]]:
         """
         Args:
             prefix_groups: A list of PrefixGroup objects.
@@ -160,11 +162,11 @@ class BlockTransformer(nn.Module):
             self.pretty_print_attention_mask(prefix_groups, timestep_groups)
 
         horizon = timestep_groups[0].tokens.shape[1]
-        assert all([group.tokens.shape[1] == horizon for group in timestep_groups])
+        assert all(group.tokens.shape[1] == horizon for group in timestep_groups)
 
         token_dim = timestep_groups[0].tokens.shape[-1]
-        assert all([group.tokens.shape[-1] == token_dim for group in prefix_groups])
-        assert all([group.tokens.shape[-1] == token_dim for group in timestep_groups])
+        assert all(group.tokens.shape[-1] == token_dim for group in prefix_groups)
+        assert all(group.tokens.shape[-1] == token_dim for group in timestep_groups)
 
         # Assemble input tokens (batch, total_tokens, token_embedding_size)
         input_tokens, pos_enc = self.assemble_input_tokens(
@@ -344,7 +346,7 @@ class BlockTransformer(nn.Module):
         unfold the horizon dim, and concatenate with all the prefix group masks.
         We broadcast this (batch, total_tokens) mask to the requisite (batch, 1, total_tokens, total_tokens).
         """
-        batch_size, horizon = timestep_groups[0].tokens.shape[:2]
+        batch_size, _horizon = timestep_groups[0].tokens.shape[:2]
         if len(prefix_groups) > 0:
             prefix_pad_mask = jnp.concatenate(
                 [group.mask for group in prefix_groups], axis=1
@@ -386,7 +388,9 @@ class BlockTransformer(nn.Module):
                 assert (
                     prefix_group.attention_rules.get(ts_group.name, AttentionRule.NEVER)
                     == AttentionRule.NEVER
-                ), f"Causality broken! Prefix group {prefix_group.name} is attending to timestep group {ts_group.name}"
+                ), (
+                    f"Causality broken! Prefix group {prefix_group.name} is attending to timestep group {ts_group.name}"
+                )
 
         # Next, make sure that nothing is attending to future timesteps
         for group in prefix_groups + timestep_groups:
@@ -394,9 +398,9 @@ class BlockTransformer(nn.Module):
                 rule = find_match(
                     group.attention_rules, other_group.name, AttentionRule.NEVER
                 )
-                assert (
-                    rule != AttentionRule.ALL
-                ), "Causality broken! WhenToAttend.ALL attends to future timesteps too."
+                assert rule != AttentionRule.ALL, (
+                    "Causality broken! WhenToAttend.ALL attends to future timesteps too."
+                )
 
     def pretty_print_attention_mask(
         self,

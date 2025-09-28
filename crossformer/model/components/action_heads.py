@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Dict, Optional, Tuple
 
 from einops import rearrange
 import flax.linen as nn
@@ -8,9 +9,12 @@ from jax import Array
 import jax.numpy as jnp
 from jax.typing import ArrayLike
 import numpy as np
-from crossformer.model.components.diffusion import cosine_beta_schedule, create_diffusion_model
 
 from crossformer.model.components.base import TokenGroup
+from crossformer.model.components.diffusion import (
+    cosine_beta_schedule,
+    create_diffusion_model,
+)
 from crossformer.model.components.transformer import MAPHead
 from crossformer.utils.typing import PRNGKey
 
@@ -26,24 +30,24 @@ class ActionHead(ABC):
     @abstractmethod
     def loss(
         self,
-        transformer_outputs: Dict[str, TokenGroup],
+        transformer_outputs: dict[str, TokenGroup],
         actions: ArrayLike,
         timestep_pad_mask: ArrayLike,
         action_pad_mask: ArrayLike,
         train: bool = True,
-    ) -> Tuple[Array, Dict[str, Array]]:
+    ) -> tuple[Array, dict[str, Array]]:
         raise NotImplementedError
 
     @abstractmethod
     def predict_action(
         self,
-        transformer_outputs: Dict[str, TokenGroup],
+        transformer_outputs: dict[str, TokenGroup],
         argmax: bool = False,
-        sample_shape: Tuple[int, ...] = (),
-        rng: Optional[PRNGKey] = None,
+        sample_shape: tuple[int, ...] = (),
+        rng: PRNGKey | None = None,
         temperature: float = 1.0,
         train: bool = False,
-        embodiment_action_dim: Optional[int] = None,
+        embodiment_action_dim: int | None = None,
     ) -> Array:
         """Predict the action for the last timestep in the window. Returns shape
         (*sample_shape, batch_size, action_horizon, action_dim).
@@ -124,7 +128,7 @@ class ContinuousActionHead(nn.Module, ActionHead):
         self.mean_proj = nn.Dense(num_preds)
 
     def __call__(
-        self, transformer_outputs: Dict[str, TokenGroup], train: bool = True
+        self, transformer_outputs: dict[str, TokenGroup], train: bool = True
     ) -> jax.Array:
         """
         Returns:
@@ -162,13 +166,13 @@ class ContinuousActionHead(nn.Module, ActionHead):
 
     def loss(
         self,
-        transformer_outputs: Dict[str, TokenGroup],
+        transformer_outputs: dict[str, TokenGroup],
         actions: ArrayLike,
         timestep_pad_mask: ArrayLike,
         action_pad_mask: ArrayLike,
-        action_head_mask: Optional[ArrayLike] = None,
+        action_head_mask: ArrayLike | None = None,
         train: bool = True,
-    ) -> Tuple[Array, Dict[str, Array]]:
+    ) -> tuple[Array, dict[str, Array]]:
         """Computes the loss for the action regression objective.
 
         Args:
@@ -208,7 +212,7 @@ class ContinuousActionHead(nn.Module, ActionHead):
 
     def predict_action(
         self,
-        transformer_outputs: Dict[str, TokenGroup],
+        transformer_outputs: dict[str, TokenGroup],
         train: bool = True,
         *args,
         sample_shape: tuple = (),
@@ -216,7 +220,7 @@ class ContinuousActionHead(nn.Module, ActionHead):
     ) -> jax.Array:
         """Convenience methods for predicting actions for the final timestep in the window."""
         # only get the last timestep in the window
-        mean = self(transformer_outputs, train=train) # [:, -1]
+        mean = self(transformer_outputs, train=train)  # [:, -1]
         return jnp.broadcast_to(mean, sample_shape + mean.shape)
 
 
@@ -234,8 +238,6 @@ class MSEActionHead(ContinuousActionHead):
     loss_type: str = "mse"
     pool_strategy: str = "use_map"
 
-
-import logging
 
 class DiffusionActionHead(nn.Module):
     """Predicts actions uses a diffusion process.
@@ -291,9 +293,9 @@ class DiffusionActionHead(nn.Module):
 
     def __call__(
         self,
-        transformer_outputs: Dict[str, TokenGroup],
-        time: Optional[ArrayLike] = None,
-        noisy_actions: Optional[ArrayLike] = None,
+        transformer_outputs: dict[str, TokenGroup],
+        time: ArrayLike | None = None,
+        noisy_actions: ArrayLike | None = None,
         train: bool = True,
     ) -> jax.Array:
         """Performs a single forward pass through the diffusion model."""
@@ -331,13 +333,13 @@ class DiffusionActionHead(nn.Module):
 
     def loss(
         self,
-        transformer_outputs: Dict[str, TokenGroup],
+        transformer_outputs: dict[str, TokenGroup],
         actions: ArrayLike,
         timestep_pad_mask: ArrayLike,
         action_pad_mask: ArrayLike,
-        action_head_mask: Optional[ArrayLike] = None,
+        action_head_mask: ArrayLike | None = None,
         train: bool = True,
-    ) -> Tuple[Array, Dict[str, Array]]:
+    ) -> tuple[Array, dict[str, Array]]:
         """Computes the loss for the diffusion objective.
 
         Args:
@@ -406,7 +408,7 @@ class DiffusionActionHead(nn.Module):
 
     def predict_action(
         self,
-        transformer_outputs: Dict[str, TokenGroup],
+        transformer_outputs: dict[str, TokenGroup],
         rng: PRNGKey,
         train: bool = True,
         *args,
@@ -474,17 +476,8 @@ class DiffusionActionHead(nn.Module):
         return actions
 
 
-class FlowMatchingActionHead(nn.Module):
+class FlowMatchingActionHead(ContinuousActionHead):
     """Flow-matching head that predicts conditional action velocities."""
-
-    readout_key: str
-    pool_strategy: str = "mean"
-    action_horizon: int = 1
-    action_dim: int = 7
-    clip_pred: bool = True
-    max_action: float = 5.0
-    loss_weight: float = 1.0
-    constrain_loss_dims: bool = True
 
     time_dim: int = 32
     num_blocks: int = 3
@@ -507,7 +500,9 @@ class FlowMatchingActionHead(nn.Module):
             use_layer_norm=self.use_layer_norm,
         )
 
-    def _embed(self, transformer_outputs: Dict[str, TokenGroup], train: bool) -> jax.Array:
+    def _embed(
+        self, transformer_outputs: dict[str, TokenGroup], train: bool
+    ) -> jax.Array:
         token_group = transformer_outputs[self.readout_key]
         assert token_group.tokens.ndim == 4, (
             "Expected token_group.tokens to have shape (batch_size, window_size, num_tokens, embedding_size), "
@@ -524,15 +519,17 @@ class FlowMatchingActionHead(nn.Module):
 
     def __call__(
         self,
-        transformer_outputs: Dict[str, TokenGroup],
-        time: Optional[ArrayLike] = None,
-        current: Optional[ArrayLike] = None,
+        transformer_outputs: dict[str, TokenGroup],
+        time: ArrayLike | None = None,
+        current: ArrayLike | None = None,
         train: bool = True,
     ) -> jax.Array:
         embeddings = self._embed(transformer_outputs, train=train)
 
         if (time is None or current is None) and not self.is_initializing():
-            raise ValueError("Must provide time and current action when calling flow head")
+            raise ValueError(
+                "Must provide time and current action when calling flow head"
+            )
         if self.is_initializing():
             time = jnp.zeros((*embeddings.shape[:2], 1), dtype=jnp.float32)
             current = jnp.zeros(
@@ -547,16 +544,18 @@ class FlowMatchingActionHead(nn.Module):
 
     def loss(
         self,
-        transformer_outputs: Dict[str, TokenGroup],
+        transformer_outputs: dict[str, TokenGroup],
         actions: ArrayLike,
         timestep_pad_mask: ArrayLike,
         action_pad_mask: ArrayLike,
-        action_head_mask: Optional[ArrayLike] = None,
+        action_head_mask: ArrayLike | None = None,
         train: bool = True,
-    ) -> Tuple[Array, Dict[str, Array]]:
+    ) -> tuple[Array, dict[str, Array]]:
         if self.constrain_loss_dims:
             actions = actions[:, :, : self.action_horizon, : self.action_dim]
-            action_pad_mask = action_pad_mask[:, :, : self.action_horizon, : self.action_dim]
+            action_pad_mask = action_pad_mask[
+                :, :, : self.action_horizon, : self.action_dim
+            ]
 
         actions_flat = rearrange(actions, "b w h a -> b w (h a)")
         actions_flat = jnp.clip(actions_flat, -self.max_action, self.max_action)
@@ -593,11 +592,11 @@ class FlowMatchingActionHead(nn.Module):
 
     def predict_action(
         self,
-        transformer_outputs: Dict[str, TokenGroup],
+        transformer_outputs: dict[str, TokenGroup],
         rng: PRNGKey,
         train: bool = True,
         *args,
-        sample_shape: Tuple[int, ...] = (),
+        sample_shape: tuple[int, ...] = (),
         **kwargs,
     ) -> jax.Array:
         module, variables = self.unbind()

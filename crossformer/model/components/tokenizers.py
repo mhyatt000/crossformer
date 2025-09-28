@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 import logging
 import re
-from typing import Dict, Optional, Sequence
+from typing import Sequence
 
 import flax
 import flax.linen as nn
@@ -18,13 +20,13 @@ EPS = 1e-6
 
 def generate_proper_pad_mask(
     tokens: jax.Array,
-    pad_mask_dict: Optional[Dict[str, jax.Array]],
+    pad_mask_dict: dict[str, jax.Array] | None,
     keys: Sequence[str],
 ) -> jax.Array:
     if pad_mask_dict is None:
         logging.warning("No pad_mask_dict found. Nothing will be masked.")
         return jnp.ones(tokens.shape[:-1])
-    if not all([key in pad_mask_dict for key in keys]):
+    if not all(key in pad_mask_dict for key in keys):
         logging.warning(
             f"pad_mask_dict missing keys {set(keys) - set(pad_mask_dict.keys())}."
             "Nothing will be masked."
@@ -62,7 +64,7 @@ class TokenLearner(nn.Module):
 
 
 def regex_match(regex_keys, x):
-    return any([re.match(r_key, x) for r_key in regex_keys])
+    return any(re.match(r_key, x) for r_key in regex_keys)
 
 
 def regex_filter(regex_keys, xs):
@@ -86,8 +88,8 @@ class ImageTokenizer(nn.Module):
     num_tokens: int = 8
     conditioning_type: str = "none"
     obs_stack_keys: Sequence[str] = ("image_.*", "depth_.*")
-    task_stack_keys: Sequence[str] = tuple()
-    task_film_keys: Sequence[str] = tuple()
+    task_stack_keys: Sequence[str] = ()
+    task_film_keys: Sequence[str] = ()
     proper_pad_mask: bool = True
 
     @nn.compact
@@ -204,9 +206,9 @@ class LanguageTokenizer(nn.Module):
             return None
 
         if not isinstance(tasks["language_instruction"], (jax.Array, np.ndarray)):
-            assert (
-                self.encoder is not None
-            ), "Received language tokens but no encoder specified."
+            assert self.encoder is not None, (
+                "Received language tokens but no encoder specified."
+            )
             tokens = self.hf_model(**tasks["language_instruction"]).last_hidden_state
         else:
             # add a # tokens dimension to language
@@ -283,7 +285,7 @@ class LowdimObsTokenizer(BinTokenizer):
         discretize (bool): If True, discretizes inputs per dimension, see BinTokenizer.
     """
 
-    obs_keys: Sequence[str] = tuple()
+    obs_keys: Sequence[str] = ()
     discretize: bool = False
     proper_pad_mask: bool = True
     dropout_rate: float = 0.0
@@ -307,9 +309,9 @@ class LowdimObsTokenizer(BinTokenizer):
         tokenizer_inputs = []
         for o_key in self.obs_keys:
             for key in filter(re.compile(o_key).match, sorted(observations.keys())):
-                assert (
-                    len(observations[key].shape) == 3
-                ), f"Only supports non-spatial inputs but {key} has shape {observations[key].shape}."
+                assert len(observations[key].shape) == 3, (
+                    f"Only supports non-spatial inputs but {key} has shape {observations[key].shape}."
+                )
                 tokenizer_inputs.append(observations[key])
 
         # concatenate the inputs and (optionally) add dropout
