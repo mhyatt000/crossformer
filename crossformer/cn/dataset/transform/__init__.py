@@ -44,7 +44,7 @@ class KeepProb(Enum):
 
 @dataclass()
 class Transform(CN):
-    REGISTRY: ClassVar[dict[str, Transform]] = default({})
+    REGISTRY: ClassVar[dict[str, Transform]] = {}
 
     # TODO rename to seq
     traj: TrajectoryTransform = TrajectoryTransform(name="").field()

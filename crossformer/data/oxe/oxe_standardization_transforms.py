@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import itertools
-from typing import TYPE_CHECKING, Any
+from typing import Any, TYPE_CHECKING
 
 from jax.scipy.spatial.transform import Rotation
 import numpy as np
@@ -8,7 +10,7 @@ import tensorflow as tf
 from crossformer.cn.dataset.types import ActionRep, ActionSpace
 
 if TYPE_CHECKING:
-    from crossformer.cn.dataset.action import DataSpec, XGYM
+    pass
 
 METRIC_WAYPOINT_SPACING = {
     "cory_hall": 0.06,
@@ -92,14 +94,18 @@ def xgym_mano_dataset_transform(trajectory: dict[str, Any]) -> dict[str, Any]:
         Compatible with symbolic execution.
         """
         # Expand dimensions to compute pairwise differences
-        diff = tf.expand_dims(fingers, axis=1) - tf.expand_dims(fingers, axis=0)  # Shape: (N, N, 3)
+        diff = tf.expand_dims(fingers, axis=1) - tf.expand_dims(
+            fingers, axis=0
+        )  # Shape: (N, N, 3)
 
         # Compute the Euclidean distances
         distances = tf.norm(diff, axis=2)  # Shape: (N, N)
 
         # Create a mask for the upper triangle (excluding the diagonal)
         num_fingers = tf.shape(fingers)[0]
-        row_indices, col_indices = tf.meshgrid(tf.range(num_fingers), tf.range(num_fingers), indexing="ij")
+        row_indices, col_indices = tf.meshgrid(
+            tf.range(num_fingers), tf.range(num_fingers), indexing="ij"
+        )
         upper_triangle_mask = tf.cast(row_indices < col_indices, tf.bool)
 
         # Apply the mask to get the upper triangle distances
@@ -186,7 +192,10 @@ def xgym_single_dataset_transform(trajectory: dict[str, Any]) -> dict[str, Any]:
     proprio = obs.pop("proprio")
     position = proprio["position"]
     joints = proprio["joints"]
-    trajectory["observation"] = {**images, "proprio": position}
+    trajectory["observation"] = {
+        **images,
+        "proprio": tf.concat([position, joints, gripper], axis=-1),
+    }
 
     trajectory["action"] = tf.concat([base, gripper], axis=-1)
 

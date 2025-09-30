@@ -476,6 +476,26 @@ class DiffusionActionHead(nn.Module):
         return actions
 
 
+def sample_tau(key: jax.Array, shape=(), s: float = 0.999) -> jnp.ndarray:
+    """
+    Sample timesteps τ ~ Beta((s-τ)/s; alpha=1.5, beta=1)
+
+    Args:
+        key: JAX PRNGKey
+        shape: output shape, e.g. (N,) for N samples
+        s: cutoff parameter, default 0.999
+
+    Returns:
+        τ samples in [0, s]
+    """
+    alpha, beta = 1.5, 1.0
+    # sample x ~ Beta(alpha, beta) on [0,1]
+    x = jax.random.beta(key, alpha, beta, shape=shape)
+    # map back: τ = s * (1 - x)
+    tau = s * (1.0 - x)
+    return tau
+
+
 class FlowMatchingActionHead(ContinuousActionHead):
     """Flow-matching head that predicts conditional action velocities."""
 
@@ -484,7 +504,7 @@ class FlowMatchingActionHead(ContinuousActionHead):
     dropout_rate: float = 0.1
     hidden_dim: int = 256
     use_layer_norm: bool = True
-    flow_steps: int = 20
+    flow_steps: int = 10
     base_std: float = 1.0
 
     def setup(self):
@@ -563,7 +583,10 @@ class FlowMatchingActionHead(ContinuousActionHead):
         rng = self.make_rng("dropout")
         base_key, time_key = jax.random.split(rng)
         base = self.base_std * jax.random.normal(base_key, actions_flat.shape)
-        time = jax.random.uniform(time_key, (*actions_flat.shape[:2], 1))
+
+        # deprecated in favor of beta distributed time
+        # time = jax.random.uniform(time_key, (*actions_flat.shape[:2], 1))
+        time = sample_tau(time_key, shape=(*actions_flat.shape[:2], 1), s=0.99)
 
         blended = time * actions_flat + (1.0 - time) * base
         target = actions_flat - base

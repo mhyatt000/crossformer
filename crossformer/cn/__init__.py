@@ -60,13 +60,13 @@ class ModuleE(Enum):
 class HeadFactory(CN):
     horizon: int = 4
     module: ModuleE = ModuleE.FLOW
-    steps: int = 20  # diffusion/flow steps
+    steps: int = 10  # diffusion/flow steps
 
     def __post_init__(self):
         if self.module == ModuleE.DIFFUSION:
             assert self.steps, "Diffusion steps must be 1+"
         if self.module == ModuleE.L1:
-            assert not self.steps, "Diffusion steps must be 0"
+            pass
         if self.module == ModuleE.FLOW:
             assert self.steps, "Flow steps must be 1+"
 
@@ -118,7 +118,7 @@ class Size(Enum):
 
 @dataclass
 class ModelFactory(CN):
-    im: Sequence[str] = default(["primary", "left_wrist"])
+    im: Sequence[str] = default(["primary", "side", "left_wrist"])
     proprio: Sequence[str] = default([_SINGLE])
 
     # which heads to create
@@ -138,6 +138,7 @@ class ModelFactory(CN):
         )
 
         encoder = self.make_obs_im_encoder()
+        # im = {k: self.make_obs_im(k) for k in self.im}
         im = {k: self.make_obs_im(k, encoder=encoder) for k in self.im}
         prop = {k: self.make_obs_proprio(k) for k in self.proprio}
         tok = im | prop

@@ -36,9 +36,9 @@ class Wandb(CN):
     # -- disabled: Disables all W&B functionality, making the run methods no-ops
     # mode: WandbMode = WandbMode.ONLINE
 
-    def mode(self, debug):
+    def mode(self, use: bool):
         """Returns the mode for wandb based on the provided settings."""
-        m = WandbMode.DISABLED if debug else WandbMode.ONLINE
+        m = WandbMode.DISABLED if not use else WandbMode.ONLINE
         return m.value
 
     def initialize(self, cfg, name=None):

@@ -28,7 +28,14 @@ class Reader(CN):
     # location of tensorflow_datasets
     loc: Path | str = (Path().home() / "tensorflow_datasets").expanduser()
 
-    load_camera_views: list[str] = default(["primary", "side", "high", "left_wrist"])
+    load_camera_views: list[str] = default(
+        [
+            "primary",
+            "side",
+            # "high",
+            "left_wrist",
+        ]
+    )
     load_proprio: bool = True
     load_depth: bool = False
 

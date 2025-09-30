@@ -96,7 +96,9 @@ class DataSpec(CN):
 @dataclass
 class XGYM(DataSpec):
     image_obs_keys: IMOBS = IMOBS(
-        primary="worm", high="overhead", side="side", left_wrist="wrist"
+        primary="worm",  # high="overhead",
+        side="side",
+        left_wrist="wrist",
     ).field()
     depth_obs_keys: DIMOBS = DIMOBS().field()
     proprio_obs_keys: POBS = POBS(single="proprio").field()

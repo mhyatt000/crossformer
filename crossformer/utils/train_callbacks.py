@@ -1,5 +1,6 @@
-from dataclasses import dataclass
-from dataclasses import field
+from __future__ import annotations
+
+from dataclasses import dataclass, field
 from functools import partial
 import json
 import logging
@@ -12,17 +13,14 @@ import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
 import tqdm
-from xgym.rlds.util import apply_persp
-from xgym.rlds.util import perspective_projection
+from xgym.rlds.util import apply_persp, perspective_projection
 from xgym.viz.mano import overlay_palm
 
 from crossformer.data.dataset import make_single_dataset
 from crossformer.data.oxe import HEAD_TO_DATASET
 from crossformer.data.utils.text_processing import TextProcessor
 from crossformer.utils.train_utils import TrainState
-from crossformer.utils.typing import Any
-from crossformer.utils.typing import Data
-from crossformer.utils.typing import Sequence
+from crossformer.utils.typing import Any, Data, Sequence
 import wandb
 
 
@@ -303,7 +301,7 @@ class VisCallback(ValidationCallback):
             ):
                 metric = self.eval_step(train_state, batch)
 
-                if name in HEAD_TO_DATASET["mano"]:
+                if name in HEAD_TO_DATASET.get("mano", []):
                     # print(metric.keys())
                     k = next(iter(metric.keys()))[0]
                     assert "vis" in metric[k], (

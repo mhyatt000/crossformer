@@ -1,5 +1,7 @@
 """Defines dataset mixtures and weights for the Open X-Embodiment Datasets."""
 
+from __future__ import annotations
+
 HEAD_TO_DATASET = {
     "mano": [
         "rlds_oakink",
@@ -65,7 +67,7 @@ HEAD_TO_DATASET = {
     ],
     "quadruped": ["go1_real_dataset", "a1", "go1"],
 }
-
+HEAD_TO_DATASET = {k: HEAD_TO_DATASET[k] for k in ["single_arm", "mano"]}
 
 OXE_MAGIC_SOUP_BALANCED = [
     ("kuka", 0.14503701874493363),
