@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass
 import logging
 from pathlib import Path
-from typing import Any, Iterable, Sequence
-
-from array_record.python.array_record_data_source import ArrayRecordDataSource
+from typing import Any, Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 from rich.pretty import pprint
@@ -16,55 +13,11 @@ import tyro
 
 from crossformer import cn
 from crossformer.data.grain import builders, pipelines
-from crossformer.data.grain.arec.arec import unpack_record
+from crossformer.data.grain.datasets import _DecodedArrayRecord, _EpisodeDataset
 from crossformer.utils.spec import spec
 import wandb
 
 logger = logging.getLogger(__name__)
-
-
-class _DecodedArrayRecord:
-    """Thin wrapper decoding ArrayRecord records into Python dicts."""
-
-    def __init__(self, shards: Iterable[Path]):
-        self._ds = ArrayRecordDataSource([str(p) for p in sorted(shards)])
-
-    def __len__(self) -> int:  # pragma: no cover - simple delegation
-        return len(self._ds)
-
-    def __getitem__(self, index: int):  # pragma: no cover - simple delegation
-        return unpack_record(self._ds[index])
-
-
-class _EpisodeDataset(Sequence[dict]):
-    """Aggregates step-wise records into per-episode trajectories."""
-
-    def __init__(self, records: _DecodedArrayRecord):  # noqa: D401
-        self._records = records
-        self._episode_indices = self._group_indices()
-
-    def _group_indices(self) -> list[list[int]]:
-        by_episode: dict[int, list[tuple[int, int]]] = defaultdict(list)
-        for idx in range(len(self._records)):
-            record = self._records[idx]
-            episode_id = int(record.get("episode_id", 0))
-            step_id = int(record.get("step_id", idx))
-            by_episode[episode_id].append((step_id, idx))
-        grouped = []
-        for _, pairs in sorted(by_episode.items()):
-            pairs.sort(key=lambda pair: pair[0])
-            grouped.append([idx for _, idx in pairs])
-        return grouped
-
-    def __len__(self) -> int:
-        return len(self._episode_indices)
-
-    def __getitem__(self, index: int) -> dict:
-        indices = self._episode_indices[index]
-        steps = [self._records[i] for i in indices]
-        return _assemble_episode(steps)
-
-
 class _DropKeyDataset(Sequence[dict]):
     """Dataset wrapper that filters observation keys."""
 
@@ -80,100 +33,6 @@ class _DropKeyDataset(Sequence[dict]):
         if not self._drop_keys:
             return traj
         return _drop_observation_keys(traj, self._drop_keys)
-
-
-def _assemble_episode(steps: Sequence[dict]) -> dict:
-    """Convert a list of step dictionaries into a trajectory dictionary."""
-
-    if not steps:
-        return {}
-
-    obs_buffers: dict[str, list[np.ndarray]] = {}
-    proprio_buffers: dict[str, list[np.ndarray]] = {}
-    action_buffers: dict[str, list[np.ndarray]] = {}
-
-    rewards = []
-    discounts = []
-    is_first = []
-    is_last = []
-    is_terminal = []
-    language = []
-    embeddings = []
-
-    for step in sorted(steps, key=lambda s: s.get("step_id", 0)):
-        rewards.append(float(step.get("reward", 0.0)))
-        discounts.append(float(step.get("discount", 1.0)))
-        is_first.append(bool(step.get("is_first", False)))
-        is_last.append(bool(step.get("is_last", False)))
-        is_terminal.append(bool(step.get("is_terminal", False)))
-
-        if "language_instruction" in step:
-            language.append(step["language_instruction"])
-        if "language_embedding" in step:
-            embeddings.append(np.asarray(step["language_embedding"], dtype=np.float32))
-
-        obs = step.get("observation", {})
-        for key, value in obs.items():
-            if key == "proprio" and isinstance(value, dict):
-                for p_key, p_val in value.items():
-                    proprio_buffers.setdefault(p_key, []).append(
-                        np.asarray(p_val, dtype=np.float32)
-                    )
-                continue
-            if isinstance(value, dict):
-                for sub_key, sub_val in value.items():
-                    flat_key = f"{key}_{sub_key}"
-                    obs_buffers.setdefault(flat_key, []).append(np.asarray(sub_val))
-                continue
-            obs_buffers.setdefault(key, []).append(np.asarray(value))
-
-        action = step.get("action", {})
-        if isinstance(action, dict):
-            for a_key, a_val in action.items():
-                action_buffers.setdefault(a_key, []).append(
-                    np.asarray(a_val, dtype=np.float32)
-                )
-
-    traj_len = len(steps)
-    obs_out: dict[str, np.ndarray | dict[str, np.ndarray]] = {
-        key: np.stack(frames) for key, frames in obs_buffers.items()
-    }
-    if proprio_buffers:
-        obs_out["proprio"] = {
-            key: np.stack(frames).astype(np.float32)
-            for key, frames in proprio_buffers.items()
-        }
-        for key, frames in proprio_buffers.items():
-            flat_key = f"proprio_{key}"
-            obs_out[flat_key] = np.stack(frames).astype(np.float32)
-
-    action_components = []
-    for part in ("joints", "gripper", "position"):
-        if part in action_buffers:
-            action_components.append(np.stack(action_buffers[part]))
-    if action_components:
-        action_out = np.concatenate(action_components, axis=-1).astype(np.float32)
-    else:
-        action_out = np.zeros((traj_len, 0), dtype=np.float32)
-
-    traj: dict[str, Any] = {
-        "observation": obs_out,
-        "action": action_out,
-        "reward": np.asarray(rewards, dtype=np.float32),
-        "discount": np.asarray(discounts, dtype=np.float32),
-        "is_first": np.asarray(is_first, dtype=bool),
-        "is_last": np.asarray(is_last, dtype=bool),
-        "is_terminal": np.asarray(is_terminal, dtype=bool),
-        "episode_id": steps[0].get("episode_id"),
-    }
-
-    if language:
-        traj["language_instruction"] = language[0]
-    if embeddings:
-        traj["language_embedding"] = embeddings[0]
-
-    return traj
-
 
 def _drop_observation_keys(traj: dict, drop_keys: set[str]) -> dict:
     obs = traj.get("observation")
