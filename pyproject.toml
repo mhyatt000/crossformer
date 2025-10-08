@@ -58,6 +58,7 @@ dependencies = [
     "webpolicy",
     "dlimp",
     "python-box>=7.3.2",
+    "augmax",
 ]
 
 [dependency-groups]
@@ -69,9 +70,14 @@ dev = [
     "pytest-cov>=7.0.0",
 ]
 
+[tool.uv.sources]
+webpolicy = { git = "http://github.com/mhyatt000/webpolicy" }
+dlimp = { path = "../dlimp", editable = true }
+augmax = { git = "https://github.com/khdlr/augmax" }
+
 [tool.ruff]
 target-version = "py311"
-# line-length = 120
+line-length = 120
 
 [tool.ruff.lint]
 # https://docs.astral.sh/ruff/rules/
@@ -144,6 +150,7 @@ force-single-line = false
 force-sort-within-sections = true
 single-line-exclusions = ["collections.abc", "typing", "typing_extensions"]
 required-imports = ["from __future__ import annotations"]
+
 # [tool.ruff.lint]
 # https://docs.astral.sh/ruff/rules/
 # select = [
@@ -204,7 +211,3 @@ branch = true
 [tool.coverage.report]
 fail_under = 80
 show_missing = true
-
-[tool.uv.sources]
-webpolicy = { git = "http://github.com/mhyatt000/webpolicy" }
-dlimp = { path = "../dlimp", editable = true }

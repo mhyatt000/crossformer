@@ -92,6 +92,16 @@ wheels = [
 ]
 
 [[package]]
+name = "augmax"
+version = "0.4.1"
+source = { git = "https://github.com/khdlr/augmax#7095ead05127ce955b4014053cb0bc6b96b2bad9" }
+dependencies = [
+    { name = "einops" },
+    { name = "jax" },
+    { name = "numpy" },
+]
+
+[[package]]
 name = "certifi"
 version = "2025.8.3"
 source = { registry = "https://pypi.org/simple" }
@@ -379,6 +389,7 @@ source = { editable = "." }
 dependencies = [
     { name = "absl-py" },
     { name = "array-record" },
+    { name = "augmax" },
     { name = "chex" },
     { name = "distrax" },
     { name = "dlimp" },
@@ -430,6 +441,7 @@ dev = [
 requires-dist = [
     { name = "absl-py", specifier = ">=0.12.0" },
     { name = "array-record", specifier = ">=0.8.1" },
+    { name = "augmax", git = "https://github.com/khdlr/augmax" },
     { name = "chex", specifier = ">=0.1.85" },
     { name = "distrax", specifier = "==0.1.5" },
     { name = "dlimp", editable = "../dlimp" },
