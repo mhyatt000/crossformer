@@ -54,11 +54,14 @@ def set_wandb(cfg: cn.Train):
     # wandb_id = f"{cfg.name}_{time}"
     logging.warning(f"TODO use {cfg.wandb} config")
     run = wandb.init(
-        config=cfg.asdict(),
+        project=cfg.wandb.project,
+        group=cfg.wandb.group,
+        entity=cfg.wandb.entity,
+        dir=str(cfg.wandb.dir),
         # # id=wandb_id,
         # # name=cfg.name,
-        mode=cfg.wandb.mode(cfg.debug),
-        **cfg.wandb.asdict(),
+        mode=cfg.wandb.mode(cfg.wandb.use),
+        config=cfg.asdict(),
     )
     run.name = f"{time}_{run.name}"
     cfg.name = run.name
