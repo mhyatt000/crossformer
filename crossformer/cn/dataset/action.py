@@ -84,9 +84,7 @@ class DataSpec(CN):
         assert self.name in OXE_DATASET_CONFIGS, f"{self.name} missing OXE config"
         members = {d for sub in HEAD_TO_DATASET.values() for d in sub}
         assert self.name in members, f"{self.name} missing from HEAD_TO_DATASET"
-        assert self.name in OXE_STANDARDIZATION_TRANSFORMS, (
-            f"{self.name} missing OXE standardization"
-        )
+        assert self.name in OXE_STANDARDIZATION_TRANSFORMS, f"{self.name} missing OXE standardization"
 
     @property
     def action_space(self):
@@ -176,13 +174,9 @@ class DataPrep(CN):
 
     def __post_init__(self):
         self.loc = str(self.loc)
-        assert self.load_camera_views, (
-            f"Must specify at least one camera view to load for {self.name}"
-        )
+        assert self.load_camera_views, f"Must specify at least one camera view to load for {self.name}"
 
-        if missing_keys := (
-            set(self.load_camera_views) - set(self.spec.image_obs_keys)
-        ):
+        if missing_keys := (set(self.load_camera_views) - set(self.spec.image_obs_keys)):
             raise ValueError(
                 f"Cannot load {self.name} with views {missing_keys} since they are not available inside {self.spec}"
             )
@@ -190,25 +184,15 @@ class DataPrep(CN):
         try:
             _ = self.norm_mask
         except KeyError:
-            raise ValueError(
-                f"Cannot load {self.name} with unsupported action encoding {self.spec.action_encoding}"
-            )
+            raise ValueError(f"Cannot load {self.name} with unsupported action encoding {self.spec.action_encoding}")
 
     @property
     def image_obs_keys(self):
-        return {
-            k: v
-            for k, v in self.spec.image_obs_keys.items()
-            if k in self.load_camera_views
-        }
+        return {k: v for k, v in self.spec.image_obs_keys.items() if k in self.load_camera_views}
 
     @property
     def depth_obs_keys(self):
-        d = {
-            k: v
-            for k, v in self.spec.depth_obs_keys.items()
-            if k in self.load_camera_views
-        }
+        d = {k: v for k, v in self.spec.depth_obs_keys.items() if k in self.load_camera_views}
         return d if self.load_depth else None
 
     @property
@@ -225,39 +209,7 @@ class DataPrep(CN):
 
     @property
     def norm_mask(self):
-        """
-        if dataset_kwargs["action_encoding"] is ActionEncoding.EEF_POS:
-            # with EEF_POS actions, the last action dimension is gripper
-            dataset_kwargs["action_normalization_mask"] = [True] * 6 + [False]
-
-        elif dataset_kwargs["action_encoding"] is ActionEncoding.JOINT_POS:
-            # with JOINT_POS actions, last dimension is gripper
-            dataset_kwargs["action_normalization_mask"] = [True] * 7 + [False]
-
-        elif dataset_kwargs["action_encoding"] is ActionEncoding.JOINT_POS_BIMANUAL:
-            # with JOINT_POS_BIMANUAL actions, 7th and 14th dimension are gripper
-            dataset_kwargs["action_normalization_mask"] = (
-                [True] * 6 + [False] + [True] * 6 + [False]
-            )
-
-        elif dataset_kwargs["action_encoding"] is ActionEncoding.NAV_2D:
-            # with NAV_2D actions, all dimensions are deltas
-            dataset_kwargs["action_normalization_mask"] = [True] * 2
-
-        elif dataset_kwargs["action_encoding"] is ActionEncoding.JOINT_POS_BIMANUAL_NAV:
-            # with JOINT_POS_BIMANUAL_NAV actions, 7th and 14th dimension are gripper
-            dataset_kwargs["action_normalization_mask"] = (
-                [True] * 6 + [False] + [True] * 6 + [False] + [True] * 2
-            )
-
-        elif dataset_kwargs["action_encoding"] is ActionEncoding.QUADRUPED:
-            dataset_kwargs["action_normalization_mask"] = [True] * 12
-
-        # MANO
-        elif dataset_kwargs["action_encoding"] is ActionEncoding.MANO:
-            # dataset_kwargs["action_normalization_mask"] = [True] * (ActionDim.MANO-9) + [False] * 9
-            dataset_kwargs["action_normalization_mask"] = [True] * ActionDim.DMANO_7
-        """
+        """from crossformer.data.oxe import make_oxe_dataset_kwargs"""
 
         space2norm = {
             ActionSpace.POS_EULER: [True] * 6 + [False],
