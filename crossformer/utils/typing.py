@@ -11,3 +11,7 @@ Params: TypeAlias = Mapping[str, PyTree]
 Data: TypeAlias = Mapping[str, PyTree]
 Shape: TypeAlias = Sequence[int]
 Dtype: TypeAlias = jax.typing.DTypeLike
+
+
+class DeprecatedError(Exception):
+    pass
