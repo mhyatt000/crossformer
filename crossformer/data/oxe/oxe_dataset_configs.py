@@ -13,6 +13,8 @@ Target configuration:
     action_encoding: Type of action encoding used, e.g. EEF position vs joint position control
 """
 
+from __future__ import annotations
+
 from enum import IntEnum
 
 
@@ -36,11 +38,10 @@ class ActionEncoding(IntEnum):
 
     EEF_POS = 1  # EEF delta XYZ + roll-pitch-yaw + gripper open/close
     JOINT_POS = 2  # 7 x joint delta position + gripper open/close
+    JOINT = JOINT_POS  # alias
     JOINT_POS_BIMANUAL = 3  # 2 x [6 x joint pos + gripper]
     NAV_2D = 4  # [delta_x, delta_y] waypoint
-    JOINT_POS_BIMANUAL_NAV = (
-        5  # 2 x [6 x joint pos + gripper] + linear base vel + angular base vel
-    )
+    JOINT_POS_BIMANUAL_NAV = 5  # 2 x [6 x joint pos + gripper] + linear base vel + angular base vel
     QUADRUPED = 6
 
     # single arm
@@ -122,7 +123,7 @@ POBS = PreDict(["single", "mano", "bimanual", "quadruped"])
 xgym = {
     "image_obs_keys": {
         "primary": "worm",
-        "high": "overhead",
+        # "high": "overhead",
         "side": "side",
         "nav": None,
         "left_wrist": "wrist",
