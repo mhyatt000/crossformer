@@ -1,10 +1,12 @@
+from __future__ import annotations
+
 from enum import Enum
 from fnmatch import fnmatch
 import hashlib
 import json
 import logging
 import os
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable
 
 import dlimp as dl
 import numpy as np
@@ -18,9 +20,7 @@ def fnmatch_filter(template, xs):
 
 def tree_map(fn: Callable, tree: dict) -> dict:
     """Maps a function over a nested dictionary."""
-    return {
-        k: tree_map(fn, v) if isinstance(v, dict) else fn(v) for k, v in tree.items()
-    }
+    return {k: tree_map(fn, v) if isinstance(v, dict) else fn(v) for k, v in tree.items()}
 
 
 def tree_merge(*trees: dict) -> dict:
@@ -53,7 +53,7 @@ def to_padding(tensor: tf.Tensor) -> tf.Tensor:
 
 def sample_match_keys_uniform(d: dict, key_template: str):
     """Samples uniformly from all keys fnmatching the template."""
-    match_keys = [key for key in d.keys() if fnmatch(key, key_template)]
+    match_keys = [key for key in d if fnmatch(key, key_template)]
     if not match_keys:
         raise ValueError(f"No matching key found for {key_template}. Keys: {d.keys()}")
     logging.info(f"Sampling uniformly across keys: {match_keys}")
@@ -65,28 +65,20 @@ def sample_match_keys_uniform(d: dict, key_template: str):
         return d[match_keys[0]]
 
 
-def pprint_data_mixture(
-    dataset_kwargs_list: List[Dict[str, Any]], dataset_weights: List[int]
-) -> None:
-    print(
-        "\n######################################################################################"
-    )
-    print(
-        f"# Loading the following {len(dataset_kwargs_list)} datasets (incl. sampling weight):{'': >24} #"
-    )
+def pprint_data_mixture(dataset_kwargs_list: list[dict[str, Any]], dataset_weights: list[int]) -> None:
+    print("\n######################################################################################")
+    print(f"# Loading the following {len(dataset_kwargs_list)} datasets (incl. sampling weight):{'': >24} #")
     for dataset_kwargs, weight in zip(dataset_kwargs_list, dataset_weights):
         pad = 80 - len(dataset_kwargs["name"])
         print(f"# {dataset_kwargs['name']}: {weight:=>{pad}f} #")
-    print(
-        "######################################################################################\n"
-    )
+    print("######################################################################################\n")
 
 
 def get_dataset_statistics(
     dataset: dl.DLataset,
     proprio_keys: list,
-    hash_dependencies: Tuple[str, ...],
-    save_dir: Optional[str] = None,
+    hash_dependencies: tuple[str, ...],
+    save_dir: str | None = None,
     force_recompute: bool = False,
 ) -> dict:
     """Either computes the statistics of a dataset or loads them from a cache file if this function has been
@@ -108,10 +100,7 @@ def get_dataset_statistics(
         )
     )
 
-    if save_dir is not None:
-        path = tf.io.gfile.join(save_dir, f"dataset_statistics_{unique_hash}.json")
-    else:
-        path = local_path
+    path = tf.io.gfile.join(save_dir, f"dataset_statistics_{unique_hash}.json") if save_dir is not None else local_path
 
     # check if cache file exists and load
     if tf.io.gfile.exists(path) and not force_recompute:
@@ -138,8 +127,7 @@ def get_dataset_statistics(
         raise ValueError("Cannot compute dataset statistics for infinite datasets.")
 
     logging.info(
-        "Computing dataset statistics. This may take awhile, but should only need to happen "
-        "once for each dataset."
+        "Computing dataset statistics. This may take awhile, but should only need to happen once for each dataset."
     )
     actions = []
     proprios = {}
@@ -185,10 +173,7 @@ def get_dataset_statistics(
         with tf.io.gfile.GFile(path, "w") as f:
             json.dump(metadata, f)
     except tf.errors.PermissionDeniedError:
-        logging.warning(
-            f"Could not write dataset statistics to {path}. "
-            f"Writing to {local_path} instead."
-        )
+        logging.warning(f"Could not write dataset statistics to {path}. Writing to {local_path} instead.")
         os.makedirs(os.path.dirname(local_path), exist_ok=True)
         with open(local_path, "w") as f:
             json.dump(metadata, f)
@@ -210,41 +195,30 @@ def normalize_action_and_proprio(
     }
     for key in proprio_keys:
         keys_to_normalize[key] = f"observation/{key}"
-    keys_to_normalize = {
-        k: v for k, v in keys_to_normalize.items() if k not in skip_norm_keys
-    }
+    keys_to_normalize = {k: v for k, v in keys_to_normalize.items() if k not in skip_norm_keys}
 
     if normalization_type == NormalizationType.NORMAL:
         # normalize to mean 0, std 1
         for key, traj_key in keys_to_normalize.items():
-            mask = metadata[key].get(
-                "mask", tf.ones_like(metadata[key]["mean"], dtype=tf.bool)
-            )
+            mask = metadata[key].get("mask", tf.ones_like(metadata[key]["mean"], dtype=tf.bool))
             traj = dl.transforms.selective_tree_map(
                 traj,
                 match=lambda k, _: k == traj_key,
-                map_fn=lambda x: tf.where(
-                    mask, (x - metadata[key]["mean"]) / (metadata[key]["std"] + 1e-8), x
-                ),
+                map_fn=lambda x: tf.where(mask, (x - metadata[key]["mean"]) / (metadata[key]["std"] + 1e-8), x),
             )
         return traj
 
     if normalization_type == NormalizationType.BOUNDS:
         # normalize to [-1, 1]
         for key, traj_key in keys_to_normalize.items():
-            mask = metadata[key].get(
-                "mask", tf.ones_like(metadata[key]["p01"], dtype=tf.bool)
-            )
+            mask = metadata[key].get("mask", tf.ones_like(metadata[key]["p01"], dtype=tf.bool))
             traj = dl.transforms.selective_tree_map(
                 traj,
                 match=lambda k, _: k == traj_key,
                 map_fn=lambda x: tf.where(
                     mask,
                     tf.clip_by_value(
-                        2
-                        * (x - metadata[key]["p01"])
-                        / (metadata[key]["p99"] - metadata[key]["p01"] + 1e-8)
-                        - 1,
+                        2 * (x - metadata[key]["p01"]) / (metadata[key]["p99"] - metadata[key]["p01"] + 1e-8) - 1,
                         -1,
                         1,
                     ),
@@ -290,9 +264,7 @@ def binarize_gripper_actions(actions: tf.Tensor) -> tf.Tensor:
             lambda: is_open_float[i],
         )
 
-    new_actions = tf.scan(
-        scan_fn, tf.range(tf.shape(actions)[0]), actions[-1], reverse=True
-    )
+    new_actions = tf.scan(scan_fn, tf.range(tf.shape(actions)[0]), actions[-1], reverse=True)
     return new_actions
 
 
@@ -356,14 +328,12 @@ def invert_gripper_actions(actions: tf.Tensor):
     return 1 - actions
 
 
-def relabel_actions(traj: Dict[str, Any]) -> Dict[str, Any]:
+def relabel_actions(traj: dict[str, Any]) -> dict[str, Any]:
     """Relabels the actions to use the reached proprio instead. Discards the last timestep of the
     trajectory (since we don't have a next state to compute the action.)
     """
     # relabel the first 6 action dims (xyz position, xyz rotation) using the reached proprio
-    movement_actions = (
-        traj["observation"]["state"][1:, :6] - traj["observation"]["state"][:-1, :6]
-    )
+    movement_actions = traj["observation"]["state"][1:, :6] - traj["observation"]["state"][:-1, :6]
 
     # discard the last timestep of the trajectory
     traj_truncated = tf.nest.map_structure(lambda x: x[:-1], traj)
@@ -377,7 +347,7 @@ def relabel_actions(traj: Dict[str, Any]) -> Dict[str, Any]:
     return traj_truncated
 
 
-def allocate_threads(n: Optional[int], weights: np.ndarray):
+def allocate_threads(n: int | None, weights: np.ndarray):
     """Allocates an integer number of threads across datasets based on weights. The final array sums to `n`,
     but each element is no less than 1. If `n` is None, then every dataset is assigned a value of AUTOTUNE.
     """
@@ -385,9 +355,7 @@ def allocate_threads(n: Optional[int], weights: np.ndarray):
         return np.array([tf.data.AUTOTUNE] * len(weights))
 
     assert np.all(weights >= 0), "Weights must be non-negative"
-    assert (
-        len(weights) <= n
-    ), "Number of threads must be at least as large as length of weights"
+    assert len(weights) <= n, "Number of threads must be at least as large as length of weights"
     weights = np.array(weights) / np.sum(weights)
 
     allocation = np.zeros_like(weights, dtype=int)
@@ -412,6 +380,4 @@ def allocate_threads(n: Optional[int], weights: np.ndarray):
 
 def filter_success_droid(trajectory: dict[str, any]):
     # only keep DROID trajectories that have "success" in the file path
-    return tf.strings.regex_full_match(
-        trajectory["traj_metadata"]["episode_metadata"]["file_path"][0], ".*/success/.*"
-    )
+    return tf.strings.regex_full_match(trajectory["traj_metadata"]["episode_metadata"]["file_path"][0], ".*/success/.*")
