@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import copy
 import logging
 from typing import Any, Dict, List, Sequence, Tuple, Union
@@ -8,7 +10,7 @@ from crossformer.data.oxe.oxe_dataset_configs import (
     OXE_DATASET_CONFIGS,
     ProprioDim,
 )
-from crossformer.data.oxe.oxe_dataset_mixes import OXE_NAMED_MIXES, HEAD_TO_DATASET
+from crossformer.data.oxe.oxe_dataset_mixes import HEAD_TO_DATASET, OXE_NAMED_MIXES
 from crossformer.data.oxe.oxe_standardization_transforms import (
     OXE_STANDARDIZATION_TRANSFORMS,
 )
@@ -25,7 +27,7 @@ def make_oxe_dataset_kwargs(
     load_language: bool = True,
     force_recompute_dataset_statistics: bool = False,
     action_proprio_normalization_type: NormalizationType = NormalizationType.NORMAL,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Generates dataset kwargs for a given dataset from Open X-Embodiment. The returned kwargs can be passed
     directly into `crossformer.data.dataset.make_dataset_from_rlds`.
 
@@ -41,6 +43,10 @@ def make_oxe_dataset_kwargs(
     """
     dataset_kwargs = copy.deepcopy(OXE_DATASET_CONFIGS[name])
 
+    from crossformer.utils.typing import DeprecatedError
+
+    raise DeprecatedError("This function is deprecated. Please use the new data loading pipeline.")
+
     if dataset_kwargs["action_encoding"] is ActionEncoding.EEF_POS:
         # with EEF_POS actions, the last action dimension is gripper
         dataset_kwargs["action_normalization_mask"] = [True] * 6 + [False]
@@ -49,17 +55,13 @@ def make_oxe_dataset_kwargs(
         dataset_kwargs["action_normalization_mask"] = [True] * 7 + [False]
     elif dataset_kwargs["action_encoding"] is ActionEncoding.JOINT_POS_BIMANUAL:
         # with JOINT_POS_BIMANUAL actions, 7th and 14th dimension are gripper
-        dataset_kwargs["action_normalization_mask"] = (
-            [True] * 6 + [False] + [True] * 6 + [False]
-        )
+        dataset_kwargs["action_normalization_mask"] = [True] * 6 + [False] + [True] * 6 + [False]
     elif dataset_kwargs["action_encoding"] is ActionEncoding.NAV_2D:
         # with NAV_2D actions, all dimensions are deltas
         dataset_kwargs["action_normalization_mask"] = [True] * 2
     elif dataset_kwargs["action_encoding"] is ActionEncoding.JOINT_POS_BIMANUAL_NAV:
         # with JOINT_POS_BIMANUAL_NAV actions, 7th and 14th dimension are gripper
-        dataset_kwargs["action_normalization_mask"] = (
-            [True] * 6 + [False] + [True] * 6 + [False] + [True] * 2
-        )
+        dataset_kwargs["action_normalization_mask"] = [True] * 6 + [False] + [True] * 6 + [False] + [True] * 2
     elif dataset_kwargs["action_encoding"] is ActionEncoding.QUADRUPED:
         dataset_kwargs["action_normalization_mask"] = [True] * 12
 
@@ -69,32 +71,22 @@ def make_oxe_dataset_kwargs(
         dataset_kwargs["action_normalization_mask"] = [True] * ActionDim.DMANO_7
 
     else:
-        raise ValueError(
-            f"Cannot load {name} with unsupported action encoding {dataset_kwargs['action_encoding']}."
-        )
+        raise ValueError(f"Cannot load {name} with unsupported action encoding {dataset_kwargs['action_encoding']}.")
 
     # adjust loaded camera views
     if missing_keys := (set(load_camera_views) - set(dataset_kwargs["image_obs_keys"])):
-        raise ValueError(
-            f"Cannot load {name} with views {missing_keys} since they are not available."
-        )
+        raise ValueError(f"Cannot load {name} with views {missing_keys} since they are not available.")
     dataset_kwargs["image_obs_keys"] = {
-        k: v
-        for k, v in dataset_kwargs["image_obs_keys"].items()
-        if k in load_camera_views
+        k: v for k, v in dataset_kwargs["image_obs_keys"].items() if k in load_camera_views
     }
     dataset_kwargs["depth_obs_keys"] = {
-        k: v
-        for k, v in dataset_kwargs["depth_obs_keys"].items()
-        if k in load_camera_views
+        k: v for k, v in dataset_kwargs["depth_obs_keys"].items() if k in load_camera_views
     }
 
     if not load_depth:
         dataset_kwargs.pop("depth_obs_keys")
     if load_proprio:
-        dataset_kwargs["proprio_obs_keys"] = dataset_kwargs.get(
-            "proprio_obs_keys", {"primary": "proprio"}
-        )
+        dataset_kwargs["proprio_obs_keys"] = dataset_kwargs.get("proprio_obs_keys", {"primary": "proprio"})
     else:
         if "proprio_obs_keys" in dataset_kwargs:
             del dataset_kwargs["proprio_obs_keys"]
@@ -103,16 +95,12 @@ def make_oxe_dataset_kwargs(
     if load_language:
         dataset_kwargs["language_key"] = "language_instruction"
 
-    dataset_kwargs["action_proprio_normalization_type"] = (
-        action_proprio_normalization_type
-    )
+    dataset_kwargs["action_proprio_normalization_type"] = action_proprio_normalization_type
 
     del dataset_kwargs["proprio_encoding"]
     del dataset_kwargs["action_encoding"]
 
-    dataset_kwargs["standardize_fn"] = ModuleSpec.create(
-        OXE_STANDARDIZATION_TRANSFORMS[name]
-    )
+    dataset_kwargs["standardize_fn"] = ModuleSpec.create(OXE_STANDARDIZATION_TRANSFORMS[name])
 
     if force_recompute_dataset_statistics:
         dataset_kwargs["force_recompute_dataset_statistics"] = True
@@ -121,7 +109,7 @@ def make_oxe_dataset_kwargs(
 
 
 def make_oxe_dataset_kwargs_and_weights(
-    data_mix: Union[str, Sequence[Tuple[str, float]]],
+    data_mix: str | Sequence[tuple[str, float]],
     data_dir: str,
     load_camera_views: Sequence[str] = ("primary",),
     load_depth: bool = False,
@@ -129,7 +117,7 @@ def make_oxe_dataset_kwargs_and_weights(
     load_language: bool = True,
     force_recompute_dataset_statistics: bool = False,
     action_proprio_normalization_type: NormalizationType = NormalizationType.NORMAL,
-) -> Tuple[Dict[str, Any], List[float]]:
+) -> tuple[dict[str, Any], list[float]]:
     """
     Generates dataset kwargs for a given dataset mix from the Open X-Embodiment dataset. The returned kwargs
     and weights can be passed directly into `crossformer.data.dataset.make_interleaved_dataset`.
