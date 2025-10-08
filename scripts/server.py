@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -5,16 +7,15 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
-import orbax.checkpoint as ocp
 from rich.pretty import pprint
 import tensorflow as tf
 import tyro
 from webpolicy.deploy.base_policy import BasePolicy
 from webpolicy.deploy.server import WebsocketPolicyServer as Server
 
-from crossformer.cn.base import CN
-from crossformer.cn.base import default
+from crossformer.cn.base import CN, default
 from crossformer.model.crossformer_model import CrossFormerModel
+from crossformer.utils import spec
 
 tf.config.set_visible_devices([], "GPU")
 
@@ -55,9 +56,7 @@ class PolicyConfig:
     def verify(self):
         # assert self.models, "Please provide a model"
         assert self.task, "Please provide a task"
-        assert self.path and Path(self.path).resolve().expanduser().exists(), (
-            f"Model path {self.path} does not exist"
-        )
+        assert self.path and Path(self.path).resolve().expanduser().exists(), f"Model path {self.path} does not exist"
 
     """
     # path to BAFL_SAVE or weights dir
@@ -102,17 +101,11 @@ TASKS = {
 }
 
 
-def spec(tree):
-    return jax.tree.map(ocp.utils.to_shape_dtype_struct, tree)
-
-
 class Policy(BasePolicy):
     def __init__(self, cfg: PolicyConfig):
         self.cfg = cfg
 
-        self.model: CrossFormerModel = CrossFormerModel.load_pretrained(
-            cfg.path, step=cfg.step
-        )
+        self.model: CrossFormerModel = CrossFormerModel.load_pretrained(cfg.path, step=cfg.step)
         self.head_name = "single_arm"
         self.pred_horizon = 4
         self.exp_weight = 0
@@ -164,18 +157,14 @@ class Policy(BasePolicy):
         unnorm_stats = self.model.dataset_statistics[self.dataset_name]
 
         obs = payload["observation"]
-        obs["timestep_pad_mask"] = self.model.example_batch["observation"][
-            "timestep_pad_mask"
-        ]  # dummy
+        obs["timestep_pad_mask"] = self.model.example_batch["observation"]["timestep_pad_mask"]  # dummy
         for key in obs:
             if "image" in key:
                 obs[key] = resize(obs[key])
             # NOTE... single proprio might fail if not processed accordingly
             # normalize proprioception expect for bimanual proprioception
             if "proprio" in key and key != "proprio_bimanual":
-                obs[key] = (obs[key] - norm_stats[key]["mean"]) / (
-                    norm_stats[key]["std"]
-                )
+                obs[key] = (obs[key] - norm_stats[key]["mean"]) / (norm_stats[key]["std"])
 
         self.history.append(obs)
         self.num_obs += 1
@@ -207,12 +196,7 @@ class Policy(BasePolicy):
 
         # select the predicted action for the current step from the history of action chunk predictions
         curr_act_preds = np.stack(
-            [
-                pred_actions[i]
-                for (i, pred_actions) in zip(
-                    range(num_actions - 1, -1, -1), self.act_history
-                )
-            ]
+            [pred_actions[i] for (i, pred_actions) in zip(range(num_actions - 1, -1, -1), self.act_history)]
         )
 
         # more recent predictions get exponentially *less* weight than older predictions
