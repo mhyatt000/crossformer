@@ -176,3 +176,39 @@ wandb
 .vscode
 .idea
 datasets/debug_dataset/bridge_dataset/1.0.0/action_*
+
+
+# --- HPC / experiment artifacts ---
+logs/
+runs/
+output/
+checkpoints/
+slurm-*.out
+slurm-*.err
+*.err
+
+# --- Slurm & local script'ler (repo'ya girmesin) ---
+*.slurm
+*.sbatch
+*.sh
+
+# --- Datasets / TFDS / cache ---
+tensorflow_datasets/
+datasets/
+data/
+.cache/
+.huggingface/
+transformers_cache/
+*.tfrecord
+*.npz
+*.npy
+*.pkl
+*.ckpt
+*.h5
+*.bin
+*.pth
+
+# --- Jupyter / notebooks (istersen takip etme) ---
+.ipynb_checkpoints/
+notebooks/
+reports/
