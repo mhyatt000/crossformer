@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 import hashlib
 import json
+import logging
 import os
-from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-import numpy as np
 from array_record.python.array_record_data_source import ArrayRecordDataSource
+import jax
+import numpy as np
 
 from crossformer.data.grain.arec.arec import unpack_record
+
+log = logging.getLogger(__name__)
 
 
 class _DecodedArrayRecord:
@@ -50,8 +54,10 @@ class _EpisodeDataset(Sequence[dict]):
 
     def _group_indices(self) -> list[list[int]]:
         cached = self._load_cached_indices()
+        log.info(f"Cached idxs: {type(cached)}")
         if cached is not None:
             return cached
+        log.info("No cached episode indices found; grouping from scratch.")
 
         by_episode: dict[int, list[tuple[int, int]]] = defaultdict(list)
         for idx in range(len(self._records)):
@@ -85,9 +91,7 @@ class _EpisodeDataset(Sequence[dict]):
                 stat = shard.stat()
             except OSError:
                 return None
-            fingerprint_parts.append(
-                f"{shard.resolve()}::{int(stat.st_mtime)}::{stat.st_size}"
-            )
+            fingerprint_parts.append(f"{shard.resolve()}::{int(stat.st_mtime)}::{stat.st_size}")
 
         digest = hashlib.sha1("\n".join(fingerprint_parts).encode()).hexdigest()
         return digest
@@ -104,6 +108,7 @@ class _EpisodeDataset(Sequence[dict]):
         path = self._cache_path()
         if path is None or not path.exists():
             return None
+        log.info(f"Loading cached episode indices from {path}")
         try:
             with path.open("r", encoding="utf-8") as handle:
                 payload = json.load(handle)
@@ -128,12 +133,14 @@ class _EpisodeDataset(Sequence[dict]):
     def __getitem__(self, index: int) -> dict:
         indices = self._episode_indices[index]
         steps = [self._records[i] for i in indices]
-        return _assemble_episode(steps)
+        steps = jax.tree.map(lambda *x: np.stack([*x]), *steps)
+        return steps  # _assemble_episode(steps)
 
 
 def _assemble_episode(steps: Sequence[dict]) -> dict:
     """Convert a list of step dictionaries into a trajectory dictionary."""
 
+    # DeprecatedError("jax.tree.map is sufficient here")
     if not steps:
         return {}
 
@@ -165,9 +172,7 @@ def _assemble_episode(steps: Sequence[dict]) -> dict:
         for key, value in obs.items():
             if key == "proprio" and isinstance(value, dict):
                 for p_key, p_val in value.items():
-                    proprio_buffers.setdefault(p_key, []).append(
-                        np.asarray(p_val, dtype=np.float32)
-                    )
+                    proprio_buffers.setdefault(p_key, []).append(np.asarray(p_val, dtype=np.float32))
                 continue
             if isinstance(value, dict):
                 for sub_key, sub_val in value.items():
@@ -179,27 +184,21 @@ def _assemble_episode(steps: Sequence[dict]) -> dict:
         action = step.get("action", {})
         if isinstance(action, dict):
             for a_key, a_val in action.items():
-                action_buffers.setdefault(a_key, []).append(
-                    np.asarray(a_val, dtype=np.float32)
-                )
+                action_buffers.setdefault(a_key, []).append(np.asarray(a_val, dtype=np.float32))
 
     traj_len = len(steps)
     obs_out: dict[str, np.ndarray | dict[str, np.ndarray]] = {
         key: np.stack(frames) for key, frames in obs_buffers.items()
     }
     if proprio_buffers:
-        obs_out["proprio"] = {
-            key: np.stack(frames).astype(np.float32)
-            for key, frames in proprio_buffers.items()
-        }
+        obs_out["proprio"] = {key: np.stack(frames).astype(np.float32) for key, frames in proprio_buffers.items()}
         for key, frames in proprio_buffers.items():
             flat_key = f"proprio_{key}"
             obs_out[flat_key] = np.stack(frames).astype(np.float32)
 
-    action_components = []
-    for part in ("joints", "gripper", "position"):
-        if part in action_buffers:
-            action_components.append(np.stack(action_buffers[part]))
+    action_components = [
+        np.stack(action_buffers[part]) for part in ("joints", "gripper", "position") if part in action_buffers
+    ]
     if action_components:
         action_out = np.concatenate(action_components, axis=-1).astype(np.float32)
     else:
@@ -222,3 +221,83 @@ def _assemble_episode(steps: Sequence[dict]) -> dict:
         traj["language_embedding"] = embeddings[0]
 
     return traj
+
+
+class _DropKeyDataset(Sequence[dict]):
+    """Dataset wrapper that filters observation keys."""
+
+    def __init__(self, dataset: Sequence[dict], drop_keys: Sequence[str] = ()):
+        self._dataset = dataset
+        self._drop_keys = set(drop_keys)
+
+    def __len__(self) -> int:
+        return len(self._dataset)
+
+    def __getitem__(self, index: int) -> dict:
+        traj = self._dataset[index]
+        if not self._drop_keys:
+            return traj
+        return _drop_observation_keys(traj, self._drop_keys)
+
+
+def _drop_observation_keys(traj: dict, drop_keys: set[str]) -> dict:
+    obs = traj.get("observation")
+    if not isinstance(obs, dict) or not drop_keys:
+        return traj
+
+    filtered: dict[str, Any] = {}
+    for key, value in obs.items():
+        if _should_drop(drop_keys, key):
+            continue
+        if isinstance(value, dict):
+            if key == "proprio":
+                nested = {
+                    sub_key: sub_val
+                    for sub_key, sub_val in value.items()
+                    if not _should_drop(drop_keys, f"{key}_{sub_key}", sub_key, f"{key}/{sub_key}")
+                }
+                if nested:
+                    filtered[key] = nested
+                continue
+            filtered[key] = value
+            continue
+        filtered[key] = value
+
+    new_traj = dict(traj)
+    new_traj["observation"] = filtered
+    return new_traj
+
+
+def _should_drop(drop_keys: set[str], *candidates: str) -> bool:
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        for alias in _expand_aliases(candidate):
+            if alias in drop_keys:
+                return True
+    return False
+
+
+def _expand_aliases(key: str) -> set[str]:
+    if not key:
+        return {""}
+
+    aliases = {key}
+    cleaned = key.lstrip("/")
+    aliases.add(cleaned)
+
+    if "_" in cleaned:
+        prefix, suffix = cleaned.split("_", 1)
+        aliases.add(suffix)
+        if prefix:
+            aliases.add(f"{prefix}/{suffix}")
+
+    if "/" in cleaned:
+        prefix, suffix = cleaned.split("/", 1)
+        if prefix:
+            aliases.add(f"{prefix}_{suffix}")
+        aliases.add(suffix)
+
+    aliases.add(cleaned.split("/")[-1])
+
+    return {alias for alias in aliases if alias}

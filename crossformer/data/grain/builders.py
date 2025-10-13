@@ -44,9 +44,7 @@ def _resolve_source(
         return source
     if isinstance(source, Sequence):
         return source
-    raise TypeError(
-        "Data source must be a Sequence, RandomAccessDataSource, or callable returning one."
-    )
+    raise TypeError("Data source must be a Sequence, RandomAccessDataSource, or callable returning one.")
 
 
 def _iter_source(source: Sequence[dict] | gp.RandomAccessDataSource) -> Iterable[dict]:
@@ -60,9 +58,7 @@ def _iter_source(source: Sequence[dict] | gp.RandomAccessDataSource) -> Iterable
 def _sample_match_key(traj: Mapping[str, Any], template: str) -> Any:
     matches = [key for key in traj if fnmatch.fnmatch(key, template)]
     if not matches:
-        raise ValueError(
-            f"No keys match template {template!r}; available keys: {traj.keys()}"
-        )
+        raise ValueError(f"No keys match template {template!r}; available keys: {traj.keys()}")
     return traj[matches[0]]
 
 
@@ -77,9 +73,7 @@ class GrainDatasetConfig:
     proprio_obs_dims: Mapping[str, int] | None = None
     language_key: str | None = None
     action_proprio_normalization_type: str = metadata.NormalizationType.NORMAL
-    dataset_statistics: metadata.DatasetStatistics | Mapping[str, Any] | str | None = (
-        None
-    )
+    dataset_statistics: metadata.DatasetStatistics | Mapping[str, Any] | str | None = None
     statistics_save_dir: str | None = None
     force_recompute_dataset_statistics: bool = False
     action_normalization_mask: Sequence[bool] | None = None
@@ -104,10 +98,7 @@ def _restructure_trajectory(
     if "observation" not in traj or "action" not in traj:
         raise ValueError("Trajectory must contain 'observation' and 'action' keys.")
 
-    # from rich.pretty import pprint
-    # from crossformer.utils.spec import spec
     # pprint(spec(traj))
-
     # action = np.asarray(traj["action"], dtype=np.float32)
 
     # @codex add some action processing fn here.
@@ -115,7 +106,7 @@ def _restructure_trajectory(
 
     # concat traj proprio joints and proprio gripper
     proprio = traj["observation"]["proprio"]
-    action = np.concatenate([proprio["joints"], proprio["gripper"]])
+    action = np.concatenate([proprio["joints"], proprio["gripper"]], axis=-1)
     traj_len = action.shape[0]
     if action.ndim == 1 or traj_len == 0:
         return {}
@@ -136,15 +127,11 @@ def _restructure_trajectory(
             new_obs[key] = np.asarray(old_obs[old])
     if config.proprio_obs_keys is not None:
         if config.proprio_obs_dims is None:
-            raise ValueError(
-                "proprio_obs_dims must be provided when proprio_obs_keys is set."
-            )
+            raise ValueError("proprio_obs_dims must be provided when proprio_obs_keys is set.")
         for new, old in config.proprio_obs_keys.items():
             key = f"proprio_{new}"
             if old is None:
-                new_obs[key] = np.zeros(
-                    (traj_len, config.proprio_obs_dims[new]), dtype=np.float32
-                )
+                new_obs[key] = np.zeros((traj_len, config.proprio_obs_dims[new]), dtype=np.float32)
             else:
                 new_obs[key] = np.asarray(old_obs[old], dtype=np.float32)
 
@@ -203,9 +190,7 @@ def build_trajectory_dataset(
 
     source = _resolve_source(config.source)
     standardize = _resolve_callable(config.standardize_fn)
-    filter_functions = [
-        fn for fn in (_resolve_callable(fn) for fn in config.filter_fns) if fn
-    ]
+    filter_functions = [fn for fn in (_resolve_callable(fn) for fn in config.filter_fns) if fn]
 
     processed: list[dict] = []
     bar = partial(tqdm, desc="Processing trajectories", total=len(source), unit="ep")
@@ -225,11 +210,7 @@ def build_trajectory_dataset(
         if config.debug and len(processed) % 1000 == 0:
             break
 
-    proprio_keys = [
-        f"proprio_{key}"
-        for key, value in (config.proprio_obs_keys or {}).items()
-        if value is not None
-    ]
+    proprio_keys = [f"proprio_{key}" for key, value in (config.proprio_obs_keys or {}).items() if value is not None]
     stats = _load_dataset_statistics(config, proprio_keys, processed)
 
     if not config.skip_norm:
@@ -248,8 +229,6 @@ def build_trajectory_dataset(
     else:
         normalized = processed
 
-    dataset = gp.MapDataset.range(len(normalized)).map(
-        lambda idx: utils.clone_structure(normalized[idx])
-    )
+    dataset = gp.MapDataset.range(len(normalized)).map(lambda idx: utils.clone_structure(normalized[idx]))
     dataset.dataset_statistics = stats  # type: ignore[attr-defined]
     return dataset, stats

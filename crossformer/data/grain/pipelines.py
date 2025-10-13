@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
+import augmax
 import grain.python as gp
 import numpy as np
 
@@ -40,9 +41,7 @@ def _filter_language_present(traj: dict) -> bool:
 
 def _proprio_within_bounds(traj: dict, max_proprio: float) -> bool:
     for key, value in traj.get("observation", {}).items():
-        if key.startswith("proprio") and not np.all(
-            np.abs(np.asarray(value)) <= max_proprio
-        ):
+        if key.startswith("proprio") and not np.all(np.abs(np.asarray(value)) <= max_proprio):
             return False
     return True
 
@@ -71,9 +70,7 @@ def apply_trajectory_transforms(
         dataset = dataset.filter(_filter_language_present)
 
     if max_action is not None:
-        dataset = dataset.filter(
-            lambda traj: np.all(np.abs(np.asarray(traj["action"])) <= max_action)
-        )
+        dataset = dataset.filter(lambda traj: np.all(np.abs(np.asarray(traj["action"])) <= max_action))
 
     if max_proprio is not None:
         dataset = dataset.filter(_proprio_within_bounds)
@@ -91,20 +88,12 @@ def apply_trajectory_transforms(
 
     if goal_relabeling_strategy is not None:
         if goal_relabeling_strategy != "uniform":
-            raise ValueError(
-                f"Unsupported goal relabeling strategy: {goal_relabeling_strategy}"
-            )
+            raise ValueError(f"Unsupported goal relabeling strategy: {goal_relabeling_strategy}")
         kwargs = goal_relabeling_kwargs or {}
-        dataset = dataset.random_map(
-            lambda traj, rng: transforms.uniform_goal_relabel(traj, rng=rng, **kwargs)
-        )
+        dataset = dataset.random_map(lambda traj, rng: transforms.uniform_goal_relabel(traj, rng=rng, **kwargs))
 
     if train and subsample_length is not None:
-        dataset = dataset.random_map(
-            lambda traj, rng: transforms.subsample(
-                traj, length=subsample_length, rng=rng
-            )
-        )
+        dataset = dataset.random_map(lambda traj, rng: transforms.subsample(traj, length=subsample_length, rng=rng))
 
     dataset = dataset.map(
         lambda traj: transforms.chunk_action_and_observation(
@@ -115,11 +104,7 @@ def apply_trajectory_transforms(
         )
     )
 
-    dataset = dataset.map(
-        lambda traj: transforms.add_head_action_mask(
-            traj, head_to_dataset=HEAD_TO_DATASET
-        )
-    )
+    dataset = dataset.map(lambda traj: transforms.add_head_action_mask(traj, head_to_dataset=HEAD_TO_DATASET))
 
     for transform in post_chunk_transforms:
         callable_transform = _resolve_callable(transform)
@@ -204,9 +189,18 @@ def make_single_dataset(
 
     traj_dataset, stats = builders.build_trajectory_dataset(config)
     traj_kwargs = dict(traj_transform_kwargs or {})
-    traj_dataset = apply_trajectory_transforms(
-        traj_dataset, train=train, seed=seed, **traj_kwargs
+    traj_dataset = apply_trajectory_transforms(traj_dataset, train=train, seed=seed, **traj_kwargs)
+
+    re_wh = resize_frames_to[0] if isinstance(resize_frames_to, tuple) else resize_frames_to
+    re_wh = re_wh or 64
+    chain = augmax.Chain(
+        augmax.Resize(re_wh),
     )
+    # Augmenting a single image on the GPU
+    # transformed_image = jax.jit(transform)(rng, image)
+    # Augmenting an entire batch of images on the GPU
+    # sub_rngs = jax.random.split(rng, images.shape[0])
+    # transformed_images = jax.jit(jax.vmap(transform))(sub_rngs, images)
 
     frame_dataset: gp.IterDataset = _FlattenIterDataset(traj_dataset)
     combined_transforms: list[ModuleSpec | Callable] = []
@@ -223,9 +217,7 @@ def make_single_dataset(
     frame_dataset = apply_frame_transforms(frame_dataset, combined_transforms)
 
     if shuffle_buffer_size and shuffle_buffer_size > 1:
-        frame_dataset = _BufferShuffleIterDataset(
-            frame_dataset, buffer_size=shuffle_buffer_size, seed=seed
-        )
+        frame_dataset = _BufferShuffleIterDataset(frame_dataset, buffer_size=shuffle_buffer_size, seed=seed)
 
     if train:
         frame_dataset = frame_dataset.repeat()
@@ -306,17 +298,13 @@ def make_interleaved_dataset(
     mixture_dataset: gp.IterDataset = _MixtureIterDataset(datasets, weights)
 
     if shuffle_buffer_size and shuffle_buffer_size > 1:
-        mixture_dataset = _BufferShuffleIterDataset(
-            mixture_dataset, buffer_size=shuffle_buffer_size, seed=seed
-        )
+        mixture_dataset = _BufferShuffleIterDataset(mixture_dataset, buffer_size=shuffle_buffer_size, seed=seed)
 
     if train:
         mixture_dataset = mixture_dataset.repeat()
 
     if batch_size is not None:
-        mixture_dataset = mixture_dataset.batch(
-            batch_size, drop_remainder=drop_remainder
-        )
+        mixture_dataset = mixture_dataset.batch(batch_size, drop_remainder=drop_remainder)
 
     mixture_dataset.dataset_statistics = statistics  # type: ignore[attr-defined]
     return GrainDataset(dataset=mixture_dataset, statistics=statistics)
