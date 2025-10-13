@@ -1,3 +1,26 @@
+# flake8: noqa: E402
+
+from __future__ import annotations
+
+import os.path as osp
+
+import json_numpy
+
+json_numpy.patch()
+from collections import deque
+import time
+import traceback
+from typing import Any
+
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+import jax
+import numpy as np
+import tensorflow as tf
+import uvicorn
+
+from crossformer.model.crossformer_model import CrossFormerModel
+
 """
 A server for hosting a CrossFormer model for inference.
 
@@ -24,26 +47,6 @@ action = loads(
     ).json()
 )
 """
-
-import os
-import os.path as osp
-
-import json_numpy
-
-json_numpy.patch()
-from collections import deque
-import time
-import traceback
-from typing import Any, Dict
-
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
-import jax
-import numpy as np
-import tensorflow as tf
-import uvicorn
-
-from crossformer.model.crossformer_model import CrossFormerModel
 
 
 def json_response(obj):
@@ -72,7 +75,7 @@ def stack_and_pad(history: deque, num_obs: int):
 
 class HttpServer:
     def __init__(self, paths):
-        self.models = dict()
+        self.models = {}
         for name, path, step in paths:
             self.models[name] = CrossFormerModel.load_pretrained(path, step=step)
         self.head_name = "single_arm"
@@ -88,7 +91,7 @@ class HttpServer:
         self.reset_history()
 
         # trigger compilation
-        for name in self.models.keys():
+        for name in self.models:
             payload = {
                 "text": "",
                 "model": name,
@@ -125,7 +128,7 @@ class HttpServer:
         self.num_obs = 0
         self.act_history = deque(maxlen=self.pred_horizon)
 
-    def reset(self, payload: Dict[Any, Any]):
+    def reset(self, payload: dict[Any, Any]):
         model_name = payload.get("model", "crossformer")
         if "goal" in payload:
             goal_img = resize(payload["goal"]["image_primary"])
@@ -142,19 +145,18 @@ class HttpServer:
 
         return "reset"
 
-    def sample_actions(self, payload: Dict[Any, Any]):
+    def sample_actions(self, payload: dict[Any, Any]):
         try:
-
             model_name = payload.get("model", "crossformer")
 
             obs = payload["observation"]
             for key in obs:
                 if "image" in key:
                     obs[key] = resize(obs[key])
-                if "proprio" in key and not key == "proprio_bimanual":
-                    proprio_normalization_statistics = self.models[
-                        model_name
-                    ].dataset_statistics[self.dataset_name][key]
+                if "proprio" in key and key != "proprio_bimanual":
+                    proprio_normalization_statistics = self.models[model_name].dataset_statistics[self.dataset_name][
+                        key
+                    ]
                     obs[key] = (obs[key] - proprio_normalization_statistics["mean"]) / (
                         proprio_normalization_statistics["std"]
                     )
@@ -166,9 +168,7 @@ class HttpServer:
             # add batch dim
             obs = jax.tree.map(lambda x: x[None], obs)
 
-            unnormalization_statistics = self.models[model_name].dataset_statistics[
-                self.dataset_name
-            ]["action"]
+            unnormalization_statistics = self.models[model_name].dataset_statistics[self.dataset_name]["action"]
 
             self.rng, key = jax.random.split(self.rng)
             actions = self.models[model_name].sample_actions(
@@ -180,9 +180,7 @@ class HttpServer:
             )[0, :, : self.action_dim]
 
             actions = np.array(actions)
-            actions = actions[
-                -1
-            ]  # @mhyatt patch since model returns for all windows now
+            actions = actions[-1]  # @mhyatt patch since model returns for all windows now
 
             # whether to temporally ensemble the action predictions or return the full chunk
             if not payload.get("ensemble", True):
@@ -194,12 +192,7 @@ class HttpServer:
 
             # select the predicted action for the current step from the history of action chunk predictions
             curr_act_preds = np.stack(
-                [
-                    pred_actions[i]
-                    for (i, pred_actions) in zip(
-                        range(num_actions - 1, -1, -1), self.act_history
-                    )
-                ]
+                [pred_actions[i] for (i, pred_actions) in zip(range(num_actions - 1, -1, -1), self.act_history)]
             )
 
             # more recent predictions get exponentially *less* weight than older predictions
@@ -247,8 +240,6 @@ def main():
         # ("bafl", osp.join(root, "experiment_20241105_133026"), 50_000),  # dijkstra
         # ("bafl", osp.join(root, "experiment_20241105_182134"), 50_000),  # multi view with proprio
         ("bafl", osp.join(root, "experiment_20241112_202015"), 10_000),
-
-
     ]
 
     server = HttpServer(paths)

@@ -1,7 +1,8 @@
+from __future__ import annotations
+
 import datetime
 from functools import partial
 import os
-from pprint import pprint
 
 from absl import app, flags, logging
 import flax
@@ -17,8 +18,6 @@ import tqdm
 
 from crossformer.data.dataset import make_interleaved_dataset, make_single_dataset
 from crossformer.data.oxe import (
-    ActionDim,
-    HEAD_TO_DATASET,
     make_oxe_dataset_kwargs_and_weights,
 )
 from crossformer.model.crossformer_model import CrossFormerModel
@@ -26,7 +25,6 @@ from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec
 from crossformer.utils.train_callbacks import (
     SaveCallback,
-    ValidationCallback,
     VisCallback,
 )
 from crossformer.utils.train_utils import (
@@ -55,9 +53,7 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string("name", "experiment", "Experiment name.")
 flags.DEFINE_bool("debug", False, "Debug config (no wandb logging)")
 
-default_config_file = os.path.join(
-    os.path.dirname(__file__), "configs/finetune_config.py"
-)
+default_config_file = os.path.join(os.path.dirname(__file__), "configs/finetune_config.py")
 config_flags.DEFINE_config_file(
     "config",
     default_config_file,
@@ -80,7 +76,7 @@ def main(_):
         Finetuning Mode: {FLAGS.config.finetuning_mode}
 
         # Devices: {jax.device_count()}
-        Batch size: {FLAGS.config.batch_size} ({FLAGS.config.batch_size // len(devices) } per device)
+        Batch size: {FLAGS.config.batch_size} ({FLAGS.config.batch_size // len(devices)} per device)
         # Steps: {FLAGS.config.num_steps}
     """
     )
@@ -91,9 +87,9 @@ def main(_):
     #
     #########
 
-    assert (
-        FLAGS.config.batch_size % len(devices) == 0
-    ), f"Batch size ({FLAGS.config.batch_size}) must be divisible by the number of devices ({len(devices)})"
+    assert FLAGS.config.batch_size % len(devices) == 0, (
+        f"Batch size ({FLAGS.config.batch_size}) must be divisible by the number of devices ({len(devices)})"
+    )
 
     # create a 1D mesh with a single axis named "batch"
     mesh = Mesh(jax.devices(), axis_names="batch")
@@ -103,9 +99,7 @@ def main(_):
     replicated_sharding = NamedSharding(mesh, PartitionSpec())
 
     def shard(batch):
-        return multihost_utils.host_local_array_to_global_array(
-            batch, mesh, PartitionSpec("batch")
-        )
+        return multihost_utils.host_local_array_to_global_array(batch, mesh, PartitionSpec("batch"))
 
     # make sure each process loads different data
     tf.random.set_seed(FLAGS.config.seed + jax.process_index())
@@ -123,9 +117,7 @@ def main(_):
         FLAGS.name,
         FLAGS.config.to_dict(),
     )
-    time = datetime.datetime.now(
-        cst := datetime.timezone(datetime.timedelta(hours=-6))
-    ).strftime("%m%d")
+    time = datetime.datetime.now(cst := datetime.timezone(datetime.timedelta(hours=-6))).strftime("%m%d")
     wandb_id = f"{name}_{time}"
     wandb.init(
         config=FLAGS.config.to_dict(),
@@ -146,12 +138,8 @@ def main(_):
             FLAGS.config.pretrained_path,
             step=FLAGS.config.pretrained_step,
         )
-        flat_config = flax.traverse_util.flatten_dict(
-            pretrained_model.config, keep_empty_nodes=True
-        )
-        for d_key in flax.traverse_util.flatten_dict(
-            FLAGS.config.get("config_delete_keys", ConfigDict()).to_dict()
-        ):
+        flat_config = flax.traverse_util.flatten_dict(pretrained_model.config, keep_empty_nodes=True)
+        for d_key in flax.traverse_util.flatten_dict(FLAGS.config.get("config_delete_keys", ConfigDict()).to_dict()):
             for c_key in list(flat_config.keys()):
                 if ".".join(c_key).startswith(".".join(d_key)):
                     print(f"Deleting {'.'.join(c_key)}")
@@ -172,10 +160,7 @@ def main(_):
         config = {"text_processor": None}
 
     # create text processor
-    if config["text_processor"] is None:
-        text_processor = None
-    else:
-        text_processor = ModuleSpec.instantiate(config["text_processor"])()
+    text_processor = None if config["text_processor"] is None else ModuleSpec.instantiate(config["text_processor"])()
 
     def process_batch(batch):
         batch = process_text(batch, text_processor)
@@ -206,18 +191,14 @@ def main(_):
             (
                 FLAGS.config.dataset_kwargs["dataset_kwargs_list"],
                 FLAGS.config.dataset_kwargs["sample_weights"],
-            ) = make_oxe_dataset_kwargs_and_weights(
-                **FLAGS.config.dataset_kwargs["oxe_kwargs"]
-            )
+            ) = make_oxe_dataset_kwargs_and_weights(**FLAGS.config.dataset_kwargs["oxe_kwargs"])
             del FLAGS.config.dataset_kwargs["oxe_kwargs"]
 
         FLAGS.config.dataset_kwargs.batch_size //= jax.process_count()
         for l in FLAGS.config.dataset_kwargs.dataset_kwargs_list:
             l["skip_norm_keys"] = ["proprio_bimanual", "proprio_mano"]
 
-        print(
-            FLAGS.config.dataset_kwargs.dataset_kwargs_list[0].get("skip_norm_keys", [])
-        )
+        print(FLAGS.config.dataset_kwargs.dataset_kwargs_list[0].get("skip_norm_keys", []))
         # pprint(FLAGS.config.dataset_kwargs)
         dataset = make_interleaved_dataset(**FLAGS.config.dataset_kwargs, train=True)
 
@@ -246,7 +227,7 @@ def main(_):
     example_batch = next(train_data_iter)
 
     spec = lambda xtree: jax.tree.map(lambda arr: (arr.shape, str(arr.dtype)), xtree)
-    pprint(spec(example_batch))
+    # pprint(spec(example_batch))
 
     # print(dataset.statistics)
 
@@ -305,33 +286,25 @@ def main(_):
             FLAGS.config.wandb.group or "",
             wandb_id,
         )
-        wandb.config.update(dict(save_dir=save_dir), allow_val_change=True)
+        wandb.config.update({"save_dir": save_dir}, allow_val_change=True)
         logging.info("Saving to %s", save_dir)
         save_callback = SaveCallback(save_dir)
 
         # Add window_size to top of config, to make eval easier
         new_config = ConfigDict(model.config)
-        new_config["window_size"] = example_batch["observation"][
-            "timestep_pad_mask"
-        ].shape[1]
+        new_config["window_size"] = example_batch["observation"]["timestep_pad_mask"].shape[1]
         model = model.replace(config=new_config)
 
         # Save finetuning config since it's not saved by SaveCallback, i.e. as part of model.save_pretrained()
-        with tf.io.gfile.GFile(
-            tf.io.gfile.join(save_dir, "finetune_config.json"), "w"
-        ) as config_file:
+        with tf.io.gfile.GFile(tf.io.gfile.join(save_dir, "finetune_config.json"), "w") as config_file:
             config_file.write(FLAGS.config.to_json_best_effort())
     else:
         save_dir = None
         save_callback = SaveCallback(None)
         logging.warning("save_dir not passed in, not saving checkpoints")
 
-    example_batch_spec = jax.tree.map(
-        lambda arr: (arr.shape, str(arr.dtype)), example_batch
-    )
-    wandb.config.update(
-        dict(example_batch_spec=example_batch_spec), allow_val_change=True
-    )
+    example_batch_spec = jax.tree.map(lambda arr: (arr.shape, str(arr.dtype)), example_batch)
+    wandb.config.update({"example_batch_spec": example_batch_spec}, allow_val_change=True)
 
     #########
     #
@@ -360,9 +333,7 @@ def main(_):
             )
 
             # weight loss by number of samples from each head
-            head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(
-                batch["action"]
-            )
+            head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(batch["action"])
             action_loss += head_loss * head_sample_fraction * head.loss_weight
             action_metrics[head_name] = head_metrics
         action_metrics["total_loss"] = action_loss
@@ -377,7 +348,7 @@ def main(_):
     )
     def train_step(state: TrainState, batch):
         rng, dropout_rng = jax.random.split(state.rng)
-        (loss, info), grads = jax.value_and_grad(loss_fn, has_aux=True)(
+        (_loss, info), grads = jax.value_and_grad(loss_fn, has_aux=True)(
             state.model.params, batch, dropout_rng, train=True
         )
         grad_norm = optax.global_norm(grads)
@@ -425,9 +396,7 @@ def main(_):
             )
 
             # weight loss by number of samples from each head
-            head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(
-                batch["action"]
-            )
+            head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(batch["action"])
             action_loss += head_loss * head_sample_fraction * head.loss_weight
             action_metrics[head_name] = head_metrics
 
@@ -531,8 +500,7 @@ def main(_):
         zeros = jax.tree.map(
             lambda arr: jnp.zeros(
                 (
-                    FLAGS.config.dataset_kwargs.batch_size
-                    - FLAGS.config.rollout_kwargs.num_envs,
+                    FLAGS.config.dataset_kwargs.batch_size - FLAGS.config.rollout_kwargs.num_envs,
                     *arr.shape[1:],
                 )
             ),
@@ -541,11 +509,7 @@ def main(_):
         batch = jax.tree.map(lambda a, b: jnp.concatenate([a, b], axis=0), batch, zeros)
 
         _instruct = instructions + [
-            ""
-            for _ in range(
-                FLAGS.config.dataset_kwargs.batch_size
-                - FLAGS.config.rollout_kwargs.num_envs
-            )
+            "" for _ in range(FLAGS.config.dataset_kwargs.batch_size - FLAGS.config.rollout_kwargs.num_envs)
         ]
         batch["task"] = {"language_instruction": [i.encode("utf-8") for i in _instruct]}
         batch["dataset_name"] = "bridge_dataset"  # dummy variable
@@ -571,7 +535,7 @@ def main(_):
         oxes.reset(instructions)
 
         def og_step(obs):
-            raw, act = oxes.step(obs)
+            _raw, act = oxes.step(obs)
             return act
 
         eval_callback = EvalCallback(venv, og_step)
@@ -587,7 +551,7 @@ def main(_):
 
     timer = Timer()
     for i in tqdm.tqdm(
-        range(0, int(FLAGS.config.num_steps)),
+        range(int(FLAGS.config.num_steps)),
         total=int(FLAGS.config.num_steps),
         dynamic_ncols=True,
     ):
@@ -603,9 +567,7 @@ def main(_):
 
         if (i + 1) % FLAGS.config.log_interval == 0:
             update_info = jax.device_get(update_info)
-            wandb_log(
-                {"training": update_info, "timer": timer.get_average_times()}, step=i
-            )
+            wandb_log({"training": update_info, "timer": timer.get_average_times()}, step=i)
 
         if (i) % FLAGS.config.eval_interval == 0:  # eval on i=0 for comparison
             logging.info("Evaluating...")

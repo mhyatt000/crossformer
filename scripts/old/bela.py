@@ -1,59 +1,44 @@
-import os
+from __future__ import annotations
+
+from dataclasses import dataclass
 from functools import partial
-from finetune import TrainState, create_optimizer
-from crossformer.model.crossformer_module import (
-    CrossFormerModule,
-    CrossFormerTransformer,
-)
-from crossformer.utils.train_utils import merge_params
-from ml_collections import config_flags, ConfigDict
-from crossformer.utils.train_utils import check_config_diff
-from crossformer.data.oxe.oxe_standardization_transforms import (
-    OXE_STANDARDIZATION_TRANSFORMS,
-)
-from jax.debug import visualize_array_sharding as vas
-import tyro
+import os
 
 # from mpi4py import MPI
 import socket
-import time
-from typing import Dict, List, Optional, Tuple, Union, Callable, Any, Type, TypeVar
 
-import crossformer
-import jax
-import jax.distributed
-import jax.numpy as jnp
-import numpy as np
-import optax
-from tqdm import tqdm
-from crossformer import cn
-from crossformer.model.crossformer_model import CrossFormerModel
+from finetune import create_optimizer, TrainState
 import flax
 from flax import linen as nn
 from flax import nnx
 from flax.nnx import bridge
-from flax.nnx.transforms.deprecated import N
-from jax import numpy as jnp
+import jax
 from jax.debug import visualize_array_sharding as vas
-from jax.experimental import mesh_utils
+import jax.distributed
 from jax.experimental import multihost_utils as mx
-from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from ml_collections import ConfigDict
+import numpy as np
+import optax
 from rich.pretty import pprint as _pprint
+from tqdm import tqdm
+import tyro
 
-
-import tensorflow as tf  # TensorFlow operations
-import tensorflow_datasets as tfds  # TFDS for MNIST
-
-from crossformer.utils.train_utils import process_text
-
-from dataclasses import dataclass
+from crossformer import cn
+from crossformer.data.oxe.oxe_standardization_transforms import (
+    OXE_STANDARDIZATION_TRANSFORMS,
+)
+from crossformer.model.crossformer_model import CrossFormerModel
+from crossformer.model.crossformer_module import (
+    CrossFormerModule,
+    CrossFormerTransformer,
+)
+from crossformer.utils.train_utils import check_config_diff, merge_params, process_text
 
 pprint = lambda *args, **kwargs: (_pprint(*args, **kwargs), print())
 
 
 def make_dataset(cfg, model, mesh):
-
     def shard(batch):
         return mx.host_local_array_to_global_array(batch, mesh, PartitionSpec("batch"))
 
@@ -73,7 +58,6 @@ def make_dataset(cfg, model, mesh):
 
 
 def loss_fn_new(module: nnx.Module, batch, train=True):
-
     embeds = module.fwd_transformer(
         batch["observation"],
         batch["task"],
@@ -102,28 +86,17 @@ def loss_fn_new(module: nnx.Module, batch, train=True):
 
 
 class CrossFormerNNX(nnx.Module):
-
-    def __init__(
-        self, transformer: CrossFormerTransformer, heads: Dict[str, nn.Module], rngs
-    ):
+    def __init__(self, transformer: CrossFormerTransformer, heads: dict[str, nn.Module], rngs):
         self.transformer = bridge.ToNNX(transformer, rngs=rngs)
         self.heads = {k: bridge.ToNNX(h, rngs=rngs) for k, h in heads.items()}
 
-    def __call__(
-        self, observations, tasks, timestep_pad_mask, train=True, verbose=False
-    ):
-        outs = self.fwd_transformer(
-            observations, tasks, timestep_pad_mask, train, verbose
-        )
+    def __call__(self, observations, tasks, timestep_pad_mask, train=True, verbose=False):
+        outs = self.fwd_transformer(observations, tasks, timestep_pad_mask, train, verbose)
         head_outputs = self.fwd_head(outs, train)
         return outs, head_outputs
 
-    def fwd_transformer(
-        self, observations, tasks, timestep_pad_mask, train=True, verbose=False
-    ):
-        outs = self.transformer(
-            observations, tasks, timestep_pad_mask, train=train, verbose=verbose
-        )
+    def fwd_transformer(self, observations, tasks, timestep_pad_mask, train=True, verbose=False):
+        outs = self.transformer(observations, tasks, timestep_pad_mask, train=train, verbose=verbose)
         return outs
 
     def fwd_head(self, outs, train=True):
@@ -136,7 +109,6 @@ class CrossFormerNNX(nnx.Module):
 
 
 def loss_fn(module: nnx.Module, batch, train=True):
-
     embeds = module.crossformer_transformer(
         batch["observation"],
         batch["task"],
@@ -165,9 +137,7 @@ def loss_fn(module: nnx.Module, batch, train=True):
 
 
 @nnx.jit
-def train_step(
-    module: nnx.Module, optimizer: nnx.Optimizer, metrics: nnx.MultiMetric, batch
-):
+def train_step(module: nnx.Module, optimizer: nnx.Optimizer, metrics: nnx.MultiMetric, batch):
     """Train for a single step."""
 
     grad_fn = nnx.value_and_grad(loss_fn_new, has_aux=True)
@@ -194,12 +164,11 @@ def pred_step(model: nnx.Module, batch):
 
 @nnx.jit
 def eval_step(model: nnx.Module, metrics: nnx.MultiMetric, batch):
-    loss, logits = loss_fn(model, batch)
+    loss, _logits = loss_fn(model, batch)
     metrics.update(loss=loss)
 
 
 def run_nnx(module, optimizer, metrics, data):
-
     # nsteps = train_ds.cardinality().numpy() // num_epochs
     nsteps = 5_000_000
     every = 1_000
@@ -218,7 +187,6 @@ def run_nnx(module, optimizer, metrics, data):
         train_step(module, optimizer, metrics, batch)
 
         if (i + 1) % every == 0:  # one training epoch has passed
-
             print("quitting")
             quit()
             continue
@@ -239,18 +207,11 @@ def run_nnx(module, optimizer, metrics, data):
                 hist[f"test_{metric}"].append(value)
             metrics.reset()  # reset metrics for next training epoch
 
-            print(
-                f"loss: {hist['train_loss'][-1]}, "
-                f"accuracy: {hist['train_accuracy'][-1] * 100}"
-            )
-            print(
-                f"loss: {hist['test_loss'][-1]}, "
-                f"accuracy: {hist['test_accuracy'][-1] * 100}"
-            )
+            print(f"loss: {hist['train_loss'][-1]}, accuracy: {hist['train_accuracy'][-1] * 100}")
+            print(f"loss: {hist['test_loss'][-1]}, accuracy: {hist['test_accuracy'][-1] * 100}")
 
 
 def run_linen(train_state, model, data, cfg, param_norm_callable, lr_callable, shards):
-
     def loss_fn(params, batch, rng, train=True):
         bound_module = model.module.bind({"params": params}, rngs={"dropout": rng})
         transformer_embeddings = bound_module.crossformer_transformer(
@@ -272,9 +233,7 @@ def run_linen(train_state, model, data, cfg, param_norm_callable, lr_callable, s
             )
 
             # weight loss by number of samples from each head
-            head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(
-                batch["action"]
-            )
+            head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(batch["action"])
             action_loss += head_loss * head_sample_fraction * head.loss_weight
             action_metrics[head_name] = head_metrics
         action_metrics["total_loss"] = action_loss
@@ -285,12 +244,12 @@ def run_linen(train_state, model, data, cfg, param_norm_callable, lr_callable, s
     # Model is replicated across devices, data is split across devices
     @partial(
         jax.jit,
-        in_shardings=(shards['rep'], shards['ddp']),
-        out_shardings=shards['rep'],
+        in_shardings=(shards["rep"], shards["ddp"]),
+        out_shardings=shards["rep"],
     )
     def train_step(state: TrainState, batch):
         rng, dropout_rng = jax.random.split(state.rng)
-        (loss, info), grads = jax.value_and_grad(loss_fn, has_aux=True)(
+        (_loss, info), grads = jax.value_and_grad(loss_fn, has_aux=True)(
             state.model.params, batch, dropout_rng, train=True
         )
         grad_norm = optax.global_norm(grads)
@@ -317,8 +276,8 @@ def run_linen(train_state, model, data, cfg, param_norm_callable, lr_callable, s
             pprint(spec(batch))
             pprint(update_info)
             try:
-                a = batch['action']
-                vas( a.reshape(a.shape[0], -1))
+                a = batch["action"]
+                vas(a.reshape(a.shape[0], -1))
             except Exception as e:
                 pass
 
@@ -330,7 +289,6 @@ class Shmodel:
     mesh: Mesh
 
     def create(self, cls, *args, **kwargs):
-
         @nnx.jit
         def create_sharded_model():
             # Unsharded at this moment.
@@ -350,9 +308,7 @@ class Shmodel:
 def show_shardings(shards: dict[str, NamedSharding]):
     for k, shard in shards.items():
         pprint({"name": k, "mesh": shard})
-        x = jax.random.normal(
-            jax.random.PRNGKey(42), (jax.device_count(), jax.device_count())
-        )
+        x = jax.random.normal(jax.random.PRNGKey(42), (jax.device_count(), jax.device_count()))
         _x = jax.device_put(x, shard)
         vas(_x)
 
@@ -374,7 +330,6 @@ def make_shards():
 
 
 def main(cfg: cn.Train):
-
     pprint(cfg)
 
     #
@@ -469,10 +424,7 @@ def main(cfg: cn.Train):
         )
 
     if use_linen:
-
-        tx, lr_callable, param_norm_callable = create_optimizer(
-            model.params, **cfg.optimizer.create()
-        )
+        tx, lr_callable, param_norm_callable = create_optimizer(model.params, **cfg.optimizer.create())
         train_state = TrainState.create(model=model, tx=tx, rng=rng)
 
     #

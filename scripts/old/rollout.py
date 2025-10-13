@@ -1,6 +1,7 @@
 #
 # SET UP MODEL ROLLOUTS (from improve & SIMPLER)
 #
+from __future__ import annotations
 
 
 def _model_step(params, batch, rng, train=False):
@@ -101,7 +102,7 @@ def transform(batch):
         oxes.reset(instructions)
 
         def og_step(obs):
-            raw, act = oxes.step(obs)
+            _raw, act = oxes.step(obs)
             return act
 
         eval_callback = EvalCallback(venv, og_step)

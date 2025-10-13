@@ -1,4 +1,6 @@
 # WARNING: importing tensorflow too late can silence important logging (╯°□°)╯︵ ┻━┻
+from __future__ import annotations
+
 import tensorflow as tf
 
 # isort: split
@@ -54,9 +56,7 @@ config_flags.DEFINE_config_file(
 def main(_):
     jax_utils.initialize_compilation_cache()
 
-    prevent_cross_region(
-        FLAGS.config.dataset_kwargs.oxe_kwargs.data_dir, FLAGS.config.save_dir
-    )
+    prevent_cross_region(FLAGS.config.dataset_kwargs.oxe_kwargs.data_dir, FLAGS.config.save_dir)
 
     assert FLAGS.config.dataset_kwargs.batch_size % jax.device_count() == 0
     assert FLAGS.config.dataset_kwargs.batch_size % jax.process_count() == 0
@@ -69,9 +69,7 @@ def main(_):
     dp_sharding = NamedSharding(mesh, PartitionSpec("batch"))
 
     def shard(batch):
-        return multihost_utils.host_local_array_to_global_array(
-            batch, mesh, PartitionSpec("batch")
-        )
+        return multihost_utils.host_local_array_to_global_array(batch, mesh, PartitionSpec("batch"))
 
     # prevent tensorflow from using GPUs
     tf.config.set_visible_devices([], "GPU")
@@ -108,7 +106,7 @@ def main(_):
             )
             logging.info("Saving to %s", save_dir)
             if jax.process_index() == 0:
-                wandb.config.update(dict(save_dir=save_dir), allow_val_change=True)
+                wandb.config.update({"save_dir": save_dir}, allow_val_change=True)
         else:
             save_dir = None
             logging.info("save_dir not passed in, not saving checkpoints")
@@ -127,7 +125,7 @@ def main(_):
     save_callback = SaveCallback(save_dir)
 
     if jax.process_index() == 0:
-        codebase_directory = osp.abspath( osp.join(osp.dirname(crossformer.__file__), ".."))
+        codebase_directory = osp.abspath(osp.join(osp.dirname(crossformer.__file__), ".."))
         wandb.run.log_code(codebase_directory)
 
     # set up text tokenization (this needs to happen after batching but before sharding)
@@ -147,9 +145,7 @@ def main(_):
         (
             FLAGS.config.dataset_kwargs["dataset_kwargs_list"],
             FLAGS.config.dataset_kwargs["sample_weights"],
-        ) = make_oxe_dataset_kwargs_and_weights(
-            **FLAGS.config.dataset_kwargs["oxe_kwargs"]
-        )
+        ) = make_oxe_dataset_kwargs_and_weights(**FLAGS.config.dataset_kwargs["oxe_kwargs"])
         del FLAGS.config.dataset_kwargs["oxe_kwargs"]
 
     FLAGS.config.dataset_kwargs.batch_size //= jax.process_count()
@@ -166,11 +162,9 @@ def main(_):
     example_batch = next(train_data_iter)
     logging.info(f"Batch size: {example_batch['action'].shape[0]}")
     logging.info(f"Number of devices: {jax.device_count()}")
-    logging.info(
-        f"Batch size per device: {example_batch['action'].shape[0] // jax.device_count()}"
-    )
+    logging.info(f"Batch size per device: {example_batch['action'].shape[0] // jax.device_count()}")
 
-    is_pretrained =  FLAGS.config.get('pretrained_path',None) 
+    is_pretrained = FLAGS.config.get("pretrained_path", None)
     if is_pretrained is not None:
         pretrained_model = CrossFormerModel.load_pretrained(
             FLAGS.config.pretrained_path,
@@ -215,10 +209,8 @@ def main(_):
         )
         checkpoint_step = int(train_state.step)
         logging.info("Restored checkpoint from %s", save_dir)
-        if FLAGS.config.start_step is not None:
-            start_step = FLAGS.config.start_step  # start_step overrides checkpoint
-        else:
-            start_step = checkpoint_step
+        # start_step overrides checkpoint
+        start_step = FLAGS.config.start_step if FLAGS.config.start_step is not None else checkpoint_step
         logging.info("Starting training from step %d", start_step)
     else:
         start_step = FLAGS.config.start_step or 0
@@ -248,9 +240,7 @@ def main(_):
             )
 
             # weight loss by number of samples from each head
-            head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(
-                batch["action"]
-            )
+            head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(batch["action"])
             action_loss += head_loss * head_sample_fraction * head.loss_weight
             action_metrics[head_name] = head_metrics
         return action_loss, action_metrics
@@ -265,7 +255,7 @@ def main(_):
     )
     def train_step(state: TrainState, batch: Data):
         rng, dropout_rng = jax.random.split(state.rng)
-        (loss, info), grads = jax.value_and_grad(loss_fn, has_aux=True)(
+        (_loss, info), grads = jax.value_and_grad(loss_fn, has_aux=True)(
             state.model.params, batch, dropout_rng, train=True
         )
         grad_norm = optax.global_norm(grads)

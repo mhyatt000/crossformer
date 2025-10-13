@@ -1,27 +1,24 @@
+from __future__ import annotations
+
 from collections import deque, OrderedDict
 import os
 import os.path as osp
-from typing import Optional, Sequence
+from typing import Sequence
 
-from absl import app, flags, logging
+from absl import logging
 import gymnasium as gym
 from improve.env.action_rescale import ActionRescaler
-from improve.fm.batch_octo import BatchedActionEnsembler
 import improve.wrapper as W
 import jax
 import matplotlib.pyplot as plt
 import numpy as np
 from octo.model.octo_model import OctoModel
-from octo.utils import gym_wrappers as GW
 import simpler_env as simpler
 from simpler_env.utils.action.action_ensemble import ActionEnsembler
 
 # from improve.fm.batch_octo import BatchedOctoInference
 from stable_baselines3.common.vec_env import (
-    DummyVecEnv,
     SubprocVecEnv,
-    VecMonitor,
-    VecVideoRecorder,
 )
 import tensorflow as tf
 from tqdm import tqdm
@@ -30,28 +27,22 @@ from transforms3d.euler import euler2axangle
 
 tf.config.experimental.set_visible_devices([], "GPU")
 
+
 class BatchedActionEnsembler(ActionEnsembler):
+    # from improve.fm.batch_octo import BatchedActionEnsembler
+
     def __init__(self, pred_action_horizon, action_ensemble_temp=0.0, batch_size=1):
-        self.ensemblers = [
-            ActionEnsembler(pred_action_horizon, action_ensemble_temp)
-            for _ in range(batch_size)
-        ]
+        self.ensemblers = [ActionEnsembler(pred_action_horizon, action_ensemble_temp) for _ in range(batch_size)]
 
     def reset(self):
         for ensembler in self.ensemblers:
             ensembler.reset()
 
     def ensemble_action(self, cur_action):
-        return np.stack(
-            [
-                ensembler.ensemble_action(cur_action[i])
-                for i, ensembler in enumerate(self.ensemblers)
-            ]
-        )
+        return np.stack([ensembler.ensemble_action(cur_action[i]) for i, ensembler in enumerate(self.ensemblers)])
 
 
 class PolicyStepper:
-
     def __init__(self, model_type, dataset_id, func=None, transform=None, task=None):
         self.model_type = model_type
         self.dataset_id = dataset_id
@@ -68,18 +59,13 @@ class PolicyStepper:
             self.init_model()
 
     def init_model(self):
-
         if self.model_type in ["octo-base", "octo-small"]:
             # released huggingface octo models
             self.model_type = f"hf://rail-berkeley/{self.model_type}"
             self.tokenizer, self.tokenizer_kwargs = None, None
             self.model = OctoModel.load_pretrained(self.model_type)
-            self.action_mean = self.model.dataset_statistics[self.dataset_id]["action"][
-                "mean"
-            ]
-            self.action_std = self.model.dataset_statistics[self.dataset_id]["action"][
-                "std"
-            ]
+            self.action_mean = self.model.dataset_statistics[self.dataset_id]["action"]["mean"]
+            self.action_std = self.model.dataset_statistics[self.dataset_id]["action"]["std"]
             self.automatic_task_creation = True
 
         else:
@@ -207,7 +193,6 @@ class OXESimplerInference:
         init_rng: int = 0,
         batch_size: int = 8,
     ) -> None:
-
         self.policy_setup = policy_setup
         self.init_policy()
 
@@ -315,7 +300,7 @@ class OXESimplerInference:
         self.previous_gripper_action = None
 
     def step(
-        self, image: np.ndarray, descs: Optional[str] = None, *args, **kwargs
+        self, image: np.ndarray, descs: str | None = None, *args, **kwargs
     ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
         """
         Input:
@@ -362,17 +347,13 @@ class OXESimplerInference:
         raw_action = {
             "world_vector": np.array(raw_actions[:, :3]),
             "rotation_delta": np.array(raw_actions[:, 3:6]),
-            "open_gripper": np.array(
-                raw_actions[:, 6:7]
-            ),  # range [0, 1]; 1 = open; 0 = close
+            "open_gripper": np.array(raw_actions[:, 6:7]),  # range [0, 1]; 1 = open; 0 = close
         }
 
         # process raw_action to obtain the action to be sent to the maniskill2 environment
         action = {}
         action["world_vector"] = raw_action["world_vector"] * self.action_scale
-        action_rotation_delta = np.asarray(
-            raw_action["rotation_delta"], dtype=np.float64
-        )
+        action_rotation_delta = np.asarray(raw_action["rotation_delta"], dtype=np.float64)
 
         axangles = []
         for rotation_delta in action_rotation_delta:
@@ -400,12 +381,8 @@ class OXESimplerInference:
                 np.abs(relative_gripper_action) > 0.5,
                 (self.sticky_action_is_on is False),
             )
-            self.sticky_action_is_on = np.where(
-                to_stick, True, self.sticky_action_is_on
-            )
-            self.sticky_gripper_action = np.where(
-                to_stick, relative_gripper_action, self.sticky_gripper_action
-            )
+            self.sticky_action_is_on = np.where(to_stick, True, self.sticky_action_is_on)
+            self.sticky_gripper_action = np.where(to_stick, relative_gripper_action, self.sticky_gripper_action)
 
             self.gripper_action_repeat += self.sticky_action_is_on.astype(int)
             relative_gripper_action = np.where(
@@ -417,9 +394,7 @@ class OXESimplerInference:
             reset = self.gripper_action_repeat == self.sticky_gripper_num_repeat
             self.sticky_action_is_on = np.where(reset, False, self.sticky_action_is_on)
             self.gripper_action_repeat = np.where(reset, 0, self.gripper_action_repeat)
-            self.sticky_gripper_action = np.where(
-                reset, 0.0, self.sticky_gripper_action
-            )
+            self.sticky_gripper_action = np.where(reset, 0.0, self.sticky_gripper_action)
 
             action["gripper"] = relative_gripper_action
 
@@ -452,17 +427,13 @@ class OXESimplerInference:
         # plot actions
         pred_actions = np.array(
             [
-                np.concatenate(
-                    [a["world_vector"], a["rotation_delta"], a["open_gripper"]], axis=-1
-                )
+                np.concatenate([a["world_vector"], a["rotation_delta"], a["open_gripper"]], axis=-1)
                 for a in predicted_raw_actions
             ]
         )
         for action_dim, action_label in enumerate(ACTION_DIM_LABELS):
             # actions have batch, horizon, dim, in this example we just take the first action for simplicity
-            axs[action_label].plot(
-                pred_actions[:, action_dim], label="predicted action"
-            )
+            axs[action_label].plot(pred_actions[:, action_dim], label="predicted action")
             axs[action_label].set_title(action_label)
             axs[action_label].set_xlabel("Time in one episode")
 
@@ -473,7 +444,6 @@ class OXESimplerInference:
 
 
 class EvalCallback:
-
     def __init__(self, venv, step_func, transform=None, oxes=None):
         self.venv = venv
         self.step_func = step_func
@@ -482,7 +452,6 @@ class EvalCallback:
         self.rescaler = ActionRescaler()
 
     def __call__(self, i=None):
-
         if self.oxes is not None:
             self.oxes.reset()
 
@@ -509,7 +478,7 @@ class EvalCallback:
             # actions = np.array(self.step_func(obs))
             actions = self.step_func(obs)
             if self.oxes is not None:
-                raw, actions = self.oxes(actions)
+                _raw, actions = self.oxes(actions)
 
             actions = self.rescaler.dict2act(actions)
 
@@ -517,7 +486,7 @@ class EvalCallback:
             # for i, n in enumerate(names):
             # wandb.log({f"pred/{n}": wandb.Histogram(actions[:, i])})
 
-            obs, rew, done, info = self.venv.step(actions)
+            obs, rew, done, _info = self.venv.step(actions)
             obs = self.transform(obs) if self.transform is not None else obs
             obs = self.oxes.pre_step(obs) if self.oxes is not None else obs
             # done = terminated or truncated
@@ -540,9 +509,6 @@ def step_randoms(*args):
     return np.random.rand(size, 4, 7)
 
 
-from typing import Tuple, Union
-
-
 def isimg(o):
     if isinstance(o, np.ndarray) and o.ndim == 3:
         return o.shape[-1] in [1, 3, 4]
@@ -553,22 +519,20 @@ class ResizeImageWrapper(gym.ObservationWrapper):
     def __init__(
         self,
         env: gym.Env,
-        resize_size: Optional[Union[Tuple, Sequence[Tuple]]],
+        resize_size: tuple | Sequence[tuple] | None,
     ):
         super().__init__(env)
-        assert isinstance(
-            self.observation_space, gym.spaces.Dict
-        ), "Only Dict observation spaces are supported."
+        assert isinstance(self.observation_space, gym.spaces.Dict), "Only Dict observation spaces are supported."
         spaces = self.observation_space.spaces
         self.resize_size = resize_size
 
-        logging.info(f"Resizing images:")
+        logging.info("Resizing images:")
         for k, v in self.observation_space.sample().items():
             if isimg(v):
                 spaces[k] = gym.spaces.Box(
                     low=0,
                     high=255,  # pixel brightness
-                    shape=resize_size + (3,),
+                    shape=(*resize_size, 3),
                     dtype=np.uint8,
                 )
         self.observation_space = gym.spaces.Dict(spaces)
@@ -576,12 +540,8 @@ class ResizeImageWrapper(gym.ObservationWrapper):
     def observation(self, observation):
         for k, v in observation.items():
             if isimg(v):
-                image = tf.image.resize(
-                    v, size=self.resize_size, method="lanczos3", antialias=True
-                )
-                image = tf.cast(
-                    tf.clip_by_value(tf.round(image), 0, 255), tf.uint8
-                ).numpy()
+                image = tf.image.resize(v, size=self.resize_size, method="lanczos3", antialias=True)
+                image = tf.cast(tf.clip_by_value(tf.round(image), 0, 255), tf.uint8).numpy()
                 observation[k] = image
         return observation
 
@@ -594,7 +554,6 @@ def mk_envs(tasks, n_envs=16, image_size=224):
     import random
 
     def _init() -> gym.Env:
-
         t = random.choice(tasks)
         print(f'Creating env for task "{t}"')
         env = simpler.make(
@@ -646,13 +605,14 @@ def main():
 
     tasks = [e for e in simpler.ENVIRONMENTS if "widowx" in e]
     # replicates a few times
-    tasks = tasks 
+    tasks = tasks
     print(tasks)
     print(len(tasks))
     venv = mk_envs(tasks, 16)
     instructions = venv.env_method("get_language_instruction")
-    from pprint import pprint
-    pprint(instructions)
+
+    # pprint(instructions)
+
 
 if __name__ == "__main__":
     main()
