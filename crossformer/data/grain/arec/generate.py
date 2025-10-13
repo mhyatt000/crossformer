@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -7,7 +9,6 @@ import warnings
 import jax
 import jax.numpy as jnp
 import numpy as np
-from tqdm import tqdm
 import xgym
 from xgym.rlds.util.trajectory import binarize_gripper_actions as binarize
 from xgym.rlds.util.trajectory import scan_noop
@@ -30,9 +31,7 @@ class Builder:
 
     def __init__(self, workers=32):
         # super().__init__()
-        self.spec = lambda arr: jax.tree.map(
-            lambda x: x.shape if hasattr(x, "shape") else type(x), arr
-        )
+        self.spec = lambda arr: jax.tree.map(lambda x: x.shape if hasattr(x, "shape") else type(x), arr)
         self.threshold = 1e-3
         self.workers = workers
 
@@ -186,20 +185,12 @@ class Builder:
         ep["robot"]["gripper"] = ep.pop("xarm_gripper")
         # ep['robot'] = {'joints': joints, 'position': np.concatenate((pose, grip), axis=1)}
 
-        try:  # we dont want the ones with only rs
-            _ = ep.get("/xgym/camera/worm")
-        except KeyError:
-            print("no worm camera")
-            return None
-
-        zeros = lambda: np.zeros((n, 224, 224, 3), dtype=np.uint8)
+        if "/xgym/camera/worm" not in ep or "/xgym/camera/low" in ep:
+            ep["/xgym/camera/worm"] = ep.pop("/xgym/camera/low")
         if "/xgym/camera/wrist" not in ep:
             ep["/xgym/camera/wrist"] = ep.pop("/xgym/camera/rs")
-        ep["/xgym/camera/overhead"] = ep.pop("/xgym/camera/over", zeros())
-        ep["image"] = {
-            k: ep.pop(f"/xgym/camera/{k}", zeros())
-            for k in ["worm", "side", "overhead", "wrist"]
-        }
+
+        ep["image"] = {k: ep.pop(f"/xgym/camera/{k}") for k in ["worm", "side", "overhead", "wrist"]}
 
         ### scale and binarize
         ep["robot"]["gripper"] /= 850
@@ -221,9 +212,7 @@ class Builder:
         ep = jax.tree.map(select := lambda x: x[mask], ep)
 
         ### calculate action
-        action = jax.tree.map(
-            lambda x: x[1:] - x[:-1], ep["robot"]
-        )  # pose and joint action
+        action = jax.tree.map(lambda x: x[1:] - x[:-1], ep["robot"])  # pose and joint action
         action["gripper"] = ep["robot"]["gripper"][1:]  # gripper is absolute
         ep = jax.tree.map(lambda x: x[:-1], ep)
         # ep["action"] = action # action is not an observation
@@ -263,7 +252,7 @@ class Builder:
         self.lang = np.load(self.taskfile)
 
         with ThreadPoolExecutor(max_workers=self.workers) as ex:
-            yield from tqdm(ex.map(self._parse_example, ds), total=len(ds))
+            yield from ex.map(self._parse_example, ds)
 
         # for path in tqdm(ds):
         # try:
