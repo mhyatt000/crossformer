@@ -12,7 +12,6 @@ import numpy as np
 
 from crossformer.data.grain import utils
 
-
 EPS = 1e-8
 
 
@@ -36,7 +35,7 @@ class ArrayStatistics:
         }
 
     @classmethod
-    def from_json(cls, data: Mapping[str, Sequence[float]]) -> "ArrayStatistics":
+    def from_json(cls, data: Mapping[str, Sequence[float]]) -> ArrayStatistics:
         return cls(
             mean=np.asarray(data["mean"], dtype=np.float32),
             std=np.asarray(data["std"], dtype=np.float32),
@@ -63,7 +62,7 @@ class DatasetStatistics:
         }
 
     @classmethod
-    def from_json(cls, data: Mapping[str, object]) -> "DatasetStatistics":
+    def from_json(cls, data: Mapping[str, object]) -> DatasetStatistics:
         proprio = {
             key: ArrayStatistics.from_json(value)  # type: ignore[arg-type]
             for key, value in data.get("proprio", {}).items()  # type: ignore[union-attr]
@@ -128,17 +127,16 @@ def compute_dataset_statistics(
         num_transitions += action.shape[0]
         num_trajectories += 1
         obs = traj.get("observation", {})
+        _p = obs.get("proprio", {})
         for key in proprio_keys:
-            if key in obs:
-                proprio[key].append(utils.ensure_numpy(obs[key]).astype(np.float32))
+            if key in proprio:
+                proprio[key].append(utils.ensure_numpy(_p[key]).astype(np.float32))
 
     if not actions:
         raise ValueError("Cannot compute statistics from an empty dataset.")
     action_array = np.concatenate(actions, axis=0)
     proprio_stats = {
-        key: _stats_from_array(np.concatenate(values, axis=0))
-        for key, values in proprio.items()
-        if values
+        key: _stats_from_array(np.concatenate(values, axis=0)) for key, values in proprio.items() if values
     }
     stats = DatasetStatistics(
         action=_stats_from_array(action_array),
@@ -178,9 +176,7 @@ def normalize_action_and_proprio(
     if action_mask is not None:
         action_mask_array = np.asarray(action_mask, dtype=bool)
         if action_mask_array.shape[-1] != normalized.shape[-1]:
-            raise ValueError(
-                "Length of action mask does not match action dimension."
-            )
+            raise ValueError("Length of action mask does not match action dimension.")
         normalized = np.where(action_mask_array, normalized, action)
     traj["action"] = normalized
 
@@ -201,4 +197,3 @@ def normalize_action_and_proprio(
             obs[key] = 2.0 * (value - stats.minimum) / span - 1.0
     traj["observation"] = obs
     return traj
-

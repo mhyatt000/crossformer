@@ -19,8 +19,8 @@ from collections.abc import Callable, Mapping
 import copy
 from typing import Any
 
+import jax
 import numpy as np
-
 
 Tree = Mapping[str, Any] | dict[str, Any]
 
@@ -74,15 +74,12 @@ def clone_structure(value: Any) -> Any:
     arrays (and other objects that expose ``__array__``) as views.
     """
 
-    if isinstance(value, dict):
-        return {key: clone_structure(sub_value) for key, sub_value in value.items()}
-    if isinstance(value, list):
-        return [clone_structure(sub_value) for sub_value in value]
-    if isinstance(value, tuple):
-        return tuple(clone_structure(sub_value) for sub_value in value)
-    if isinstance(value, np.ndarray):
-        return value.copy()
-    return copy.deepcopy(value)
+    def _clone(value: Any) -> Any:
+        if isinstance(value, np.ndarray):
+            return value.copy()
+        return copy.deepcopy(value)
+
+    return jax.tree.map(_clone, value)
 
 
 def is_padding(value: Any) -> np.ndarray:
@@ -143,4 +140,3 @@ def as_dict(data: Mapping[str, Any] | None) -> dict[str, Any]:
     if isinstance(data, dict):
         return data
     return dict(data)
-

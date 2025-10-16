@@ -17,35 +17,23 @@ import tyro
 
 from crossformer import cn
 from crossformer.data.grain import builders, pipelines
-from crossformer.data.grain.datasets import _DecodedArrayRecord, _DropKeyDataset, _EpisodeDataset, drop
-from crossformer.data.grain.map.window import FlatMapDataset, WindowedFlatMap
-from crossformer.data.grain.util.remap import _remap_lang
+from crossformer.data.grain.datasets import _DecodedArrayRecord, _EpisodeDataset, drop
+from crossformer.data.grain.util.remap import _remap_lang, rekey
 from crossformer.utils.spec import spec
 import wandb
 
 log = logging.getLogger(__name__)
 
 
-def _infer_observation_mappings(traj: dict) -> tuple[dict, dict, dict, dict] | None:
-    obs = traj.get("observation")
-    if obs is None:
-        return None
+def _infer_observation_mappings(tree: dict) -> tuple[dict, dict, dict, dict] | None:
+    obs = tree.get("observation", {})
+    image_keys = set(obs.get("image", {}))
+    depth_keys = set(obs.get("depth", {}))
 
-    image_keys = {}
-    depth_keys = {}
-    proprio_keys = {}
-    proprio_dims = {}
+    proprio = {k: v[-1] for k, v in spec(obs.get("proprio", {})).items()}
+    # proprio_keys, proprio_dims = zip(*proprio.items())
 
-    for key, value in obs.items():
-        if key.startswith("image_"):
-            image_keys[key.removeprefix("image_")] = key
-        elif key.startswith("depth_"):
-            depth_keys[key.removeprefix("depth_")] = key
-        elif key.startswith("proprio_"):
-            proprio_keys[key.removeprefix("proprio_")] = key
-            proprio_dims[key.removeprefix("proprio_")] = int(np.shape(value)[-1])
-
-    return image_keys, depth_keys, proprio_keys or None, proprio_dims or None
+    return image_keys, depth_keys, proprio
 
 
 def _to_uint8(arr: np.ndarray) -> np.ndarray:
@@ -107,6 +95,7 @@ class Config(cn.Train):
     log_every: int = 20
     fps: int = 8
     drop_observation_keys: tuple[str, ...] = ()
+    recompute: bool = False  # recompute data stats? y/n
 
     def __post_init__(self):
         logging.basicConfig(level=self.log_level.upper(), force=True)
@@ -131,25 +120,10 @@ def main(cfg: Config) -> None:
     ds = _EpisodeDataset(ds)
     # it = iter(ds)
     # ds = [next(it) for _ in range(2)]
-    w = WindowedFlatMap(size=5, stride=1)
-    L = sum([w.len(_l) for _l in ds.lengths()])
-    # ds = FlatMapDataset(ds, w, L=L)
-    # ds = PrefetchWrapper(ds, transform=None)
+    # L = sum([w.len(_l) for _l in ds.lengths()])
     ds = grain.MapDataset.source(ds)
 
-    # with PrefetchWrapper(ds, transform=None) as loader:
-    pprint(spec(next(iter(ds))))
-    quit()
-
-    ds = _DropKeyDataset(
-        ds,
-        drop_keys=[
-            "discount",
-            "is_first",
-            "is_terminal",
-            "reward",
-        ],
-    )
+    # ds = _DropKeyDataset( ds, drop_keys=[ "discount", "is_first", "is_terminal", "reward", ],)
 
     def flat(tree):
         return {".".join(k): v for k, v in ftu.flatten_dict(tree).items()}
@@ -157,8 +131,7 @@ def main(cfg: Config) -> None:
     def unflat(tree):
         return ftu.unflatten_dict({tuple(k.split(".")): v for k, v in tree.items()})
 
-    ds = grain.MapDataset.source(ds)
-    ds = ds.map(flat)
+    # ds = ds.map(flat)
     ds = ds.map(
         partial(
             drop,
@@ -171,49 +144,66 @@ def main(cfg: Config) -> None:
         )
     )
 
-    ds = FlatMapDataset(ds, WindowedFlatMap(size=5, stride=1))
-    pprint(spec(next(iter(ds))))
+    ds = ds.map(
+        partial(
+            rekey,
+            inp=["language_instruction", "language_embedding"],
+            out=["language.instruction", "language.embedding"],
+        )
+    )
 
-    ds = grain.IterDataset(ds)
-    ds = ds.map(unflat)
+    # ds = ds.map(unflat)
 
-    quit()
+    # ds = WindowFlatDataset(ds, WindowedFlatMap(size=5, stride=1))
 
-    first_traj = source[0]
+    first_traj = ds[0]
+    pprint(spec(first_traj))
     mappings = _infer_observation_mappings(first_traj)
-    if mappings is None:
-        raise ValueError("Trajectory missing observation key")
-    image_keys, depth_keys, proprio_keys, proprio_dims = mappings
+    pprint(mappings)
+    assert mappings, "Trajectory missing observation key"
 
-    language = first_traj.get("language_instruction")
+    language = first_traj.get("language.instruction")
     standardize_fn = _remap_lang if language is not None else None
+    keys = builders.Keys(
+        *mappings,
+        "language.instruction" if language is not None else None,
+    )
 
     dataset_config = builders.GrainDatasetConfig(
         name=dataset_name,
-        source=source,
+        source=ds,
+        keys=keys,
         standardize_fn=standardize_fn,
-        image_obs_keys=image_keys,
-        depth_obs_keys=depth_keys,
-        proprio_obs_keys=proprio_keys,
-        proprio_obs_dims=proprio_dims,
-        language_key="language_instruction" if language is not None else None,
         skip_norm_keys=cfg.data.transform.skip_norm_keys,
+        force_recompute_dataset_statistics=cfg.recompute,
     )
+
+    pprint(dataset_config)
 
     traj_kwargs = cfg.data.traj.create(with_head_to_dataset=False)
     traj_kwargs["window_size"] = cfg.window_size or traj_kwargs.get("window_size", 1)
     traj_kwargs.pop("task_augment_strategy")
     traj_kwargs.pop("task_augment_kwargs")
+    tfconfig = pipelines.TransformConfig(
+        traj_transform_kwargs=traj_kwargs,
+        frame_transforms={},
+        resize_frames_to=64,
+        resize_frame_keys=None,
+    )
 
     dataset = pipelines.make_single_dataset(
         dataset_config,
         train=False,
-        traj_transform_kwargs=traj_kwargs,
+        tfconfig=tfconfig,
         shuffle_buffer_size=1,
         seed=cfg.seed,
     )
 
-    pprint(spec(next(iter(dataset.dataset))))
+    pprint(type(dataset.dataset))
+    # pprint(spec(next(dataset.dataset)))
+    for x in dataset.dataset:
+        pprint(spec(x))
+        break
     quit()
 
     wandb_mode = cfg.wandb.mode(cfg.debug)

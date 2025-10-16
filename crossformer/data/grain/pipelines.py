@@ -5,15 +5,18 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
+import logging
 from typing import Any
 
-import augmax
 import grain.python as gp
 import numpy as np
+from rich.pretty import pprint
 
 from crossformer.data.grain import builders, transforms
 from crossformer.data.oxe import HEAD_TO_DATASET
-from crossformer.utils.spec import ModuleSpec
+from crossformer.utils.spec import ModuleSpec, spec
+
+log = logging.getLogger(__name__)
 
 
 def _resolve_callable(spec_or_fn: ModuleSpec | Callable | None) -> Callable | None:
@@ -92,9 +95,7 @@ def apply_trajectory_transforms(
         kwargs = goal_relabeling_kwargs or {}
         dataset = dataset.random_map(lambda traj, rng: transforms.uniform_goal_relabel(traj, rng=rng, **kwargs))
 
-    if train and subsample_length is not None:
-        dataset = dataset.random_map(lambda traj, rng: transforms.subsample(traj, length=subsample_length, rng=rng))
-
+    pprint(spec(next(iter(dataset))))
     dataset = dataset.map(
         lambda traj: transforms.chunk_action_and_observation(
             traj,
@@ -104,7 +105,12 @@ def apply_trajectory_transforms(
         )
     )
 
+    pprint(spec(next(iter(dataset))))
+    print("c")
+
     dataset = dataset.map(lambda traj: transforms.add_head_action_mask(traj, head_to_dataset=HEAD_TO_DATASET))
+    pprint(spec(next(iter(dataset))))
+    print("d")
 
     for transform in post_chunk_transforms:
         callable_transform = _resolve_callable(transform)
@@ -116,6 +122,11 @@ def apply_trajectory_transforms(
 
 
 class _FlattenIterDataset(gp.IterDataset):
+    """
+    Flattens a trajectory dataset into a frame dataset by yielding all frames
+    from each trajectory in sequence.
+    """
+
     def __init__(self, parent: gp.MapDataset):
         super().__init__(parent)
 
@@ -166,15 +177,20 @@ class GrainDataset:
     statistics: Any
 
 
+@dataclass
+class TransformConfig:
+    traj_transform_kwargs: dict[str, Any] | None = None
+    frame_transforms: Sequence[ModuleSpec | Callable] = ()
+    resize_frames_to: int | tuple[int, int] | None = None
+    resize_frame_keys: Sequence[str] | None = None
+    resize_interpolation: str = "bilinear"
+
+
 def make_single_dataset(
     config: builders.GrainDatasetConfig,
     *,
     train: bool,
-    traj_transform_kwargs: dict[str, Any] | None = None,
-    frame_transforms: Sequence[ModuleSpec | Callable] = (),
-    resize_frames_to: int | tuple[int, int] | None = None,
-    resize_frame_keys: Sequence[str] | None = None,
-    resize_interpolation: str = "bilinear",
+    tfconfig: TransformConfig | None = TransformConfig(),
     shuffle_buffer_size: int | None = None,
     batch_size: int | None = None,
     drop_remainder: bool = False,
@@ -187,46 +203,62 @@ def make_single_dataset(
     any additional ``frame_transforms``.
     """
 
+    # 1. Build the trajectory dataset
+    # 1.1. restructure keys
+    # 1.2. compute / load statistics
+    # 1.3. normalize with statistics and norm mask
     traj_dataset, stats = builders.build_trajectory_dataset(config)
-    traj_kwargs = dict(traj_transform_kwargs or {})
-    traj_dataset = apply_trajectory_transforms(traj_dataset, train=train, seed=seed, **traj_kwargs)
 
-    re_wh = resize_frames_to[0] if isinstance(resize_frames_to, tuple) else resize_frames_to
-    re_wh = re_wh or 64
-    chain = augmax.Chain(
-        augmax.Resize(re_wh),
-    )
+    # 2. Apply trajectory transforms
+    # 2.1. filter no lang
+    # 2.2. maybe filter max action
+    # 2.3. add pad mask
+    # 2.4. seed
+    # 2.5. goal relabel
+    # 2.6. chunking and windowing
+    # 2.7. maybe other transforms
+    traj_dataset = apply_trajectory_transforms(traj_dataset, train=train, seed=seed)  # , **asdict(tfconfig))
+    from rich.pretty import pprint
+
+    from crossformer.utils.spec import spec
+
+    pprint(spec(next(iter(traj_dataset))))
+
+    re = tfconfig.resize_frames_to
+    re_wh = re[0] if isinstance(re, tuple) else re
+
+    # chain = augmax.Chain( augmax.Resize(re_wh),)
+    log.warn("TODO use augmax for frame transform")
     # Augmenting a single image on the GPU
     # transformed_image = jax.jit(transform)(rng, image)
     # Augmenting an entire batch of images on the GPU
     # sub_rngs = jax.random.split(rng, images.shape[0])
     # transformed_images = jax.jit(jax.vmap(transform))(sub_rngs, images)
 
-    frame_dataset: gp.IterDataset = _FlattenIterDataset(traj_dataset)
+    # 3. do frame level transforms
+    ds: gp.IterDataset = _FlattenIterDataset(traj_dataset)
     combined_transforms: list[ModuleSpec | Callable] = []
-    if resize_frames_to is not None:
+    if re is not None:
+        re_keys = tfconfig.resize_frame_keys if tfconfig.resize_frame_keys is not None else config.keys.image
         combined_transforms.append(
             partial(
                 transforms.resize_frame_images,
-                size=resize_frames_to,
-                keys=resize_frame_keys,
-                interpolation=resize_interpolation,
+                size=re,
+                keys=re_keys,
+                interpolation=tfconfig.resize_interpolation,
             )
         )
-    combined_transforms.extend(frame_transforms)
-    frame_dataset = apply_frame_transforms(frame_dataset, combined_transforms)
+
+    combined_transforms.extend(tfconfig.frame_transforms)
+    ds = apply_frame_transforms(ds, combined_transforms)
 
     if shuffle_buffer_size and shuffle_buffer_size > 1:
-        frame_dataset = _BufferShuffleIterDataset(frame_dataset, buffer_size=shuffle_buffer_size, seed=seed)
+        ds = _BufferShuffleIterDataset(ds, buffer_size=shuffle_buffer_size, seed=seed)
 
-    if train:
-        frame_dataset = frame_dataset.repeat()
-
-    if batch_size is not None:
-        frame_dataset = frame_dataset.batch(batch_size, drop_remainder=drop_remainder)
-
-    frame_dataset.dataset_statistics = stats  # type: ignore[attr-defined]
-    return GrainDataset(dataset=frame_dataset, statistics=stats)
+    ds = ds.repeat() if train else ds
+    ds = ds.batch(batch_size, drop_remainder=drop_remainder) if batch_size is not None else ds
+    ds.dataset_statistics = stats  # type: ignore[attr-defined]
+    return GrainDataset(dataset=ds, statistics=stats)
 
 
 def make_interleaved_dataset(

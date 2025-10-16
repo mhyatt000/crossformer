@@ -3,8 +3,8 @@
 The original TensorFlow pipeline exposes a fairly rich set of transforms that
 operate on either complete trajectories or on frame level chunks.  Rewriting
 every single transform for NumPy/JAX would be unnecessary for the initial
-Grain migration, however the core operations – chunking, padding, head masks,
-and simple subsampling – are required for parity.  This module provides these
+Grain migration, however the core operations - chunking, padding, head masks,
+and simple subsampling - are required for parity.  This module provides these
 rewritten utilities in a framework agnostic way.
 
 All functions operate purely on nested dictionaries containing NumPy arrays or
@@ -16,13 +16,13 @@ without introducing TensorFlow as a dependency.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable
 
+import jax
 import numpy as np
 from scipy import ndimage
 
 from crossformer.data.grain import utils
-
 
 ArrayDict = dict[str, Any]
 Trajectory = dict[str, Any]
@@ -32,17 +32,17 @@ _INTERPOLATION_TO_ORDER = {"nearest": 0, "bilinear": 1}
 
 
 def _ensure_array(value: Any) -> np.ndarray:
-    return utils.ensure_numpy(value)
+    return jax.tree.map(utils.ensure_numpy, value)  # type: ignore[return-value]
 
 
-def _copy_traj(traj: Trajectory) -> Trajectory:
+def _clone(traj: Trajectory) -> Trajectory:
     return utils.clone_structure(traj)
 
 
 def add_pad_mask_dict(traj: Trajectory) -> Trajectory:
     """Annotates ``traj`` with padding masks for observation/task dictionaries."""
 
-    traj = _copy_traj(traj)
+    traj = _clone(traj)
     pad_masks = utils.tree_map(utils.is_padding, traj)
     observation_masks = pad_masks.get("observation", {})
     task_masks = pad_masks.get("task", {})
@@ -53,20 +53,16 @@ def add_pad_mask_dict(traj: Trajectory) -> Trajectory:
     return traj
 
 
-def add_head_action_mask(
-    traj: Trajectory, head_to_dataset: Mapping[str, Sequence[str]] | None = None
-) -> Trajectory:
+def add_head_action_mask(traj: Trajectory, head_to_dataset: Mapping[str, Sequence[str]] | None = None) -> Trajectory:
     """Adds per-head action masks mirroring TensorFlow implementation."""
 
-    traj = _copy_traj(traj)
+    traj = _clone(traj)
     dataset_names = traj.get("dataset_name")
     if dataset_names is None:
         raise KeyError("Expected 'dataset_name' field when adding head masks.")
     dataset_names = np.asarray(dataset_names)
     if head_to_dataset is None:
-        traj["action_head_masks"] = {
-            "action": np.ones_like(dataset_names, dtype=bool)
-        }
+        traj["action_head_masks"] = {"action": np.ones_like(dataset_names, dtype=bool)}
         return traj
 
     action_masks = {}
@@ -86,29 +82,23 @@ def pad_actions_and_proprio(
 ) -> Trajectory:
     """Pads actions/proprio streams and records action padding mask."""
 
-    traj = _copy_traj(traj)
+    traj = _clone(traj)
     actions = _ensure_array(traj["action"])
     traj["action_pad_mask"] = np.ones_like(actions, dtype=bool)
 
     if max_action_dim is not None:
         action_dim = actions.shape[-1]
         if action_dim > max_action_dim:
-            raise ValueError(
-                f"action_dim ({action_dim}) is greater than max_action_dim ({max_action_dim})"
-            )
+            raise ValueError(f"action_dim ({action_dim}) is greater than max_action_dim ({max_action_dim})")
         pad_width = [(0, 0)] * (actions.ndim - 1) + [(0, max_action_dim - action_dim)]
         traj["action"] = np.pad(actions, pad_width, mode="constant")
-        traj["action_pad_mask"] = np.pad(
-            traj["action_pad_mask"], pad_width, mode="constant", constant_values=False
-        )
+        traj["action_pad_mask"] = np.pad(traj["action_pad_mask"], pad_width, mode="constant", constant_values=False)
 
     if max_proprio_dim is not None and "proprio" in traj.get("observation", {}):
         proprio = _ensure_array(traj["observation"]["proprio"])
         proprio_dim = proprio.shape[-1]
         if proprio_dim > max_proprio_dim:
-            raise ValueError(
-                f"proprio_dim ({proprio_dim}) is greater than max_proprio_dim ({max_proprio_dim})"
-            )
+            raise ValueError(f"proprio_dim ({proprio_dim}) is greater than max_proprio_dim ({max_proprio_dim})")
         pad_width = [(0, 0), (0, max_proprio_dim - proprio_dim)]
         traj["observation"]["proprio"] = np.pad(proprio, pad_width, mode="constant")
 
@@ -120,17 +110,15 @@ def chunk_action_and_observation(
     *,
     window_size: int,
     action_horizon: int,
-    override_window_size: Optional[int] = None,
+    override_window_size: int | None = None,
 ) -> Trajectory:
     """Chunks observations into histories and actions into windows."""
 
-    traj = _copy_traj(traj)
+    traj = _clone(traj)
     actions = _ensure_array(traj["action"])
-    traj_len = actions.shape[0]
+    len = actions.shape[0]
 
-    history_indices = (
-        np.arange(traj_len)[:, None] + np.arange(-window_size + 1, 1)[None, :]
-    )
+    history_indices = np.arange(len)[:, None] + np.arange(-window_size + 1, 1)[None, :]
     timestep_pad_mask = history_indices >= 0
     if override_window_size is not None:
         valid_history = np.arange(window_size) >= window_size - override_window_size
@@ -142,22 +130,24 @@ def chunk_action_and_observation(
         if key == "pad_mask_dict":
             chunked_obs[key] = value
             continue
+        from rich.pretty import pprint
+
+        from crossformer.utils.spec import spec
+
+        pprint((key, spec(value)))
         value = _ensure_array(value)
         chunked_obs[key] = value[history_indices]
     chunked_obs["timestep_pad_mask"] = timestep_pad_mask
     traj["observation"] = chunked_obs
 
     if actions.ndim == 2:
-        action_indices = (
-            np.arange(traj_len)[:, None] + np.arange(action_horizon)[None, :]
-        )
-        action_indices = np.minimum(action_indices, traj_len - 1)
+        action_indices = np.arange(len)[:, None] + np.arange(action_horizon)[None, :]
+        action_indices = np.minimum(action_indices, len - 1)
         actions = actions[action_indices]
     else:
         if actions.shape[1] < action_horizon:
             raise ValueError(
-                "Pre-chunked action does not have enough horizon to satisfy"
-                f" requested action_horizon={action_horizon}."
+                f"Pre-chunked action does not have enough horizon to satisfy requested action_horizon={action_horizon}."
             )
         actions = actions[:, :action_horizon]
 
@@ -168,14 +158,9 @@ def chunk_action_and_observation(
         traj["task"] = {}
     task = traj["task"]
     goal_timestep = task.get("timestep")
-    if goal_timestep is None:
-        goal_timestep = np.full((traj_len,), traj_len - 1, dtype=np.int32)
-    else:
-        goal_timestep = _ensure_array(goal_timestep)
+    goal_timestep = np.full((len,), len - 1, dtype=np.int32) if goal_timestep is None else _ensure_array(goal_timestep)
 
-    t, w, h = np.meshgrid(
-        np.arange(traj_len), np.arange(window_size), np.arange(action_horizon), indexing="ij"
-    )
+    t, w, h = np.meshgrid(np.arange(len), np.arange(window_size), np.arange(action_horizon), indexing="ij")
     relative_goal = goal_timestep[:, None, None] - (t - (window_size + 1) + w + h)
     traj["observation"]["task_completed"] = relative_goal <= 0
 
@@ -197,7 +182,7 @@ def chunk_action_and_observation(
 
 
 def subsample(traj: Trajectory, *, length: int, rng: np.random.Generator) -> Trajectory:
-    traj = _copy_traj(traj)
+    traj = _clone(traj)
     traj_len = traj["action"].shape[0]
     if traj_len <= length:
         return traj
@@ -217,7 +202,7 @@ def subsample(traj: Trajectory, *, length: int, rng: np.random.Generator) -> Tra
 
 
 def zero_out_future_proprio(traj: Trajectory) -> Trajectory:
-    traj = _copy_traj(traj)
+    traj = _clone(traj)
     proprio = traj["observation"].get("proprio")
     if proprio is None:
         return traj
@@ -245,8 +230,7 @@ def flatten_trajectory(traj: Trajectory) -> Iterable[dict[str, Any]]:
         }
         if "action_head_masks" in traj:
             frame["action_head_masks"] = {
-                head: np.asarray(mask)[idx]
-                for head, mask in traj["action_head_masks"].items()
+                head: np.asarray(mask)[idx] for head, mask in traj["action_head_masks"].items()
             }
         yield frame
 
@@ -323,8 +307,7 @@ def resize_frame_images(
     order = _INTERPOLATION_TO_ORDER.get(interpolation)
     if order is None:
         raise ValueError(
-            f"Unsupported interpolation '{interpolation}'. "
-            f"Expected one of {sorted(_INTERPOLATION_TO_ORDER)}"
+            f"Unsupported interpolation '{interpolation}'. Expected one of {sorted(_INTERPOLATION_TO_ORDER)}"
         )
     target_size = _normalize_resize_size(size)
     frame = utils.clone_structure(frame)
@@ -332,23 +315,17 @@ def resize_frame_images(
     if not isinstance(observations, dict):
         return frame
     if keys is None:
-        keys = [
-            key
-            for key, value in observations.items()
-            if key != "pad_mask_dict" and _is_image_like(value)
-        ]
+        keys = [key for key, value in observations.items() if key != "pad_mask_dict" and _is_image_like(value)]
     for key in keys:
         if key not in observations:
             continue
-        observations[key] = _resize_image_array(
-            observations[key], size=target_size, order=order
-        )
+        observations[key] = _resize_image_array(observations[key], size=target_size, order=order)
     frame["observation"] = observations
     return frame
 
 
 def drop_empty_language(traj: Trajectory) -> Trajectory:
-    traj = _copy_traj(traj)
+    traj = _clone(traj)
     language = traj.get("task", {}).get("language_instruction")
     if language is None:
         return traj
@@ -360,7 +337,7 @@ def drop_empty_language(traj: Trajectory) -> Trajectory:
 
 
 def uniform_goal_relabel(traj: Trajectory, *, rng: np.random.Generator) -> Trajectory:
-    traj = _copy_traj(traj)
+    traj = _clone(traj)
     obs = traj["observation"]
     traj_len = _ensure_array(traj["action"]).shape[0]
     rand = rng.uniform(size=traj_len)
@@ -379,4 +356,3 @@ def maybe_cast_dtype(value: Any, dtype: np.dtype | type[np.number]) -> np.ndarra
     if array.dtype != dtype:
         array = array.astype(dtype)
     return array
-

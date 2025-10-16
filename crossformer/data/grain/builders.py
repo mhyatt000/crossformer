@@ -12,12 +12,13 @@ from typing import Any
 
 import grain.python as gp
 import numpy as np
-from tqdm import tqdm
+from rich.pretty import pprint
 
 from crossformer.data.grain import metadata, utils
+from crossformer.data.grain.util.deco import logbar
 from crossformer.utils.spec import ModuleSpec
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 
 def _resolve_callable(spec_or_fn: ModuleSpec | Callable | None) -> Callable | None:
@@ -63,15 +64,21 @@ def _sample_match_key(traj: Mapping[str, Any], template: str) -> Any:
 
 
 @dataclass
+class Keys:
+    image: Mapping[str | Any] | Sequence[str] = field(default_factory=list)
+    depth: Mapping[str | Any] | Sequence[str] = field(default_factory=list)
+    proprio: Mapping[str | Any] = field(default_factory=dict)
+    lang: str | None = None
+    # lang: Mapping[str| Any] = field(default_factory=dict)
+
+
+@dataclass
 class GrainDatasetConfig:
     name: str
     source: Sequence[dict] | gp.RandomAccessDataSource | Callable[[], Any]
     standardize_fn: ModuleSpec | Callable | None = None
-    image_obs_keys: Mapping[str, str | None] = field(default_factory=dict)
-    depth_obs_keys: Mapping[str, str | None] = field(default_factory=dict)
-    proprio_obs_keys: Mapping[str, str | None] | None = None
-    proprio_obs_dims: Mapping[str, int] | None = None
-    language_key: str | None = None
+
+    keys: Keys = field(default_factory=Keys)
     action_proprio_normalization_type: str = metadata.NormalizationType.NORMAL
     dataset_statistics: metadata.DatasetStatistics | Mapping[str, Any] | str | None = None
     statistics_save_dir: str | None = None
@@ -98,9 +105,6 @@ def _restructure_trajectory(
     if "observation" not in traj or "action" not in traj:
         raise ValueError("Trajectory must contain 'observation' and 'action' keys.")
 
-    # pprint(spec(traj))
-    # action = np.asarray(traj["action"], dtype=np.float32)
-
     # @codex add some action processing fn here.
     # in place of hard coded action definition
 
@@ -111,8 +115,27 @@ def _restructure_trajectory(
     if action.ndim == 1 or traj_len == 0:
         return {}
 
+    task = {}
+    if config.keys.lang is not None:
+        language = _sample_match_key(traj, config.keys.lang)
+        language = np.asarray(language)
+        if language.shape == ():
+            language = np.repeat(language, traj_len)
+        if language.shape[0] != traj_len:
+            language = np.broadcast_to(language, (traj_len,))
+        task["language.instruction"] = language.astype(object)
+
+    return {
+        "observation": traj.pop("observation"),
+        "task": task,
+        "action": action,
+        "dataset_name": np.repeat(name, traj_len),
+        "info": {"dataset_name": np.repeat(name, traj_len)},
+    }
+
     old_obs = traj["observation"]
     new_obs: dict[str, Any] = {}
+
     for new, old in config.image_obs_keys.items():
         key = f"image_{new}"
         if old is None:
@@ -137,16 +160,6 @@ def _restructure_trajectory(
 
     new_obs["timestep"] = np.arange(traj_len, dtype=np.int32)
 
-    task = {}
-    if config.language_key is not None:
-        language = _sample_match_key(traj, config.language_key)
-        language = np.asarray(language)
-        if language.shape == ():
-            language = np.repeat(language, traj_len)
-        if language.shape[0] != traj_len:
-            language = np.broadcast_to(language, (traj_len,))
-        task["language_instruction"] = language.astype(object)
-
     return {
         "observation": new_obs,
         "task": task,
@@ -157,7 +170,6 @@ def _restructure_trajectory(
 
 def _load_dataset_statistics(
     config: GrainDatasetConfig,
-    proprio_keys: Sequence[str],
     trajectories: Sequence[dict],
 ) -> metadata.DatasetStatistics:
     if isinstance(config.dataset_statistics, metadata.DatasetStatistics):
@@ -168,15 +180,16 @@ def _load_dataset_statistics(
         with open(config.dataset_statistics, "r") as f:
             return metadata.DatasetStatistics.from_json(json.load(f))
 
+    log.debug("Computing dataset statistics from scratch...")
     hash_dependencies = [
         config.name,
-        str(sorted(config.image_obs_keys.items())),
-        str(sorted(config.depth_obs_keys.items())),
-        str(sorted(proprio_keys)),
+        str(sorted(config.keys.image)),
+        str(sorted(config.keys.depth)),
+        str(sorted(config.keys.proprio.keys())),
     ]
     return metadata.compute_dataset_statistics(
         trajectories,
-        proprio_keys=proprio_keys,
+        proprio_keys=list(config.keys.proprio.keys()),
         hash_dependencies=hash_dependencies,
         save_dir=config.statistics_save_dir,
         force_recompute=config.force_recompute_dataset_statistics,
@@ -193,7 +206,7 @@ def build_trajectory_dataset(
     filter_functions = [fn for fn in (_resolve_callable(fn) for fn in config.filter_fns) if fn]
 
     processed: list[dict] = []
-    bar = partial(tqdm, desc="Processing trajectories", total=len(source), unit="ep")
+    bar = partial(logbar, desc="Processing trajectories", total=len(source), unit="ep")
     for raw_traj in bar(_iter_source(source)):
         if filter_functions and any(not fn(raw_traj) for fn in filter_functions):
             continue
@@ -207,11 +220,8 @@ def build_trajectory_dataset(
             continue
         processed.append(traj)
 
-        if config.debug and len(processed) % 1000 == 0:
-            break
-
-    proprio_keys = [f"proprio_{key}" for key, value in (config.proprio_obs_keys or {}).items() if value is not None]
-    stats = _load_dataset_statistics(config, proprio_keys, processed)
+    stats = _load_dataset_statistics(config, processed)
+    pprint(stats)
 
     if not config.skip_norm:
         mask = config.action_normalization_mask
@@ -220,14 +230,15 @@ def build_trajectory_dataset(
                 traj,
                 metadata=stats,
                 normalization_type=config.action_proprio_normalization_type,
-                proprio_keys=proprio_keys,
+                proprio_keys=list(config.keys.proprio.keys()),
                 action_mask=mask,
                 skip_norm_keys=config.skip_norm_keys,
             )
-            for traj in processed
+            for traj in logbar(processed, desc="normalizing...")
         ]
     else:
         normalized = processed
+    log.warning("TODO lazy data normalization")
 
     dataset = gp.MapDataset.range(len(normalized)).map(lambda idx: utils.clone_structure(normalized[idx]))
     dataset.dataset_statistics = stats  # type: ignore[attr-defined]
