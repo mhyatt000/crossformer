@@ -136,6 +136,7 @@ fixable = [
     "PIE",    # tiny safe cleanups
     "PERF",   # safe micro-optimizations
     "RUF100", # remove unused `# noqa`
+    "RUF022", #  `__all__` is not sorted
     "RUF001", # String contains ambiguous `–` (EN DASH). Did you mean `-` (HYPHEN-MINUS)?
     "B",    # flake8-bugbear: likely bugs / risky patterns
     "PTH",  # flake8-use-pathlib: prefer pathlib.Path over os.path/open

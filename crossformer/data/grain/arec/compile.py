@@ -12,17 +12,13 @@ from typing import (
 
 import arec
 import generate
+import msgpack  # type: ignore
 import numpy as np
 from rich.pretty import pprint
 from tqdm import tqdm
 import tyro
 
-try:
-    import msgpack  # type: ignore
-
-    _HAS_MSGPACK = True
-except Exception:
-    _HAS_MSGPACK = False
+_HAS_MSGPACK = True
 
 
 # -----------------------------
@@ -67,7 +63,6 @@ def _load_json(path: Path) -> LoaderResult:
 
 
 def _load_msgpack(path: Path) -> LoaderResult:
-    assert _HAS_MSGPACK
     with path.open("rb") as f:
         return msgpack.unpackb(f.read(), raw=False)
 
@@ -102,11 +97,10 @@ def load_any(path: Path) -> LoaderResult:
         pass
 
     # 4) msgpack
-    if _HAS_MSGPACK:
-        try:
-            return _load_msgpack(path)
-        except Exception:
-            pass
+    try:
+        return _load_msgpack(path)
+    except Exception:
+        pass
 
     raise ValueError(f"Unrecognized or unsupported file format for {path}")
 

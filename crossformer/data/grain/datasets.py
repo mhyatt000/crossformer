@@ -36,6 +36,9 @@ class _DecodedArrayRecord:
     def __getitem__(self, index: int):  # pragma: no cover - simple delegation
         return unpack_record(self._ds[index])
 
+    def __getitems__(self, indices: Sequence[int]) -> list[dict]:
+        return [unpack_record(x) for x in self._ds.__getitems__(indices)]
+
 
 class _EpisodeDataset(Sequence[dict]):
     """Group step-wise ArrayRecord data into episodes."""
@@ -130,9 +133,14 @@ class _EpisodeDataset(Sequence[dict]):
     def __len__(self) -> int:
         return len(self._episode_indices)
 
+    def lengths(self) -> list[int]:
+        """Return the lengths of all records in the dataset."""
+        return [len(idxs) for idxs in self._episode_indices]
+
     def __getitem__(self, index: int) -> dict:
         indices = self._episode_indices[index]
-        steps = [self._records[i] for i in indices]
+        # steps = [self._records[i] for i in indices] # too slow
+        steps = self._records.__getitems__(indices)
         steps = jax.tree.map(lambda *x: np.stack([*x]), *steps)
         return steps  # _assemble_episode(steps)
 
@@ -221,6 +229,10 @@ def _assemble_episode(steps: Sequence[dict]) -> dict:
         traj["language_embedding"] = embeddings[0]
 
     return traj
+
+
+def drop(tree: dict, keys: list[str]) -> dict:
+    return {k: v for k, v in tree.items() if k not in keys}
 
 
 class _DropKeyDataset(Sequence[dict]):

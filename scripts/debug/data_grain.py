@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 import logging
 from pathlib import Path
 from typing import Literal
 
+import flax.traverse_util as ftu
+import grain
 import matplotlib.pyplot as plt
 import numpy as np
 from rich.pretty import pprint
@@ -14,7 +17,8 @@ import tyro
 
 from crossformer import cn
 from crossformer.data.grain import builders, pipelines
-from crossformer.data.grain.datasets import _DecodedArrayRecord, _EpisodeDataset
+from crossformer.data.grain.datasets import _DecodedArrayRecord, _DropKeyDataset, _EpisodeDataset, drop
+from crossformer.data.grain.map.window import FlatMapDataset, WindowedFlatMap
 from crossformer.data.grain.util.remap import _remap_lang
 from crossformer.utils.spec import spec
 import wandb
@@ -110,6 +114,12 @@ class Config(cn.Train):
         return super().__post_init__()
 
 
+@dataclass
+class DataConfig:
+    # reader
+    path: Path
+
+
 def main(cfg: Config) -> None:
     dataset_name = cfg.dataset_name or cfg.arec_path.name
 
@@ -117,12 +127,57 @@ def main(cfg: Config) -> None:
     if not shards:
         raise FileNotFoundError(f"No ArrayRecord shards found in {cfg.arec_path}")
 
-    records = _DecodedArrayRecord(shards)
-    source = _EpisodeDataset(records)
-    # print(f"Loading dropkey dataset")
-    # source = _DropKeyDataset(source, drop_keys=cfg.drop_observation_keys)
+    ds = _DecodedArrayRecord(shards[:5])
+    ds = _EpisodeDataset(ds)
+    # it = iter(ds)
+    # ds = [next(it) for _ in range(2)]
+    w = WindowedFlatMap(size=5, stride=1)
+    L = sum([w.len(_l) for _l in ds.lengths()])
+    # ds = FlatMapDataset(ds, w, L=L)
+    # ds = PrefetchWrapper(ds, transform=None)
+    ds = grain.MapDataset.source(ds)
 
-    pprint(spec(source[0]))
+    # with PrefetchWrapper(ds, transform=None) as loader:
+    pprint(spec(next(iter(ds))))
+    quit()
+
+    ds = _DropKeyDataset(
+        ds,
+        drop_keys=[
+            "discount",
+            "is_first",
+            "is_terminal",
+            "reward",
+        ],
+    )
+
+    def flat(tree):
+        return {".".join(k): v for k, v in ftu.flatten_dict(tree).items()}
+
+    def unflat(tree):
+        return ftu.unflatten_dict({tuple(k.split(".")): v for k, v in tree.items()})
+
+    ds = grain.MapDataset.source(ds)
+    ds = ds.map(flat)
+    ds = ds.map(
+        partial(
+            drop,
+            keys=[
+                "discount",
+                "is_first",
+                "is_terminal",
+                "reward",
+            ],
+        )
+    )
+
+    ds = FlatMapDataset(ds, WindowedFlatMap(size=5, stride=1))
+    pprint(spec(next(iter(ds))))
+
+    ds = grain.IterDataset(ds)
+    ds = ds.map(unflat)
+
+    quit()
 
     first_traj = source[0]
     mappings = _infer_observation_mappings(first_traj)
@@ -158,8 +213,7 @@ def main(cfg: Config) -> None:
         seed=cfg.seed,
     )
 
-    frame = next(iter(dataset.dataset))
-    pprint(spec(frame))
+    pprint(spec(next(iter(dataset.dataset))))
     quit()
 
     wandb_mode = cfg.wandb.mode(cfg.debug)
@@ -175,28 +229,6 @@ def main(cfg: Config) -> None:
     camera_views = list(image_keys.keys()) or cfg.data.reader.load_camera_views
     logged = 0
     processed = 0
-
-    for step, frame in enumerate(dataset.dataset):
-        stacked = _stack_views(frame, camera_views)
-        pprint(spec(stacked))
-        if stacked is None:
-            continue
-        video, panels = stacked
-        language = frame.get("task", {}).get("language_instruction")
-        if isinstance(language, np.ndarray):
-            language = language.item() if language.ndim == 0 else language[0]
-        if step % cfg.log_every == 0:
-            preview = _render_preview(panels, camera_views)
-            wandb.log(
-                {
-                    f"videos/{dataset_name}": wandb.Video(video.transpose(0, 3, 1, 2), fps=cfg.fps, format="gif"),
-                    f"preview/{dataset_name}": wandb.Image(preview),
-                    f"language/{dataset_name}": language or "",
-                },
-                step=step,
-            )
-            logged += 1
-        processed += 1
 
     logger.info("Processed %d frames, logged %d videos", processed, logged)
     run.finish()
