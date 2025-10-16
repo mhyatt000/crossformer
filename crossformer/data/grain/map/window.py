@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections import Counter
 from dataclasses import dataclass
+from itertools import accumulate
 from typing import Any, Generic, Iterable, Iterator, Mapping, TypeVar
 
 from grain.experimental import FlatMapTransform
@@ -142,8 +144,33 @@ class WindowFlatDataset(FlatMapDataset):
         assert getattr(parent, "lengths", None) is not None, (
             "Parent dataset must have lengths() method to estimate total length."
         )
-        L = sum([w.len(_l) for _l in parent.lengths()])
-        super().__init__(parent, w, L)
+        self._episode_lengths = list(parent.lengths())
+        self._win_counts = [w.len(_l) for _l in self._episode_lengths]
+        self._cumulative = list(accumulate(self._win_counts))
+        total = sum(self._win_counts)
+        super().__init__(parent, w, total)
 
     def __getitem__(self, index):
-        pass  # @codex implement based on w.stride and w.size and parent[index]
+        if not isinstance(index, int):
+            raise TypeError("WindowFlatDataset indices must be integers")
+
+        length = self.L
+        if index < 0:
+            index += length
+        if index < 0 or index >= length:
+            raise IndexError(index)
+
+        episode_idx = bisect_right(self._cumulative, index)
+        prev = self._cumulative[episode_idx - 1] if episode_idx > 0 else 0
+        offset = index - prev
+
+        stride = self.tf.stride
+        size = self.tf.size
+        start = offset * stride
+        stop = start + size
+
+        episode = self.parent[episode_idx]
+        T = self._episode_lengths[episode_idx]
+        if stop > T:
+            raise IndexError("Window exceeds episode length")
+        return _slice_window_with_tree(episode, start, stop, T)
