@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterator
 import hashlib
 import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Generic, Iterable, Sequence, TypeVar
 
 from array_record.python.array_record_data_source import ArrayRecordDataSource
 import jax
@@ -141,94 +142,58 @@ class _EpisodeDataset(Sequence[dict]):
         indices = self._episode_indices[index]
         # steps = [self._records[i] for i in indices] # too slow
         steps = self._records.__getitems__(indices)
-        steps = jax.tree.map(lambda *x: np.stack([*x]), *steps)
-        return steps  # _assemble_episode(steps)
+        return jax.tree.map(lambda *x: np.stack([*x]), *steps)
 
 
-def _assemble_episode(steps: Sequence[dict]) -> dict:
-    """Convert a list of step dictionaries into a trajectory dictionary."""
+T = TypeVar("T")
 
-    # DeprecatedError("jax.tree.map is sufficient here")
-    if not steps:
-        return {}
 
-    obs_buffers: dict[str, list[np.ndarray]] = {}
-    proprio_buffers: dict[str, list[np.ndarray]] = {}
-    action_buffers: dict[str, list[np.ndarray]] = {}
+class CacheIter(Iterator[T], Generic[T]):
+    """
+    Wraps a parent iterator/sequence.
+    - __getitem__(i): returns parent[i], caching the result.
+    - __next__(): returns next(parent), caching by increasing index (0,1,2,...).
+    - __iter__(): standard iterator protocol (returns self so caching applies during iteration).
+    """
 
-    rewards = []
-    discounts = []
-    is_first = []
-    is_last = []
-    is_terminal = []
-    language = []
-    embeddings = []
+    def __init__(self, parent):
+        self._parent = parent
+        self._cache: dict[int, T] = {}
+        self._i = 0  # next index to assign for __next__-driven iteration
 
-    for step in sorted(steps, key=lambda s: s.get("step_id", 0)):
-        rewards.append(float(step.get("reward", 0.0)))
-        discounts.append(float(step.get("discount", 1.0)))
-        is_first.append(bool(step.get("is_first", False)))
-        is_last.append(bool(step.get("is_last", False)))
-        is_terminal.append(bool(step.get("is_terminal", False)))
+    def __getitem__(self, idx: int) -> T:
+        if idx in self._cache:
+            return self._cache[idx]
+        # Prefer direct delegation if the parent supports random access
+        if hasattr(self._parent, "__getitem__"):
+            val = self._parent[idx]
+            self._cache[idx] = val
+            return val
+        # Fallback: advance the parent until we reach idx
+        while self._i <= idx:
+            _ = next(self)  # uses our __next__, which caches
+        return self._cache[idx]
 
-        if "language_instruction" in step:
-            language.append(step["language_instruction"])
-        if "language_embedding" in step:
-            embeddings.append(np.asarray(step["language_embedding"], dtype=np.float32))
+    def __iter__(self) -> CacheIter[T]:
+        # Return self so iteration goes through our __next__ and gets cached.
+        return self
 
-        obs = step.get("observation", {})
-        for key, value in obs.items():
-            if key == "proprio" and isinstance(value, dict):
-                for p_key, p_val in value.items():
-                    proprio_buffers.setdefault(p_key, []).append(np.asarray(p_val, dtype=np.float32))
-                continue
-            if isinstance(value, dict):
-                for sub_key, sub_val in value.items():
-                    flat_key = f"{key}_{sub_key}"
-                    obs_buffers.setdefault(flat_key, []).append(np.asarray(sub_val))
-                continue
-            obs_buffers.setdefault(key, []).append(np.asarray(value))
+    def __next__(self) -> T:
+        val = next(self._parent)
+        self._cache[self._i] = val
+        self._i += 1
+        return val
 
-        action = step.get("action", {})
-        if isinstance(action, dict):
-            for a_key, a_val in action.items():
-                action_buffers.setdefault(a_key, []).append(np.asarray(a_val, dtype=np.float32))
+    def __len__(self) -> int:
+        return len(self._parent)
 
-    traj_len = len(steps)
-    obs_out: dict[str, np.ndarray | dict[str, np.ndarray]] = {
-        key: np.stack(frames) for key, frames in obs_buffers.items()
-    }
-    if proprio_buffers:
-        obs_out["proprio"] = {key: np.stack(frames).astype(np.float32) for key, frames in proprio_buffers.items()}
-        for key, frames in proprio_buffers.items():
-            flat_key = f"proprio_{key}"
-            obs_out[flat_key] = np.stack(frames).astype(np.float32)
+    # Optional Python 2-style alias (harmless in Py3; sometimes convenient)
+    def next(self) -> T:  # pragma: no cover
+        return self.__next__()
 
-    action_components = [
-        np.stack(action_buffers[part]) for part in ("joints", "gripper", "position") if part in action_buffers
-    ]
-    if action_components:
-        action_out = np.concatenate(action_components, axis=-1).astype(np.float32)
-    else:
-        action_out = np.zeros((traj_len, 0), dtype=np.float32)
-
-    traj: dict[str, Any] = {
-        "observation": obs_out,
-        "action": action_out,
-        "reward": np.asarray(rewards, dtype=np.float32),
-        "discount": np.asarray(discounts, dtype=np.float32),
-        "is_first": np.asarray(is_first, dtype=bool),
-        "is_last": np.asarray(is_last, dtype=bool),
-        "is_terminal": np.asarray(is_terminal, dtype=bool),
-        "episode_id": steps[0].get("episode_id"),
-    }
-
-    if language:
-        traj["language_instruction"] = language[0]
-    if embeddings:
-        traj["language_embedding"] = embeddings[0]
-
-    return traj
+    @property
+    def cache(self) -> dict[int, T]:
+        return self._cache
 
 
 def drop(tree: dict, keys: list[str]) -> dict:

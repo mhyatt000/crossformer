@@ -16,6 +16,7 @@ without introducing TensorFlow as a dependency.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import logging
 from typing import Any, Iterable
 
 import jax
@@ -23,6 +24,8 @@ import numpy as np
 from scipy import ndimage
 
 from crossformer.data.grain import utils
+
+log = logging.getLogger(__name__)
 
 ArrayDict = dict[str, Any]
 Trajectory = dict[str, Any]
@@ -105,6 +108,9 @@ def pad_actions_and_proprio(
     return traj
 
 
+log.debug("TODO chunk actions by jax.tree.map")
+
+
 def chunk_action_and_observation(
     traj: Trajectory,
     *,
@@ -125,18 +131,7 @@ def chunk_action_and_observation(
         timestep_pad_mask = np.logical_and(timestep_pad_mask, valid_history)
     history_indices = np.maximum(history_indices, 0)
 
-    chunked_obs = {}
-    for key, value in traj["observation"].items():
-        if key == "pad_mask_dict":
-            chunked_obs[key] = value
-            continue
-        from rich.pretty import pprint
-
-        from crossformer.utils.spec import spec
-
-        pprint((key, spec(value)))
-        value = _ensure_array(value)
-        chunked_obs[key] = value[history_indices]
+    chunked_obs = jax.tree.map(lambda x: x[history_indices], traj["observation"])
     chunked_obs["timestep_pad_mask"] = timestep_pad_mask
     traj["observation"] = chunked_obs
 
@@ -154,9 +149,9 @@ def chunk_action_and_observation(
     actions = actions[history_indices]
     traj["action"] = actions
 
-    if "task" not in traj:
-        traj["task"] = {}
-    task = traj["task"]
+    # if "task" not in traj:
+    traj["task"] = task = traj.pop("task", {})
+    # task = traj["task"]
     goal_timestep = task.get("timestep")
     goal_timestep = np.full((len,), len - 1, dtype=np.int32) if goal_timestep is None else _ensure_array(goal_timestep)
 
@@ -202,6 +197,8 @@ def subsample(traj: Trajectory, *, length: int, rng: np.random.Generator) -> Tra
 
 
 def zero_out_future_proprio(traj: Trajectory) -> Trajectory:
+    """Removes all proprio inputs after first one to prevent causal confusion."""
+    raise NotImplementedError()
     traj = _clone(traj)
     proprio = traj["observation"].get("proprio")
     if proprio is None:
@@ -281,17 +278,17 @@ def _resize_image_array(
 
 
 def resize_frame_images(
-    frame: dict[str, Any],
+    tree: dict[str, Any],
     *,
     size: int | tuple[int, int],
     keys: Sequence[str] | None = None,
     interpolation: str = "bilinear",
 ) -> dict[str, Any]:
-    """Resizes image-like observations inside ``frame`` to ``size``.
+    """Resizes image-like observations inside ``tree`` to ``size``.
 
     Parameters
     ----------
-    frame:
+    tree:
         Frame dictionary emitted by :func:`flatten_trajectory`.
     size:
         Target spatial resolution.  Accepts an integer for square resizing or a
@@ -310,18 +307,19 @@ def resize_frame_images(
             f"Unsupported interpolation '{interpolation}'. Expected one of {sorted(_INTERPOLATION_TO_ORDER)}"
         )
     target_size = _normalize_resize_size(size)
-    frame = utils.clone_structure(frame)
-    observations = frame.get("observation")
-    if not isinstance(observations, dict):
-        return frame
+    tree = utils.clone_structure(tree)
+    obs = tree.get("observation")
+    image = obs.get("image")
+    if not isinstance(image, dict):
+        raise TypeError("Expected 'observation' to contain an 'image' dictionary.")
+        return tree
     if keys is None:
-        keys = [key for key, value in observations.items() if key != "pad_mask_dict" and _is_image_like(value)]
+        raise NotImplementedError("Automatic key detection is disabled for now.")
+        keys = [key for key, value in obs.items() if key != "pad_mask_dict" and _is_image_like(value)]
     for key in keys:
-        if key not in observations:
-            continue
-        observations[key] = _resize_image_array(observations[key], size=target_size, order=order)
-    frame["observation"] = observations
-    return frame
+        image[key] = _resize_image_array(image[key], size=target_size, order=order)
+    tree["observation"]["image"] = image
+    return tree
 
 
 def drop_empty_language(traj: Trajectory) -> Trajectory:

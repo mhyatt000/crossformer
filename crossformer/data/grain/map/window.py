@@ -4,10 +4,14 @@ from bisect import bisect_right
 from collections import Counter
 from dataclasses import dataclass
 from itertools import accumulate
-from typing import Any, Generic, Iterable, Iterator, Mapping, TypeVar
+from typing import Any, Callable, Generic, Iterable, Iterator, Mapping, Sequence, TypeVar
 
+import grain
 from grain.experimental import FlatMapTransform
+import jax
 from jax import tree_util
+
+from crossformer.data.grain.util.deco import timeit
 
 T = TypeVar("T")
 U = TypeVar("U")
@@ -121,22 +125,93 @@ class FlatMapDataset(Generic[T, U], Iterable[U]):
     to each element, flattening the resulting streams.
     """
 
-    def __init__(self, parent: Iterable[T], tf: FlatMapTransform, L: int):
+    def __init__(self, parent: Iterable[T], tf: FlatMapTransform, L: int, seek: Callable | None = None):
         # We can reuse parent's transforms / configuration
         # super().__init__(parent)
         # or if MapDataset has a different constructor, adapt accordingly
         self.parent = parent
         self.tf = tf
         self.L = L
+        self.seek = seek
 
     def __len__(self) -> int:
         return self.L
+
+    def __getitem__(self, index):
+        raise NotImplementedError()
 
     def __iter__(self) -> Iterator[U]:
         for elem in self.parent:
             outs = self.tf.flat_map(elem)
             # allow flat_map to yield any iterable (list, generator, etc)
             yield from outs
+
+
+@dataclass
+class MyFlatMap(grain.experimental.FlatMapTransform):
+    max_fan_out: int = 1000
+
+    def flat_map(self, element: dict) -> list[dict]:
+        n = len(element["info"]["step_id"])
+        return [jax.tree.map(lambda x: x[i], element) for i in range(n)]
+
+
+class FlattenTreeDataset(Generic[T, U], Iterable[U]):
+    def __init__(self, parent: Iterable[T], lengths: Sequence[int]):
+        self.parent = parent
+        self.L = sum(lengths)
+        self.lengths = lengths
+
+        self.idx_map = {}
+        self.build_map()
+        self.pcache = {}
+
+    def tf(self, tree: dict, j: int):
+        return jax.tree.map(lambda x: x[j], tree)
+
+    def __len__(self) -> int:
+        return self.L
+
+    def build_map(self):
+        """seeks the correct int after flattening"""
+        if self.idx_map is None:
+            return
+
+        # make dict where k 0->L-1, v is (i,j) where i is episode index, j is index in episode
+        self.idx_map, count = {}, 0
+        for i, eplen in enumerate(self.lengths):
+            for j in range(eplen):
+                self.idx_map[count] = (i, j)
+                count += 1
+
+    def seek(self, index) -> tuple[int, int]:
+        return self.idx_map[index]
+
+    def manage_cache(self, max_size: int = 100):
+        """simple cache management to avoid memory issues"""
+        if len(self.pcache) > max_size:
+            # pop a random key
+            self.pcache.pop(next(iter(self.pcache)))
+
+    @timeit
+    def __getitem__(self, index):
+        # overrides __iter__ and its slow because it cannot prefetch episodes (i think)
+        i, j = self.seek(index)
+
+        episode = self.pcache.get(i, self.parent[i])
+        self.pcache[i] = episode
+        self.manage_cache()
+
+        return self.tf(episode, j)
+
+    def __iter__(self) -> Iterator[U]:
+        return self
+
+    def __next__(self) -> U:
+        for i, j in self.idx_map.values():
+            episode = self.parent[i]
+            yield self.tf(episode, j)
+        raise StopIteration
 
 
 class WindowFlatDataset(FlatMapDataset):

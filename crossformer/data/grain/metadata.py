@@ -5,12 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 
 from crossformer.data.grain import utils
+
+log = logging.getLogger(__name__)
 
 EPS = 1e-8
 
@@ -111,10 +114,13 @@ def compute_dataset_statistics(
 ) -> DatasetStatistics:
     """Computes statistics for trajectories or loads cached values."""
 
+    log.debug("checking cache for stats")
     cache_path = _cache_path(hash_dependencies, save_dir)
     if cache_path.exists() and not force_recompute:
+        log.debug("they were in the cache")
         with cache_path.open("r") as f:
             return DatasetStatistics.from_json(json.load(f))
+    log.debug("no stats found in cache")
 
     actions = []
     proprio: dict[str, list[np.ndarray]] = {key: [] for key in proprio_keys}

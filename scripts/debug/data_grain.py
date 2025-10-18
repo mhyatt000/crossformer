@@ -3,24 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import partial
 import logging
 from pathlib import Path
 from typing import Literal
 
-import flax.traverse_util as ftu
-import grain
 import matplotlib.pyplot as plt
 import numpy as np
 from rich.pretty import pprint
+from tqdm import tqdm
 import tyro
 
 from crossformer import cn
-from crossformer.data.grain import builders, pipelines
-from crossformer.data.grain.datasets import _DecodedArrayRecord, _EpisodeDataset, drop
-from crossformer.data.grain.util.remap import _remap_lang, rekey
+from crossformer.data.grain import pipelines
+from crossformer.data.grain.map.window import FlatMapDataset, WindowedFlatMap, WindowFlatDataset  # noqa
 from crossformer.utils.spec import spec
-import wandb
 
 log = logging.getLogger(__name__)
 
@@ -110,118 +106,20 @@ class DataConfig:
 
 
 def main(cfg: Config) -> None:
-    dataset_name = cfg.dataset_name or cfg.arec_path.name
-
-    shards = sorted(cfg.arec_path.glob("*.arrayrecord"))
-    if not shards:
-        raise FileNotFoundError(f"No ArrayRecord shards found in {cfg.arec_path}")
-
-    ds = _DecodedArrayRecord(shards[:5])
-    ds = _EpisodeDataset(ds)
-    # it = iter(ds)
-    # ds = [next(it) for _ in range(2)]
-    # L = sum([w.len(_l) for _l in ds.lengths()])
-    ds = grain.MapDataset.source(ds)
-
-    # ds = _DropKeyDataset( ds, drop_keys=[ "discount", "is_first", "is_terminal", "reward", ],)
-
-    def flat(tree):
-        return {".".join(k): v for k, v in ftu.flatten_dict(tree).items()}
-
-    def unflat(tree):
-        return ftu.unflatten_dict({tuple(k.split(".")): v for k, v in tree.items()})
-
-    # ds = ds.map(flat)
-    ds = ds.map(
-        partial(
-            drop,
-            keys=[
-                "discount",
-                "is_first",
-                "is_terminal",
-                "reward",
-            ],
-        )
-    )
-
-    ds = ds.map(
-        partial(
-            rekey,
-            inp=["language_instruction", "language_embedding"],
-            out=["language.instruction", "language.embedding"],
-        )
-    )
-
-    # ds = ds.map(unflat)
-
-    # ds = WindowFlatDataset(ds, WindowedFlatMap(size=5, stride=1))
-
-    first_traj = ds[0]
-    pprint(spec(first_traj))
-    mappings = _infer_observation_mappings(first_traj)
-    pprint(mappings)
-    assert mappings, "Trajectory missing observation key"
-
-    language = first_traj.get("language.instruction")
-    standardize_fn = _remap_lang if language is not None else None
-    keys = builders.Keys(
-        *mappings,
-        "language.instruction" if language is not None else None,
-    )
-
-    dataset_config = builders.GrainDatasetConfig(
-        name=dataset_name,
-        source=ds,
-        keys=keys,
-        standardize_fn=standardize_fn,
-        skip_norm_keys=cfg.data.transform.skip_norm_keys,
-        force_recompute_dataset_statistics=cfg.recompute,
-    )
-
-    pprint(dataset_config)
-
-    traj_kwargs = cfg.data.traj.create(with_head_to_dataset=False)
-    traj_kwargs["window_size"] = cfg.window_size or traj_kwargs.get("window_size", 1)
-    traj_kwargs.pop("task_augment_strategy")
-    traj_kwargs.pop("task_augment_kwargs")
-    tfconfig = pipelines.TransformConfig(
-        traj_transform_kwargs=traj_kwargs,
-        frame_transforms={},
-        resize_frames_to=64,
-        resize_frame_keys=None,
-    )
-
+    _ds, dataset_config, tfconfig = pipelines.make_data_source(cfg)
     dataset = pipelines.make_single_dataset(
         dataset_config,
-        train=False,
+        train=True,
         tfconfig=tfconfig,
         shuffle_buffer_size=1,
         seed=cfg.seed,
     )
 
-    pprint(type(dataset.dataset))
-    # pprint(spec(next(dataset.dataset)))
-    for x in dataset.dataset:
-        pprint(spec(x))
-        break
-    quit()
-
-    wandb_mode = cfg.wandb.mode(cfg.debug)
-    run = wandb.init(
-        project=cfg.wandb.project,
-        group=cfg.wandb.group,
-        entity=cfg.wandb.entity,
-        mode=wandb_mode,
-        config={"dataset": dataset_name, "window_size": traj_kwargs["window_size"]},
-        name=f"visualize_{dataset_name}",
-    )
-
-    camera_views = list(image_keys.keys()) or cfg.data.reader.load_camera_views
-    logged = 0
-    processed = 0
-
-    logger.info("Processed %d frames, logged %d videos", processed, logged)
-    run.finish()
+    pprint(dataset)
+    pprint(spec(next(iter(dataset.dataset))))
+    dsit = iter(dataset.dataset)
+    for _ in tqdm(range(int(1e4))):
+        x = next(dsit)
 
 
 if __name__ == "__main__":

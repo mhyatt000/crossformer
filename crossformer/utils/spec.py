@@ -12,7 +12,7 @@ def spec(tree: dict[str, Any]) -> dict[str, Any]:
     """Create a spec dictionary for the given tree structure."""
 
     def toshape(x):
-        return x.shape if getattr(x, "shape", None) is not None else x
+        return (x.shape, x.dtype) if getattr(x, "shape", None) else x
 
     return jax.tree.map(toshape, tree)
 

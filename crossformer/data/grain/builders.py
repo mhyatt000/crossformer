@@ -6,16 +6,16 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 import fnmatch
 from functools import partial
+import hashlib
 import json
 import logging
 from typing import Any
 
+import grain
 import grain.python as gp
 import numpy as np
-from rich.pretty import pprint
 
 from crossformer.data.grain import metadata, utils
-from crossformer.data.grain.util.deco import logbar
 from crossformer.utils.spec import ModuleSpec
 
 log = logging.getLogger(__name__)
@@ -89,7 +89,12 @@ class GrainDatasetConfig:
     skip_norm_keys: Sequence[str] = ()
     seed: int = 0
 
+    batch_size: int = 256
     debug: bool = False
+
+
+def stable_hash_int(s: str) -> int:
+    return int(hashlib.sha256(s.encode()).hexdigest(), 16) / 2**256
 
 
 def _restructure_trajectory(
@@ -123,14 +128,18 @@ def _restructure_trajectory(
             language = np.repeat(language, traj_len)
         if language.shape[0] != traj_len:
             language = np.broadcast_to(language, (traj_len,))
-        task["language.instruction"] = language.astype(object)
+        task["language.instruction"] = language  # .astype(object)
 
+    # name = stable_hash_int(name)
     return {
         "observation": traj.pop("observation"),
         "task": task,
         "action": action,
         "dataset_name": np.repeat(name, traj_len),
-        "info": {"dataset_name": np.repeat(name, traj_len)},
+        "info": {
+            "dataset_name": np.repeat(name, traj_len),
+            "step_id": traj.get("step_id", np.arange(traj_len)),
+        },
     }
 
     old_obs = traj["observation"]
@@ -203,8 +212,9 @@ def build_trajectory_dataset(
 
     source = _resolve_source(config.source)
     standardize = _resolve_callable(config.standardize_fn)
-    filter_functions = [fn for fn in (_resolve_callable(fn) for fn in config.filter_fns) if fn]
+    filter_functions = [_resolve_callable(fn) for fn in config.filter_fns if fn]
 
+    """
     processed: list[dict] = []
     bar = partial(logbar, desc="Processing trajectories", total=len(source), unit="ep")
     for raw_traj in bar(_iter_source(source)):
@@ -219,27 +229,37 @@ def build_trajectory_dataset(
         if not traj:
             continue
         processed.append(traj)
+    """
 
-    stats = _load_dataset_statistics(config, processed)
-    pprint(stats)
+    # new
+    log.debug("we are using the new lazy processing pipeline")
+    ds = grain.MapDataset.source(source)
+    for f in filter_functions:
+        ds = ds.filter(f)
+    ds = ds.map(partial(_restructure_trajectory, name=config.name, standardize=standardize, config=config))
 
+    stats = _load_dataset_statistics(config, ds)
+
+    mask = config.action_normalization_mask
+    norm = partial(
+        metadata.normalize_action_and_proprio,
+        metadata=stats,
+        normalization_type=config.action_proprio_normalization_type,
+        proprio_keys=list(config.keys.proprio.keys()),
+        action_mask=mask,
+        skip_norm_keys=config.skip_norm_keys,
+    )
+
+    """
     if not config.skip_norm:
-        mask = config.action_normalization_mask
-        normalized = [
-            metadata.normalize_action_and_proprio(
-                traj,
-                metadata=stats,
-                normalization_type=config.action_proprio_normalization_type,
-                proprio_keys=list(config.keys.proprio.keys()),
-                action_mask=mask,
-                skip_norm_keys=config.skip_norm_keys,
-            )
-            for traj in logbar(processed, desc="normalizing...")
-        ]
+        normalized = [ norm(traj) for traj in logbar(ds, desc="normalizing...") ]
     else:
-        normalized = processed
+        normalized = ds
     log.warning("TODO lazy data normalization")
-
     dataset = gp.MapDataset.range(len(normalized)).map(lambda idx: utils.clone_structure(normalized[idx]))
-    dataset.dataset_statistics = stats  # type: ignore[attr-defined]
-    return dataset, stats
+    """
+
+    log.debug("Applying lazy normalization to dataset...")
+    ds = ds.map(norm) if not config.skip_norm else ds
+    ds.dataset_statistics = stats  # type: ignore[attr-defined]
+    return ds, stats
