@@ -1,4 +1,4 @@
-"""Debug utility for visualizing Grain datasets."""
+"""ensure grain data looks like tfds data"""
 
 from __future__ import annotations
 
@@ -6,21 +6,20 @@ from dataclasses import dataclass
 import logging
 from pathlib import Path
 
-import grain
 import jax
 from jax.experimental import multihost_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
-import numpy as np
 from rich.pretty import pprint
-from tqdm import tqdm
 import tyro
 
 from crossformer import cn
 from crossformer.data.grain import pipelines
-from crossformer.utils.spec import spec
+from crossformer.data.grain.map.window import FlatMapDataset, WindowedFlatMap, WindowFlatDataset  # noqa
+from crossformer.data.grain.utils import flat
+from crossformer.data.oxe.oxe_standardization_transforms import OXE_STANDARDIZATION_TRANSFORMS
+from crossformer.utils.spec import diff, spec
 
 log = logging.getLogger(__name__)
-grain.config.update("py_debug_mode", True)
 
 
 @dataclass
@@ -49,17 +48,8 @@ def main(cfg: Config) -> None:
     def shard(batch):
         return multihost_utils.host_local_array_to_global_array(batch, mesh, PartitionSpec("batch"))
 
-    # jax.config.update("jax_default_device", jax.devices("cpu")[0])
     _ds, dataset_config, tfconfig = pipelines.make_data_source(cfg)
-
-    # TODO try to load only and then jit the preprocessing loop
-    # and jax jit the loop itself maybe too
-    # read_options = grain.sources.ReadOptions(num_threads=4, prefetch_buffer_size=500)
-    # ds = _ds.repeat().to_iter_dataset(read_options).flat_map(MyFlatMap()).batch(4096, drop_remainder=True)
-    # from grain import multiprocessing as gmp # npqa
-    # ds = ds.mp_prefetch( gmp.MultiprocessingOptions(num_workers=16, per_worker_buffer_size=4, ))
-
-    dataset = pipelines.make_single_dataset(
+    gd = pipelines.make_single_dataset(
         dataset_config,
         shard_fn=shard,
         train=True,
@@ -67,29 +57,23 @@ def main(cfg: Config) -> None:
         shuffle_buffer_size=1,
         seed=cfg.seed,
     )
-    print("Dataset created... please be very patient while threads start up")
 
-    pprint(dataset)
-    dsit = iter(dataset.dataset)
-    batch = next(dsit)
-    pprint(spec(batch, simple=True))
-    isnp = jax.tree.map(lambda x: isinstance(x, np.ndarray), batch)
-    pprint(isnp)
-    iscpu = jax.tree.map(lambda x: x.platform() == "cpu", batch)
-    iscpu_all = jax.tree.reduce(lambda x, y: x and y, iscpu)
-    pprint(iscpu)
+    pprint(gd)
+    gb = next(iter(gd.dataset))
+    pprint(spec(gb))
 
-    if cfg.once:
-        print("exiting")
-        quit()
+    tfd = cfg.data.create(OXE_STANDARDIZATION_TRANSFORMS, train=True)
+    tfd = tfd.iterator(prefetch=cfg.data.loader.prefetch)
+    tfb = batch = next(tfd)
 
-    dsit = iter(dataset.dataset)
-    for i in tqdm(range(int(1e4)), miniters=100, mininterval=0.1):
-        x = next(dsit)
-        if i % 1000 == 0:
-            pprint(spec(x))
-
-    del dataset  # threads arent daemon
+    pprint(
+        spec(
+            diff(
+                spec(flat(tfb)),
+                spec(flat(gb)),
+            )
+        )
+    )
 
 
 if __name__ == "__main__":
