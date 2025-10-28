@@ -13,9 +13,8 @@ from crossformer.cn.dataset.mix import DataSource
 from crossformer.cn.dataset.types import ActionRep, ActionSpace, HEAD2SPACE
 from crossformer.data.oxe.oxe_dataset_configs import OXE_DATASET_CONFIGS, ProprioDim
 from crossformer.data.oxe.oxe_dataset_mixes import HEAD_TO_DATASET
-from crossformer.data.oxe.oxe_standardization_transforms import (
-    OXE_STANDARDIZATION_TRANSFORMS,
-)
+
+# from crossformer.data.oxe.oxe_standardization_transforms import  OXE_STANDARDIZATION_TRANSFORMS
 from crossformer.data.utils.data_utils import NormalizationType
 from crossformer.utils.spec import ModuleSpec
 
@@ -84,7 +83,7 @@ class DataSpec(CN):
         assert self.name in OXE_DATASET_CONFIGS, f"{self.name} missing OXE config"
         members = {d for sub in HEAD_TO_DATASET.values() for d in sub}
         assert self.name in members, f"{self.name} missing from HEAD_TO_DATASET"
-        assert self.name in OXE_STANDARDIZATION_TRANSFORMS, f"{self.name} missing OXE standardization"
+        # assert self.name in OXE_STANDARDIZATION_TRANSFORMS, f"{self.name} missing OXE standardization"
 
     @property
     def action_space(self):

@@ -44,6 +44,7 @@ class Reader(CN):
 class Loader(CN):
     """Controls the nature of loading size shuffle and parallelism."""
 
+    use_grain: bool = True
     global_batch_size: int = 256  # to be divided by jax.devices()
 
     shuffle_buffer: int = 50_000
@@ -82,6 +83,7 @@ class Dataset(CN):
     transform: TransformE = Transform.REGISTRY["default"].field()
 
     reader: Reader = Reader().field()
+    recompute: bool = False  # recompute data stats? y/n
     loader: Loader = Loader().field()
 
     @property
@@ -97,8 +99,7 @@ class Dataset(CN):
 
         # ensure that each dataset has a head
         is_valid = [
-            any(d in dsets for head, dsets in HEAD_TO_DATASET.items())
-            for d, weight in OXE_NAMED_MIXES[self.mix]
+            any(d in dsets for head, dsets in HEAD_TO_DATASET.items()) for d, weight in OXE_NAMED_MIXES[self.mix]
         ]
         assert all(is_valid), f"Dataset in mix: {self.mix} doesn't have assigned head."
 

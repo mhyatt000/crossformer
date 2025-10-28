@@ -13,6 +13,7 @@ from typing import (
     Callable,
     Dict,
     List,
+    Literal,
     Optional,
     Sequence,
     Tuple,
@@ -37,6 +38,7 @@ from crossformer.cn.wab import Wandb
 from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
 from crossformer.model.components.action_heads import (
     ActionHead,
+    AdjFlowHead,
     DiffusionActionHead,
     FlowMatchingActionHead,
     L1ActionHead,
@@ -46,14 +48,15 @@ from crossformer.model.components.transformer import common_transformer_sizes
 from crossformer.model.components.vit_encoders import ResNet26, ResNet26FILM
 from crossformer.utils.spec import ModuleSpec
 
-logger = logging.getLogger(__name__)
-logger.info("Importing crossformer.cn")
+log = logging.getLogger(__name__)
+log.info("Importing crossformer.cn")
 
 
 class ModuleE(Enum):
     L1 = L1ActionHead
     DIFFUSION = DiffusionActionHead
     FLOW = FlowMatchingActionHead
+    ADJFLOW = AdjFlowHead
 
 
 @dataclass
@@ -67,7 +70,7 @@ class HeadFactory(CN):
             assert self.steps, "Diffusion steps must be 1+"
         if self.module == ModuleE.L1:
             pass
-        if self.module == ModuleE.FLOW:
+        if isinstance(self.module.value, FlowMatchingActionHead | AdjFlowHead):
             assert self.steps, "Flow steps must be 1+"
 
         h = Head[self.name.upper()]
@@ -84,7 +87,7 @@ class HeadFactory(CN):
         }
         if self.module == ModuleE.DIFFUSION:
             d["diffusion_steps"] = self.steps
-        if self.module == ModuleE.FLOW:
+        if isinstance(self.module.value, FlowMatchingActionHead | AdjFlowHead):
             d["flow_steps"] = self.steps
 
         return d
@@ -133,9 +136,7 @@ class ModelFactory(CN):
     def create(self) -> dict[str, Any]:
         """create the model config"""
 
-        token_embedding_size, transformer_kwargs = common_transformer_sizes(
-            self.size.value
-        )
+        token_embedding_size, transformer_kwargs = common_transformer_sizes(self.size.value)
 
         encoder = self.make_obs_im_encoder()
         # im = {k: self.make_obs_im(k) for k in self.im}
@@ -143,11 +144,7 @@ class ModelFactory(CN):
         prop = {k: self.make_obs_proprio(k) for k in self.proprio}
         tok = im | prop
 
-        heads = {
-            v.name: v
-            for v in [self.single, self.bimanual, self.mano]
-            if v.name in self.heads
-        }
+        heads = {v.name: v for v in [self.single, self.bimanual, self.mano] if v.name in self.heads}
         assert len(heads) > 0, "No heads selected"
         model = {
             "observation_tokenizers": tok,
@@ -162,9 +159,7 @@ class ModelFactory(CN):
         "simplified keys that can be used to delete old model config"
         model = self.create()["model"]
         model = {
-            "observation_tokenizers": {
-                k: v["module"] for k, v in model["observation_tokenizers"].items()
-            },
+            "observation_tokenizers": {k: v["module"] for k, v in model["observation_tokenizers"].items()},
             "heads": {k: v["module"] for k, v in model["heads"].items()},
             "readouts": dict(model["readouts"].items()),
         }
@@ -204,9 +199,7 @@ class ModelFactory(CN):
 
     def make_obs_proprio(self, key: str):
         """create observation tokenizer for proprio"""
-        return ModuleSpec.create(
-            LowdimObsTokenizer, obs_keys=[f"proprio_{key}"], dropout_rate=0.2
-        )
+        return ModuleSpec.create(LowdimObsTokenizer, obs_keys=[f"proprio_{key}"], dropout_rate=0.2)
 
     def make_obs_im(self, keys: str | Sequence[str], encoder=None):
         """create observation tokenizer for image"""
@@ -253,7 +246,7 @@ class Train(CN):
 
     modality: transform.Modality = transform.Modality.MULTI  # mode of observation
     window_size: int = 1
-    head_name: str | None = None  # TODO why is this here ... see logger warning
+    head_name: str | None = None  # TODO why is this here ... see log warning
 
     pretrained_path: Path | str = "hf://rail-berkeley/crossformer"
     pretrained_step: int | None = None  # elapsed steps (if resume/restart)
@@ -265,15 +258,21 @@ class Train(CN):
     eval: Eval = Eval().field()
     rollout: Rollout = Rollout().field()
 
+    log_level: Literal["debug", "info", "warning", "error"] = "info"  # logging verbosity
     log_interval: int = 100
     eval_interval: int = 2000
     save_interval: int = 2000
     save_dir: str | Path = os.environ.get("BAFL_SAVE", Path().home())
     seed: int = 42
 
+    def set_log_level(self):
+        logging.basicConfig(level=self.log_level.upper(), force=True)
+        log.info(f"Logging level set to {self.log_level.upper()}")
+
     def __post_init__(self):
+        self.set_log_level()
         if self.data.transform.traj.action_horizon != self.model.max_horizon():
-            logger.warning(
+            log.warning(
                 "WARNING: action horizon mismatch."
                 f"data.transform.traj ({self.data.transform.traj.action_horizon}) "
                 f"model.max_horizon ({self.model.max_horizon()})."
@@ -281,7 +280,7 @@ class Train(CN):
             self.data.transform.traj.action_horizon = self.model.max_horizon()
 
         if self.data.transform.traj.max_action_dim != self.model.max_action_dim():
-            logger.warning(
+            log.warning(
                 "WARNING: max action dim mismatch."
                 f"data.transform.traj ({self.data.transform.traj.max_action_dim}) "
                 f"model.max_action_dim ({self.model.max_action_dim()})."
@@ -289,15 +288,15 @@ class Train(CN):
             self.data.transform.traj.max_action_dim = self.model.max_action_dim()
 
         if self.optimizer.lr.decay_steps is None:
-            logger.warning(f"WARNING: decay_steps is None, setting it to {self.steps}")
+            log.warning(f"WARNING: decay_steps is None, setting it to {self.steps}")
             self.optimizer.lr.decay_steps = self.steps
 
-        logger.warn("TODO: fix grad_acc and steps")
-        logger.warn("TODO: fix dataset")
+        log.warn("TODO: fix grad_acc and steps")
+        log.warn("TODO: fix dataset")
 
-        logger.info("SUGGESTION: propogate from the main cfg down to children")
-        logger.warn("TODO: assert all keys that appear twice are the same")
-        logger.warn("TODO: is update_config for model arch only?")
+        log.info("SUGGESTION: propogate from the main cfg down to children")
+        log.warn("TODO: assert all keys that appear twice are the same")
+        log.warn("TODO: is update_config for model arch only?")
 
     def transform_schema(self) -> dict[str, Any]:
         """

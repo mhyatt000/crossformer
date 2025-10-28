@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import datetime as dt
 from enum import Enum
 from pathlib import Path
 from typing import TypeAlias
+
+from flax.traverse_util import flatten_dict
 
 import crossformer
 from crossformer.cn.base import CN
@@ -41,7 +44,14 @@ class Wandb(CN):
         m = WandbMode.DISABLED if not use else WandbMode.ONLINE
         return m.value
 
+    def log(self, info, step):
+        wandb.log(flatten_dict(info, sep="/"), step=step)
+
     def initialize(self, cfg, name=None):
+        # name = format_name_with_config( FLAGS.name, cfg.asdict())
+        time = dt.datetime.now(cst := dt.timezone(dt.timedelta(hours=-6))).strftime("%m%d")
+        # wandb_id = f"{cfg.name}_{time}"
+
         run = wandb.init(
             project=self.project,
             group=self.group,
@@ -50,5 +60,10 @@ class Wandb(CN):
             mode=cfg.wandb.mode(self.use),
             config=cfg,
             **{"name": name} if name is not None else {},
+            # # id=wandb_id,
+            # # name=cfg.name,
         )
+
+        run.name = f"{time}_{run.name}"
+        cfg.name = run.name
         return run
