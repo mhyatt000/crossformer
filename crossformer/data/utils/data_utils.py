@@ -13,14 +13,18 @@ import numpy as np
 import tensorflow as tf
 import tqdm
 
+from crossformer.utils.deco import deprecate
+
 
 def fnmatch_filter(template, xs):
     return [x for x in xs if fnmatch(x, template)]
 
 
+@deprecate("Use jax.tree.map directly instead.", strict=False)
 def tree_map(fn: Callable, tree: dict) -> dict:
     """Maps a function over a nested dictionary."""
-    return {k: tree_map(fn, v) if isinstance(v, dict) else fn(v) for k, v in tree.items()}
+    is_leaf = lambda x: not isinstance(x, dict)
+    return jax.tree.map(fn, tree, is_leaf=is_leaf)
 
 
 def tree_merge(*trees: dict) -> dict:

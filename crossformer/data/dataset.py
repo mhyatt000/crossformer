@@ -6,6 +6,7 @@ from typing import Callable, Mapping, Sequence
 
 from absl import logging
 import dlimp as dl
+import jax
 import numpy as np
 import tensorflow as tf
 import tensorflow_datasets as tfds
@@ -19,7 +20,6 @@ from crossformer.data.utils.data_utils import (
     normalize_action_and_proprio,
     pprint_data_mixture,
     sample_match_keys_uniform,
-    tree_map,
 )
 from crossformer.utils.spec import ModuleSpec
 
@@ -422,7 +422,8 @@ def make_dataset_from_rlds(
             save_dir=builder.data_dir,
             force_recompute=force_recompute_dataset_statistics,
         )
-    dataset_statistics = tree_map(np.array, dataset_statistics)
+    is_leaf = lambda x: not isinstance(x, dict)
+    dataset_statistics = jax.tree.map(np.array, dataset_statistics, is_leaf=is_leaf)
 
     # skip normalization for certain action dimensions
     if action_normalization_mask is not None:
