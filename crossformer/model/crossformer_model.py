@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from functools import partial
 import json
 import logging
@@ -11,19 +13,17 @@ from jax.experimental import multihost_utils
 import jax.numpy as jnp
 from jax.typing import ArrayLike
 import numpy as np
+from orbax import checkpoint as ocp
 import orbax.checkpoint
+from rich.pretty import pprint
 import tensorflow as tf
 
 from crossformer.data.utils.data_utils import NormalizationType
 from crossformer.data.utils.text_processing import TextProcessor
 from crossformer.model.components.action_heads import ActionHead
 from crossformer.model.crossformer_module import CrossFormerModule
-from crossformer.utils.spec import ModuleSpec
-from crossformer.utils.typing import Config
-from crossformer.utils.typing import Data
-from crossformer.utils.typing import Params
-from crossformer.utils.typing import PRNGKey
-from crossformer.utils.typing import Sequence
+from crossformer.utils.spec import ModuleSpec, spec
+from crossformer.utils.typing import Config, Data, Params, PRNGKey, Sequence
 
 
 @struct.dataclass
@@ -77,9 +77,7 @@ class CrossFormerModel:
     example_batch: Data
     dataset_statistics: Data | None
 
-    def create_tasks(
-        self, goals: Data | None = None, texts: Sequence[str] | None = None
-    ):
+    def create_tasks(self, goals: Data | None = None, texts: Sequence[str] | None = None):
         """Creates tasks dict from goals and texts.
 
         Args:
@@ -93,9 +91,7 @@ class CrossFormerModel:
         tasks = {"pad_mask_dict": {}}
         if goals is not None:
             tasks.update(goals)
-            tasks["pad_mask_dict"].update(
-                {k: np.ones(v.shape[:1], dtype=bool) for k, v in goals.items()}
-            )
+            tasks["pad_mask_dict"].update({k: np.ones(v.shape[:1], dtype=bool) for k, v in goals.items()})
         else:
             batch_size = len(texts)
             tasks.update(
@@ -105,31 +101,19 @@ class CrossFormerModel:
                     if k not in ("pad_mask_dict", "language_instruction")
                 }
             )
-            tasks["pad_mask_dict"].update(
-                {
-                    k: np.zeros(batch_size, dtype=bool)
-                    for k in tasks
-                    if k != "pad_mask_dict"
-                }
-            )
+            tasks["pad_mask_dict"].update({k: np.zeros(batch_size, dtype=bool) for k in tasks if k != "pad_mask_dict"})
 
         if texts is not None:
             assert self.text_processor is not None
             tasks["language_instruction"] = texts
-            tasks["pad_mask_dict"]["language_instruction"] = np.ones(
-                len(texts), dtype=bool
-            )
+            tasks["pad_mask_dict"]["language_instruction"] = np.ones(len(texts), dtype=bool)
         else:
             batch_size = jax.tree_leaves(goals)[0].shape[0]
             tasks["language_instruction"] = [""] * batch_size
-            tasks["pad_mask_dict"]["language_instruction"] = np.zeros(
-                batch_size, dtype=bool
-            )
+            tasks["pad_mask_dict"]["language_instruction"] = np.zeros(batch_size, dtype=bool)
 
         if self.text_processor is not None:
-            tasks["language_instruction"] = self.text_processor.encode(
-                tasks["language_instruction"]
-            )
+            tasks["language_instruction"] = self.text_processor.encode(tasks["language_instruction"])
         else:
             del tasks["language_instruction"]
 
@@ -206,12 +190,8 @@ class CrossFormerModel:
         if timestep_pad_mask is None:
             timestep_pad_mask = observations["timestep_pad_mask"]
 
-        transformer_outputs = self.run_transformer(
-            observations, tasks, timestep_pad_mask, train=train
-        )
-        action_head: ActionHead = self.module.bind({"params": self.params}).heads[
-            head_name
-        ]
+        transformer_outputs = self.run_transformer(observations, tasks, timestep_pad_mask, train=train)
+        action_head: ActionHead = self.module.bind({"params": self.params}).heads[head_name]
         action = action_head.predict_action(
             transformer_outputs,
             train=train,
@@ -220,9 +200,7 @@ class CrossFormerModel:
             rng=rng,
             temperature=temperature,
             embodiment_action_dim=(
-                len(unnormalization_statistics["mean"])
-                if unnormalization_statistics is not None
-                else None
+                len(unnormalization_statistics["mean"]) if unnormalization_statistics is not None else None
             ),
         )
         if unnormalization_statistics is not None:
@@ -234,8 +212,7 @@ class CrossFormerModel:
                 action = action[..., : len(mask)]
                 action = jnp.where(
                     mask,
-                    (action * unnormalization_statistics["std"])
-                    + unnormalization_statistics["mean"],
+                    (action * unnormalization_statistics["std"]) + unnormalization_statistics["mean"],
                     action,
                 )
             elif normalization_type == NormalizationType.BOUNDS:
@@ -245,12 +222,7 @@ class CrossFormerModel:
                 action = action[..., : len(mask)]
                 action = jnp.where(
                     mask,
-                    (action + 1)
-                    * (
-                        unnormalization_statistics["p99"]
-                        - unnormalization_statistics["p01"]
-                    )
-                    / 2
+                    (action + 1) * (unnormalization_statistics["p99"] - unnormalization_statistics["p01"]) / 2
                     + unnormalization_statistics["p01"],
                     action,
                 )
@@ -263,7 +235,7 @@ class CrossFormerModel:
         cls,
         checkpoint_path: str,
         step: int | None = None,
-    ) -> "CrossFormerModel":
+    ) -> CrossFormerModel:
         """Loads a model from a checkpoint that was saved via `save_pretrained`.
 
         Args:
@@ -272,44 +244,30 @@ class CrossFormerModel:
         """
         if checkpoint_path.startswith("hf://"):
             if step:
-                raise ValueError(
-                    "You can't set config['pretrained_step'] when loading from HuggingFace."
-                )
-            checkpoint_path = _download_from_huggingface(
-                checkpoint_path.removeprefix("hf://")
-            )
+                raise ValueError("You can't set config['pretrained_step'] when loading from HuggingFace.")
+            checkpoint_path = _download_from_huggingface(checkpoint_path.removeprefix("hf://"))
 
         # load config
-        with tf.io.gfile.GFile(
-            tf.io.gfile.join(checkpoint_path, "config.json"), "r"
-        ) as f:
+        with tf.io.gfile.GFile(tf.io.gfile.join(checkpoint_path, "config.json"), "r") as f:
             config = json.load(f)
 
         # load example batch
-        with tf.io.gfile.GFile(
-            tf.io.gfile.join(checkpoint_path, "example_batch.msgpack"), "rb"
-        ) as f:
+        with tf.io.gfile.GFile(tf.io.gfile.join(checkpoint_path, "example_batch.msgpack"), "rb") as f:
             example_batch = flax.serialization.msgpack_restore(f.read())
 
         logging.debug(
             "Model was trained with observations: %s",
-            flax.core.pretty_repr(
-                jax.tree_map(jnp.shape, example_batch["observation"])
-            ),
+            flax.core.pretty_repr(jax.tree.map(jnp.shape, example_batch["observation"])),
         )
         logging.debug(
             "Model was trained with tasks: %s",
-            flax.core.pretty_repr(jax.tree_map(jnp.shape, example_batch["task"])),
+            flax.core.pretty_repr(jax.tree.map(jnp.shape, example_batch["task"])),
         )
 
         # load dataset statistics
-        with tf.io.gfile.GFile(
-            tf.io.gfile.join(checkpoint_path, "dataset_statistics.json"), "r"
-        ) as f:
+        with tf.io.gfile.GFile(tf.io.gfile.join(checkpoint_path, "dataset_statistics.json"), "r") as f:
             dataset_statistics = json.load(f)
-            dataset_statistics = jax.tree_map(
-                np.array, dataset_statistics, is_leaf=lambda x: not isinstance(x, dict)
-            )
+            dataset_statistics = jax.tree.map(np.array, dataset_statistics, is_leaf=lambda x: not isinstance(x, dict))
 
         # create model def (a CrossFormerModule)
         module = CrossFormerModule.create(**config["model"])
@@ -320,9 +278,7 @@ class CrossFormerModel:
             example_batch["task"],
             example_batch["observation"]["timestep_pad_mask"],
         )
-        params_shape = jax.eval_shape(
-            partial(module.init, train=False), jax.random.PRNGKey(0), *init_args
-        )["params"]
+        params_shape = jax.eval_shape(partial(module.init, train=False), jax.random.PRNGKey(0), *init_args)["params"]
 
         """ original
         # restore params, checking to make sure the shape matches
@@ -344,7 +300,7 @@ class CrossFormerModel:
             params = manager.restore(
                 step,
                 restore_kwargs={
-                    "restore_args": jax.tree_map(
+                    "restore_args": jax.tree.map(
                         lambda _: ocp.RestoreArgs(restore_type=np.ndarray), structure
                     )
                 },
@@ -356,9 +312,8 @@ class CrossFormerModel:
 
         # use new orbax API for flexible restore
         # beware rough edges
-        from orbax import checkpoint as ocp
 
-        target = jax.tree_util.tree_map(jnp.zeros_like, params_shape)
+        target = jax.tree.map(jnp.zeros_like, params_shape)
         sharding = jax.sharding.NamedSharding(
             jax.sharding.Mesh(jax.devices(), ("model",)),
             jax.sharding.PartitionSpec(
@@ -372,7 +327,7 @@ class CrossFormerModel:
 
         manager = ocp.CheckpointManager(checkpoint_path, ocp.StandardCheckpointer())
         # structure = manager.item_metadata(step)
-        # target = jax.tree_util.tree_map(lambda x: np.zeros(x.shape), structure)
+        # target = jax.tree.map(lambda x: np.zeros(x.shape), structure)
         params = manager.restore(step, args=ocp.args.StandardRestore(abstract))
 
         """ this is original from crossformer... has problem with 4gpu->2gpu server
@@ -417,9 +372,7 @@ class CrossFormerModel:
             params (optional): Params to save. If None, uses self.params.
         """
         if (checkpoint_path is None) == (checkpoint_manager is None):
-            raise ValueError(
-                "Must provide exactly one of checkpoint_path or checkpoint_manager."
-            )
+            raise ValueError("Must provide exactly one of checkpoint_path or checkpoint_manager.")
         if checkpoint_manager is None:
             checkpoint_manager = orbax.checkpoint.CheckpointManager(
                 checkpoint_path, orbax.checkpoint.PyTreeCheckpointer()
@@ -442,21 +395,17 @@ class CrossFormerModel:
                     json.dump(self.config, f)
 
             # save example batch
-            example_batch_path = tf.io.gfile.join(
-                checkpoint_path, "example_batch.msgpack"
-            )
+            example_batch_path = tf.io.gfile.join(checkpoint_path, "example_batch.msgpack")
             if not tf.io.gfile.exists(example_batch_path):
                 with tf.io.gfile.GFile(example_batch_path, "wb") as f:
                     f.write(flax.serialization.msgpack_serialize(self.example_batch))
 
             # save dataset statistics
-            dataset_statistics_path = tf.io.gfile.join(
-                checkpoint_path, "dataset_statistics.json"
-            )
+            dataset_statistics_path = tf.io.gfile.join(checkpoint_path, "dataset_statistics.json")
             if not tf.io.gfile.exists(dataset_statistics_path):
                 with tf.io.gfile.GFile(dataset_statistics_path, "w") as f:
                     json.dump(
-                        jax.tree_map(lambda x: x.tolist(), self.dataset_statistics),
+                        jax.tree.map(lambda x: x.tolist(), self.dataset_statistics),
                         f,
                     )
 
@@ -484,12 +433,8 @@ class CrossFormerModel:
         module = CrossFormerModule.create(**config["model"])
         rng = rng if rng is not None else jax.random.PRNGKey(0)
         example_batch = multihost_utils.process_allgather(example_batch)
-        example_batch = jax.tree_map(lambda x: x[0][:1], example_batch)
+        example_batch = jax.tree.map(lambda x: x[0][:1], example_batch)
 
-        from orbax import checkpoint as ocp
-        from rich.pretty import pprint
-
-        spec = lambda tree: jax.tree.map(ocp.utils.to_shape_dtype_struct, tree)
         pprint(spec(example_batch))
 
         init_args = (
@@ -555,17 +500,14 @@ def _verify_shapes(
         k: f"{pytree_flat[k].shape} != {example_pytree_flat[k].shape}"
         for k in pytree_flat
         if k in example_pytree_flat
-        and pytree_flat[k].shape[starting_dim:]
-        != example_pytree_flat[k].shape[starting_dim:]
+        and pytree_flat[k].shape[starting_dim:] != example_pytree_flat[k].shape[starting_dim:]
     }
     if mismatched_keys:
         if not silent:
             logging.error(
                 "'%s' contains mismatched shapes compared to example_batch: %s",
                 name,
-                flax.core.pretty_repr(
-                    {"/".join(k): v for k, v in mismatched_keys.items()}
-                ),
+                flax.core.pretty_repr({"/".join(k): v for k, v in mismatched_keys.items()}),
             )
         fail = True
 

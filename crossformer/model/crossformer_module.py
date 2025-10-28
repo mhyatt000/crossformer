@@ -122,17 +122,13 @@ class CrossFormerTransformer(nn.Module):
         # Check that all inputs are valid
         #
 
-        assert set(readouts).issubset(set(self.readouts.keys())), (
-            "readouts must be specified in the model config"
-        )
+        assert set(readouts).issubset(set(self.readouts.keys())), "readouts must be specified in the model config"
 
         batch_size, horizon = jax.tree_util.tree_leaves(observations)[0].shape[:2]
-        assert horizon <= self.max_horizon, (
-            f"horizon must be <= max_horizon - {horizon} <= {self.max_horizon}"
+        assert horizon <= self.max_horizon, f"horizon must be <= max_horizon - {horizon} <= {self.max_horizon}"
+        assert jax.tree_util.tree_all(jax.tree.map(lambda x: x.shape[1] == horizon, observations)), (
+            "observations must have the same horizon"
         )
-        assert jax.tree_util.tree_all(
-            jax.tree_map(lambda x: x.shape[1] == horizon, observations)
-        ), "observations must have the same horizon"
 
         #
         # Attention rules for the transformer
@@ -168,9 +164,7 @@ class CrossFormerTransformer(nn.Module):
                 logging.warning(f"Skipping task tokenizer: {group_name}")
                 continue
 
-            task_tokens = nn.Dense(
-                self.token_embedding_size, name=f"{group_name}_projection"
-            )(tokenizer_output.tokens)
+            task_tokens = nn.Dense(self.token_embedding_size, name=f"{group_name}_projection")(tokenizer_output.tokens)
             # task_tokens shape is (batch, n_tokens, token_embedding_size)
 
             # create positional embedding
@@ -198,18 +192,14 @@ class CrossFormerTransformer(nn.Module):
                 logging.warning(f"Skipping observation tokenizer: {group_name}")
                 continue
 
-            obs_tokens = nn.Dense(
-                self.token_embedding_size, name=f"{group_name}_projection"
-            )(tokenizer_output.tokens)
+            obs_tokens = nn.Dense(self.token_embedding_size, name=f"{group_name}_projection")(tokenizer_output.tokens)
             # obs_tokens shape is (batch, horizon, n_tokens, token_embedding_size)
 
             # create positional embedding
             obs_pos_enc = self._create_positional_embedding(group_name, obs_tokens)
 
             # Update mask to account for which timesteps are padding
-            obs_pad_mask = jnp.logical_and(
-                timestep_pad_mask[:, :, None], tokenizer_output.mask
-            )
+            obs_pad_mask = jnp.logical_and(timestep_pad_mask[:, :, None], tokenizer_output.mask)
 
             all_timestep_groups.append(
                 TimestepGroup(
@@ -221,9 +211,7 @@ class CrossFormerTransformer(nn.Module):
                 )
             )
         if self.repeat_task_tokens:
-            logging.info(
-                "repeating task tokens at each timestep to perform cross-modal attention"
-            )
+            logging.info("repeating task tokens at each timestep to perform cross-modal attention")
             # get task tokens
             for tasks in all_prefix_groups:
                 # lang (batch, n_tokens, token_embedding_size)
@@ -254,14 +242,10 @@ class CrossFormerTransformer(nn.Module):
             group_name = f"readout_{readout_name}"
             # Readouts do not correspond to any inputs, just positional embeddings
             n_tokens_for_readout = self.readouts[readout_name]
-            readout_tokens = jnp.zeros(
-                (batch_size, horizon, n_tokens_for_readout, self.token_embedding_size)
-            )
+            readout_tokens = jnp.zeros((batch_size, horizon, n_tokens_for_readout, self.token_embedding_size))
 
             # create positional embedding
-            readout_pos_enc = self._create_positional_embedding(
-                group_name, readout_tokens
-            )
+            readout_pos_enc = self._create_positional_embedding(group_name, readout_tokens)
             readout_mask = jnp.ones((batch_size, horizon, n_tokens_for_readout))
             readout_attention_rules = {
                 "task_*": AttentionRule.CAUSAL,
@@ -314,30 +298,14 @@ class CrossFormerTransformer(nn.Module):
         )
 
         outputs = {}
-        outputs.update(
-            {
-                group.name: TokenGroup(group.tokens, group.mask)
-                for group in prefix_outputs
-            }
-        )
-        outputs.update(
-            {
-                group.name: TokenGroup(group.tokens, group.mask)
-                for group in timestep_outputs
-            }
-        )
+        outputs.update({group.name: TokenGroup(group.tokens, group.mask) for group in prefix_outputs})
+        outputs.update({group.name: TokenGroup(group.tokens, group.mask) for group in timestep_outputs})
 
         if len(prefix_outputs) > 0:
-            outputs["task"] = TokenGroup.concatenate(
-                [TokenGroup(group.tokens, group.mask) for group in prefix_outputs]
-            )
+            outputs["task"] = TokenGroup.concatenate([TokenGroup(group.tokens, group.mask) for group in prefix_outputs])
 
         outputs["obs"] = TokenGroup.concatenate(
-            [
-                TokenGroup(group.tokens, group.mask)
-                for group in timestep_outputs
-                if group.name.startswith("obs_")
-            ],
+            [TokenGroup(group.tokens, group.mask) for group in timestep_outputs if group.name.startswith("obs_")],
             axis=-2,
         )
 
@@ -346,9 +314,7 @@ class CrossFormerTransformer(nn.Module):
     def _create_positional_embedding(self, name: str, tokens: jax.Array):
         if tokens.ndim == 3:  # for prefixes
             shape = (1, *tokens.shape[-2:])
-        elif (
-            tokens.ndim == 4
-        ):  # for timesteps, create embedding for max_horizon, then truncate
+        elif tokens.ndim == 4:  # for timesteps, create embedding for max_horizon, then truncate
             shape = (1, self.max_horizon, *tokens.shape[-2:])
         else:
             raise ValueError(f"Invalid tokens shape: {tokens.shape}")
@@ -372,9 +338,7 @@ class CrossFormerModule(nn.Module):
     crossformer_transformer: CrossFormerTransformer
     heads: dict[str, nn.Module]
 
-    def __call__(
-        self, observations, tasks, timestep_pad_mask, train=True, verbose=False
-    ):
+    def __call__(self, observations, tasks, timestep_pad_mask, train=True, verbose=False):
         """Run transformer and the main method for all heads. Useful for init.
 
         Args:
@@ -430,13 +394,8 @@ class CrossFormerModule(nn.Module):
                 attention_dropout_rate (float): dropout rate in self attention.
         """
 
-        observation_tokenizer_defs = {
-            k: ModuleSpec.instantiate(spec)()
-            for k, spec in observation_tokenizers.items()
-        }
-        task_tokenizer_defs = {
-            k: ModuleSpec.instantiate(spec)() for k, spec in task_tokenizers.items()
-        }
+        observation_tokenizer_defs = {k: ModuleSpec.instantiate(spec)() for k, spec in observation_tokenizers.items()}
+        task_tokenizer_defs = {k: ModuleSpec.instantiate(spec)() for k, spec in task_tokenizers.items()}
 
         head_defs = {k: ModuleSpec.instantiate(spec)() for k, spec in heads.items()}
 
