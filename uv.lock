@@ -12,6 +12,9 @@ resolution-markers = [
     "python_full_version < '3.12' and sys_platform != 'linux'",
 ]
 
+[manifest]
+overrides = [{ name = "tensorflow", specifier = ">=2.15.0" }]
+
 [[package]]
 name = "absl-py"
 version = "2.3.1"
@@ -545,6 +548,7 @@ dependencies = [
     { name = "readerwriterlock" },
     { name = "robot-descriptions" },
     { name = "scipy" },
+    { name = "tensorflow" },
     { name = "tensorflow-datasets" },
     { name = "tensorflow-graphics" },
     { name = "tensorflow-hub" },
@@ -577,7 +581,7 @@ requires-dist = [
     { name = "augmax", specifier = ">=0.4.1" },
     { name = "chex", specifier = ">=0.1.85" },
     { name = "distrax", specifier = "==0.1.5" },
-    { name = "dlimp", editable = "../dlimp" },
+    { name = "dlimp", git = "https://github.com/kvablack/dlimp.git?rev=main" },
     { name = "einops", specifier = ">=0.6.1" },
     { name = "flax", specifier = ">=0.7.5" },
     { name = "grain-nightly", specifier = ">=0.2.14.dev20251027" },
@@ -606,6 +610,7 @@ requires-dist = [
     { name = "readerwriterlock", specifier = ">=1.0.9" },
     { name = "robot-descriptions", specifier = ">=1.21.0" },
     { name = "scipy", specifier = ">=1.12.0" },
+    { name = "tensorflow", specifier = ">=2.15.0" },
     { name = "tensorflow-datasets", specifier = "==4.9.2" },
     { name = "tensorflow-graphics", specifier = "==2021.12.3" },
     { name = "tensorflow-hub", specifier = ">=0.14.0" },
@@ -679,21 +684,11 @@ wheels = [
 [[package]]
 name = "dlimp"
 version = "0.0.1"
-source = { editable = "../dlimp" }
+source = { git = "https://github.com/kvablack/dlimp.git?rev=main#5edaa4691567873d495633f2708982b42edf1972" }
 dependencies = [
     { name = "tensorflow" },
     { name = "tensorflow-datasets" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "pre-commit", marker = "extra == 'dev'", specifier = "==3.3.3" },
-    { name = "tensorflow", specifier = ">=2.15.0" },
-    { name = "tensorflow-datasets", specifier = ">=4.9.2" },
-    { name = "tqdm", marker = "extra == 'convert'" },
-    { name = "tqdm-multiprocess", marker = "extra == 'convert'", specifier = "==0.0.11" },
-]
-provides-extras = ["convert", "dev"]
 
 [[package]]
 name = "dm-tree"
