@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from collections.abc import Callable, Iterable, Iterator
 from functools import partial
 import hashlib
@@ -72,7 +74,7 @@ def unpack_record(buf: bytes) -> Any:
 
 
 def _meta_path(root: Path, name: str) -> Path:
-    return root / name / "meta.json"
+    return root / "meta.json"
 
 
 def _shard_glob(root: Path, name: str) -> str:
@@ -80,7 +82,7 @@ def _shard_glob(root: Path, name: str) -> str:
 
 
 def _shard_path(root: Path, name: str, idx: int) -> Path:
-    return root / name / f"data-{idx:05d}.arrayrecord"
+    return root / f"data-{idx:05d}.arrayrecord"
 
 
 def _atomic_write_json(path: Path, obj: dict[str, Any]) -> None:
@@ -143,6 +145,7 @@ class ArrayRecordBuilder:
     ):
         self.name = name
         self.root = Path(root).expanduser()
+        Path(self.root).mkdir(parents=True, exist_ok=True)
         self.version = version
         self.shard_size = int(shard_size)
         self.writer_options = writer_options
@@ -165,11 +168,9 @@ class ArrayRecordBuilder:
 
         fp = _schema_fingerprint(self.version, self.build_meta)
         # shards = sorted(Path().glob(_shard_glob(self.root, self.name)))
-        shards = sorted(self.root.joinpath(self.name).glob("data-*.arrayrecord"))
+        shards = sorted(self.root.glob("data-*.arrayrecord"))
 
-        needs_build = (
-            existing is None or existing.get("schema_fingerprint") != fp or not shards
-        )
+        needs_build = (not existing) or existing.get("schema_fingerprint") != fp or not shards
 
         if needs_build:
             self._build_from_stream(build_fn)
@@ -207,14 +208,12 @@ class ArrayRecordBuilder:
 
     def spec(self, arr) -> Spec:
         return jax.tree.map(
-            lambda x: (x.shape, x.dtype.name)
-            if hasattr(x, "shape")
-            else type(x).__name__,
+            lambda x: (x.shape, x.dtype.name) if hasattr(x, "shape") else type(x).__name__,
             arr,
         )
 
     def _build_from_stream(self, build_fn: Callable[[], Iterable[Any]]) -> None:
-        root = self.root / self.name
+        root = self.root
         root.mkdir(parents=True, exist_ok=True)
 
         t0 = time.time()
@@ -272,11 +271,9 @@ class ArrayRecordBuilder:
         if self._ds is not None:
             return
         # shard_paths = sorted(Path().glob(_shard_glob(self.root, self.name)))
-        shard_paths = sorted((self.root / self.name).glob("data-*.arrayrecord"))
+        shard_paths = sorted((self.root).glob("data-*.arrayrecord"))
         if not shard_paths:
-            raise FileNotFoundError(
-                f"No ArrayRecord shards found under {self.root / self.name}."
-            )
+            raise FileNotFoundError(f"No ArrayRecord shards found under {self.root}.")
         self._ds = ArrayRecordDataSource([str(p) for p in shard_paths])
         if self._meta is None:
             # best-effort: reconstruct minimal meta
@@ -316,9 +313,7 @@ def stream_tiny(total=250, shape=(128,)):
 
 
 class ChunkedIndexSampler(grain.Sampler):
-    def __init__(
-        self, num_records: int, chunk: int = 16384, shuffle: bool = False, seed: int = 0
-    ):
+    def __init__(self, num_records: int, chunk: int = 16384, shuffle: bool = False, seed: int = 0):
         self._n = num_records
         self._chunk = int(chunk)
         self._shuffle = shuffle
@@ -357,6 +352,17 @@ def build_fn_per_step(*, episodes=None, fn=None):
         for s, step in enumerate(ep):
             rec = {"episode_id": ep_id, "step_id": s, **step}
             yield rec
+
+
+stackem = lambda *xs: jax.tree.map(lambda *ys: np.stack(ys), *xs)
+
+
+def build_fn_per_episode(*, episodes=None, fn=None):
+    assert episodes or fn
+    iter = episodes if episodes else fn()
+    for ep_id, ep in enumerate(iter):
+        rec = {"episode_id": ep_id, **stackem(*ep)}
+        yield rec
 
 
 def random_episodes(
@@ -441,15 +447,11 @@ def main():
     index_sampler_example = grain.IndexSampler(
         num_records=len(ds),
         num_epochs=1,
-        shard_options=grain.ShardOptions(
-            shard_index=0, shard_count=1, drop_remainder=True
-        ),
+        shard_options=grain.ShardOptions(shard_index=0, shard_count=1, drop_remainder=True),
         shuffle=False,
         seed=0,
     )
-    chunked_sampler = ChunkedIndexSampler(
-        num_records=len(ds), chunk=16384, shuffle=False, seed=0
-    )
+    chunked_sampler = ChunkedIndexSampler(num_records=len(ds), chunk=16384, shuffle=False, seed=0)
 
     """
     3) Tune knobs (quick wins)

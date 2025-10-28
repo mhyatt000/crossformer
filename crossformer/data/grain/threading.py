@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 import grain.python as gp
 
 
 def create_read_options(
     *,
-    num_threads: Optional[int] = None,
-    prefetch_buffer_size: Optional[int] = None,
+    num_threads: int | None = None,
+    prefetch_buffer_size: int | None = None,
 ) -> gp.ReadOptions:
     """Constructs :class:`grain.python.ReadOptions` with partial overrides."""
 
@@ -24,8 +22,8 @@ def create_read_options(
 
 def create_multiprocessing_options(
     *,
-    num_workers: Optional[int] = None,
-    per_worker_buffer_size: Optional[int] = None,
+    num_workers: int | None = None,
+    per_worker_buffer_size: int | None = None,
     enable_profiling: bool = False,
 ) -> gp.MultiprocessingOptions:
     """Creates :class:`grain.python.MultiprocessingOptions` with overrides."""
@@ -37,4 +35,3 @@ def create_multiprocessing_options(
         options.per_worker_buffer_size = int(per_worker_buffer_size)
     options.enable_profiling = enable_profiling
     return options
-

@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 import grain.python as gp
 
 
 def create_shard_options(
     *,
-    shard_count: Optional[int] = None,
-    shard_index: Optional[int] = None,
+    shard_count: int | None = None,
+    shard_index: int | None = None,
     drop_remainder: bool = False,
     use_jax_process: bool = False,
 ) -> gp.ShardOptions:
@@ -28,4 +26,3 @@ def create_shard_options(
         shard_count=int(shard_count),
         drop_remainder=drop_remainder,
     )
-

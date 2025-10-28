@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from functools import partial
 import hashlib
 import json
 import logging
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
+import grain
+import jax
+import jax.numpy as jnp
 import numpy as np
+from tqdm import tqdm
 
-from crossformer.data.grain import utils
+from crossformer.utils.jax_utils import cpu, with_device_context
+from crossformer.utils.typing import Data
 
 log = logging.getLogger(__name__)
 
@@ -20,32 +26,32 @@ EPS = 1e-8
 
 @dataclass
 class ArrayStatistics:
-    mean: np.ndarray
-    std: np.ndarray
-    maximum: np.ndarray
-    minimum: np.ndarray
-    p99: np.ndarray
-    p01: np.ndarray
+    mean: jax.Array
+    std: jax.Array
+    maximum: jax.Array
+    minimum: jax.Array
+    p99: jax.Array
+    p01: jax.Array
 
     def to_json(self) -> dict:
-        return {
-            "mean": self.mean.tolist(),
-            "std": self.std.tolist(),
-            "max": self.maximum.tolist(),
-            "min": self.minimum.tolist(),
-            "p99": self.p99.tolist(),
-            "p01": self.p01.tolist(),
-        }
+        return jax.tree.map(lambda x: x.tolist(), asdict(self))
 
     @classmethod
     def from_json(cls, data: Mapping[str, Sequence[float]]) -> ArrayStatistics:
+        arr = partial(jnp.array, device=cpu)
+        s = jax.tree.map(arr, data, is_leaf=lambda x: not isinstance(x, Mapping))
+        s = jax.tree.map(jax.device_get, s)
+        return cls(**s)
+
+    @classmethod
+    def compute(cls, arr: np.ndarray) -> ArrayStatistics:
         return cls(
-            mean=np.asarray(data["mean"], dtype=np.float32),
-            std=np.asarray(data["std"], dtype=np.float32),
-            maximum=np.asarray(data["max"], dtype=np.float32),
-            minimum=np.asarray(data["min"], dtype=np.float32),
-            p99=np.asarray(data["p99"], dtype=np.float32),
-            p01=np.asarray(data["p01"], dtype=np.float32),
+            mean=arr.mean(axis=0),
+            std=arr.std(axis=0),
+            maximum=arr.max(axis=0),
+            minimum=arr.min(axis=0),
+            p99=jnp.quantile(arr, 0.99, axis=0),
+            p01=jnp.quantile(arr, 0.01, axis=0),
         )
 
 
@@ -59,7 +65,7 @@ class DatasetStatistics:
     def to_json(self) -> dict:
         return {
             "action": self.action.to_json(),
-            "proprio": {k: v.to_json() for k, v in self.proprio.items()},
+            "proprio": jax.tree.map(lambda x: x.to_json(), self.proprio),
             "num_transitions": self.num_transitions,
             "num_trajectories": self.num_trajectories,
         }
@@ -83,73 +89,76 @@ class NormalizationType(str):
     BOUNDS = "bounds"
 
 
-def _stats_from_array(array: np.ndarray) -> ArrayStatistics:
-    return ArrayStatistics(
-        mean=array.mean(axis=0),
-        std=array.std(axis=0),
-        maximum=array.max(axis=0),
-        minimum=array.min(axis=0),
-        p99=np.quantile(array, 0.99, axis=0),
-        p01=np.quantile(array, 0.01, axis=0),
-    )
-
-
 def _cache_path(hash_dependencies: Iterable[str], save_dir: str | Path | None) -> Path:
     key = "".join(hash_dependencies).encode("utf-8")
     unique_hash = hashlib.sha256(key, usedforsecurity=False).hexdigest()
     if save_dir is not None:
         return Path(save_dir) / f"dataset_statistics_{unique_hash}.json"
-    cache_dir = Path.home() / ".cache" / "crossformer"
+    cache_dir = Path.home() / ".cache" / "arrayrecords"
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir / f"dataset_statistics_{unique_hash}.json"
 
 
 def compute_dataset_statistics(
-    trajectories: Iterable[dict],
+    ds: Data,
     *,
     proprio_keys: Sequence[str],
     hash_dependencies: Sequence[str],
     save_dir: str | Path | None = None,
     force_recompute: bool = False,
 ) -> DatasetStatistics:
-    """Computes statistics for trajectories or loads cached values."""
+    """Computes statistics for steps or loads cached values."""
 
-    log.debug("checking cache for stats")
+    log.info(f"checking cache for stats {save_dir}")
     cache_path = _cache_path(hash_dependencies, save_dir)
     if cache_path.exists() and not force_recompute:
-        log.debug("they were in the cache")
+        log.info("they were in the cache")
         with cache_path.open("r") as f:
             return DatasetStatistics.from_json(json.load(f))
-    log.debug("no stats found in cache")
+    log.info("no stats found in cache")
 
     actions = []
     proprio: dict[str, list[np.ndarray]] = {key: [] for key in proprio_keys}
     num_transitions = 0
-    num_trajectories = 0
 
-    for traj in trajectories:
-        action = utils.ensure_numpy(traj["action"]).astype(np.float32)
-        actions.append(action)
-        num_transitions += action.shape[0]
-        num_trajectories += 1
-        obs = traj.get("observation", {})
-        _p = obs.get("proprio", {})
-        for key in proprio_keys:
-            if key in proprio:
-                proprio[key].append(utils.ensure_numpy(_p[key]).astype(np.float32))
+    # assumes you can have it all in RAM
+    # but we can
+    # items: list[Data]= list(ds)
+    N = int(ds[-1]["info"]["id"]["episode_id"] + 1)
+    assert N, "No steps found in dataset."
+    t = len(ds)
 
-    if not actions:
-        raise ValueError("Cannot compute statistics from an empty dataset.")
-    action_array = np.concatenate(actions, axis=0)
-    proprio_stats = {
-        key: _stats_from_array(np.concatenate(values, axis=0)) for key, values in proprio.items() if values
-    }
-    stats = DatasetStatistics(
-        action=_stats_from_array(action_array),
-        proprio=proprio_stats,
-        num_transitions=num_transitions,
-        num_trajectories=num_trajectories,
+    _bs = 1  # 1024
+    mpds = (
+        ds.to_iter_dataset(grain.ReadOptions(num_threads=16, prefetch_buffer_size=512))
+        # .batch(_bs)
+        .mp_prefetch(grain.MultiprocessingOptions(num_workers=32))
     )
+
+    def take_keys(x):
+        return {k: v for k, v in x.items() if k == "action" or k == "observation"}
+
+    mpds = mpds.map(take_keys)
+
+    mpit = iter(mpds)
+    trees = list(tqdm(mpit, desc="Computing ds stats...", total=t // _bs))
+    # trees = [next(mpit) for _ in tqdm(range(2), desc="Computing ds stats...", total=t)]
+
+    trees = jax.tree.map(lambda *a: jnp.concatenate([*a], axis=0), *trees)
+    # trees = jax.tree.map(lambda *a: jnp.stack([*a], axis=0), *trees)
+
+    actions = trees["action"]
+    assert t, "No transitions found in dataset."
+
+    proprio = trees["observation"]["proprio"]
+
+    stats = DatasetStatistics(
+        action=ArrayStatistics.compute(actions),
+        proprio=jax.tree.map(ArrayStatistics.compute, proprio),
+        num_transitions=N,
+        num_trajectories=t,
+    )
+
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     with cache_path.open("w") as f:
         json.dump(stats.to_json(), f)
@@ -157,49 +166,57 @@ def compute_dataset_statistics(
 
 
 def normalize_action_and_proprio(
-    traj: dict,
+    step: dict,
     *,
     metadata: DatasetStatistics,
     normalization_type: str,
     proprio_keys: Sequence[str],
     action_mask: Sequence[bool] | None = None,
     skip_norm_keys: Sequence[str] = (),
+    device: jax.Device | None = cpu,
 ) -> dict:
     """Normalizes actions and proprioceptive observations."""
 
-    traj = utils.clone_structure(traj)
-    action = utils.ensure_numpy(traj["action"]).astype(np.float32)
+    @with_device_context(device)
+    def maximum(x, y):
+        return jnp.maximum(x, y)
+
+    @with_device_context(device)
+    def where(cond, x, y):
+        return jnp.where(cond, x, y)
+
+    action = step["action"]
     if normalization_type == NormalizationType.NORMAL:
         mean = metadata.action.mean
-        std = np.maximum(metadata.action.std, EPS)
+        std = maximum(metadata.action.std, EPS)
         normalized = (action - mean) / std
     elif normalization_type == NormalizationType.BOUNDS:
-        span = np.maximum(metadata.action.maximum - metadata.action.minimum, EPS)
+        span = maximum(metadata.action.maximum - metadata.action.minimum, EPS)
         normalized = 2.0 * (action - metadata.action.minimum) / span - 1.0
     else:
         raise ValueError(f"Unknown normalization type: {normalization_type}")
 
     if action_mask is not None:
-        action_mask_array = np.asarray(action_mask, dtype=bool)
+        action_mask_array = jnp.array(action_mask, dtype=bool, device=device)
         if action_mask_array.shape[-1] != normalized.shape[-1]:
             raise ValueError("Length of action mask does not match action dimension.")
-        normalized = np.where(action_mask_array, normalized, action)
-    traj["action"] = normalized
+        normalized = jax.device_put(jnp.where(action_mask_array, normalized, action), device)
+    step["action"] = normalized
 
-    obs = utils.as_dict(traj.get("observation"))
+    obs = step.get("observation")
     for key in proprio_keys:
         if key not in obs or key in skip_norm_keys:
             continue
         if key not in metadata.proprio:
             continue
-        value = utils.ensure_numpy(obs[key]).astype(np.float32)
+        value = obs[key]
         stats = metadata.proprio[key]
         if normalization_type == NormalizationType.NORMAL:
             mean = stats.mean
-            std = np.maximum(stats.std, EPS)
+            std = maximum(stats.std, EPS)
             obs[key] = (value - mean) / std
         else:
-            span = np.maximum(stats.maximum - stats.minimum, EPS)
+            span = maximum(stats.maximum - stats.minimum, EPS)
             obs[key] = 2.0 * (value - stats.minimum) / span - 1.0
-    traj["observation"] = obs
-    return traj
+    step["observation"] = obs
+    return step

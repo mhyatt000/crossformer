@@ -1,251 +1,235 @@
 from __future__ import annotations
 
-from bisect import bisect_right
-from collections import Counter
-from dataclasses import dataclass
-from itertools import accumulate
-from typing import Any, Callable, Generic, Iterable, Iterator, Mapping, Sequence, TypeVar
+from collections import deque
+from typing import Callable, Generic, Sequence, TypeVar
 
-import grain
-from grain.experimental import FlatMapTransform
-import jax
-from jax import tree_util
+from grain._src.python.dataset import dataset, stats
 
-from crossformer.data.grain.util.deco import timeit
+from crossformer.data.grain.transforms import batch_fn
 
 T = TypeVar("T")
 U = TypeVar("U")
 
-
-# If your Grain import path differs, adjust the base class import below:
-
-
-def _first_dim_len(x: Any) -> int | None:
-    """Return length of the first (time) dimension if array-like, else None."""
-    # numpy / jax / torch / tf all expose .shape; python lists expose __len__
-    if hasattr(x, "shape") and isinstance(getattr(x, "shape"), (tuple, list)):
-        return int(x.shape[0]) if len(x.shape) > 0 else None
-    if isinstance(x, (list, tuple)):
-        return len(x) if len(x) > 0 else 0
-    return None
+# -------- MapDataset version (random access with sliding cache) --------
 
 
-def _collect_first_dim_lens(tree: Any, acc: list[int]) -> None:
-    """Collect candidate time lengths from all leaves in a nested py-tree."""
-    if isinstance(tree, Mapping):
-        for v in tree.values():
-            _collect_first_dim_lens(v, acc)
-    elif isinstance(tree, (list, tuple)):
-        for v in tree:
-            _collect_first_dim_lens(v, acc)
-    else:
-        n = _first_dim_len(tree)
-        if n is not None:
-            acc.append(n)
+class WindowFnMapDataset(dataset.MapDataset[U], Generic[T, U]):
+    """Apply window_fn to a sliding window starting at index i.
 
+    Window is [i, i+window_size). Cache slides by one on sequential access
+    to avoid re-fetching elements already in the window.
+    """
 
-def _mode_length(lengths: list[int]) -> int:
-    """Return the most common (>0) first-dimension length as T."""
-    lengths = [n for n in lengths if n and n > 0]
-    if not lengths:
-        raise ValueError("Could not infer time length T from episode leaves.")
-    c = Counter(lengths)
-    return c.most_common(1)[0][0]
+    _MUTATES_ELEMENT_SPEC = False
 
+    def __init__(
+        self,
+        parent: dataset.MapDataset[T],
+        *,
+        window_size: int,
+        window_fn: Callable[[Sequence[T]], U],
+    ):
+        super().__init__(parent)
+        if window_size <= 0:
+            raise ValueError("window_size must be > 0")
+        self._window_size = int(window_size)
+        self._window_fn = window_fn
+        # Sliding cache
+        self._cache_start: int | None = None
+        self._cache: deque[T] = deque()  # maxlen not set due to tail growth logic
 
-def _slice_window_with_tree(episode: Any, start: int, stop: int, T: int) -> Any:
-    def slicer(leaf):
-        # leaf might be numpy / jax / torch / tf / list-like, etc.
-        # try to detect first dimension length
-        # Note: JAX arrays / numpy have .shape
-        if hasattr(leaf, "shape"):
-            if len(leaf.shape) > 0 and leaf.shape[0] == T:
-                return leaf[start:stop]
+    def __len__(self) -> int:
+        return len(self._parent)
+
+    def __str__(self) -> str:
+        return "WindowFnMapDataset"
+
+    def _refill_cache_from(self, start: int):
+        self._cache.clear()
+        n = len(self._parent)
+        end = min(start + self._window_size, n)
+        for j in range(start, end):
+            self._cache.append(self._parent[j])
+        self._cache_start = start
+
+    def _advance_cache_by_one(self):
+        """Slide cache by one: drop left, append next element if exists."""
+        assert self._cache_start is not None
+        n = len(self._parent)
+        next_idx = self._cache_start + len(self._cache)  # index to append
+        if self._cache:
+            self._cache.popleft()
+        if next_idx < n:
+            self._cache.append(self._parent[next_idx])
+        self._cache_start += 1
+
+    def __getitem__(self, index: int) -> U:
+        if isinstance(index, slice):
+            return self.slice(index)
+
+        with self._stats.record_self_time():
+            n = len(self._parent)
+            if index < 0 or index >= n:
+                raise IndexError(index)
+
+            # Ensure cache covers [index, index+window_size)
+            if self._cache_start is None:
+                self._refill_cache_from(index)
+            elif index == self._cache_start + 1:
+                # Sequential access -> cheap slide
+                self._advance_cache_by_one()
+            elif not (self._cache_start <= index < self._cache_start + len(self._cache)):
+                # Jump -> rebuild
+                self._refill_cache_from(index)
             else:
-                return leaf
-        # fallback to Python sequences
+                # Within current window but not the first element:
+                # Realign so that index becomes the new window start by sliding k steps.
+                k = index - self._cache_start
+                for _ in range(k):
+                    self._advance_cache_by_one()
+
+            # Apply fn to current window view (may be shorter at dataset tail)
+            out = self._window_fn(list(self._cache))
+            return self._stats.record_output_spec(out)
+
+
+# -------- IterDataset version (sequential with sliding window) --------
+
+
+class WindowFnIterDataset(dataset.IterDataset[U], Generic[T, U]):
+    """Apply window_fn to a sliding window over an iterator.
+
+    On each next(): emit window_fn(window) for the current window,
+    then slide by one (pop left, push next from parent).
+    """
+
+    def __init__(
+        self,
+        parent: dataset.IterDataset[T],
+        *,
+        window_size: int,
+        window_fn: Callable[[Sequence[T]], U],
+    ):
+        super().__init__(parent)
+        if window_size <= 0:
+            raise ValueError("window_size must be > 0")
+        self._window_size = int(window_size)
+        self._window_fn = window_fn
+
+    def __iter__(self) -> _WindowFnDatasetIterator[T, U]:
+        parent_iter = self._parent.__iter__()
+        return _WindowFnDatasetIterator(parent_iter, window_size=self._window_size, window_fn=self._window_fn)
+
+    def __str__(self) -> str:
+        return "WindowFnIterDataset"
+
+
+class _WindowFnDatasetIterator(dataset.DatasetIterator[U], Generic[T, U]):
+    _MUTATES_ELEMENT_SPEC = False
+
+    def __init__(
+        self,
+        parent: dataset.DatasetIterator[T],
+        *,
+        window_size: int,
+        window_fn: Callable[[Sequence[T]], U],
+    ):
+        super().__init__(parent)
+        self._window_size = window_size
+        self._window_fn = window_fn
+        self._window: deque[T] = deque()
+        self._parent_window_start_iter_state = self._parent.get_state()
+        self._pos_from_start = 0
+        self._init = True
+        self._parent_exhausted = False
+
+    def _maybe_mark_start(self):
+        if self._init:
+            self._init = False
+        else:
+            self._pos_from_start += 1
+
+    def _fill_until_full_or_eof(self):
         try:
-            # only slice if len matches T
-            if hasattr(leaf, "__len__") and len(leaf) == T:
-                return leaf[start:stop]
-        except Exception:
-            pass
-        return leaf
+            while len(self._window) < self._window_size:
+                self._window.append(next(self._parent))
+        except StopIteration:
+            self._parent_exhausted = True
 
-    return tree_util.tree_map(slicer, episode)
+    def _prime_for_next(self):
+        # If empty, capture state and fill a fresh window.
+        if not self._window:
+            if self._parent_exhausted:
+                return False
+            self._parent_window_start_iter_state = self._parent.get_state()
+            self._maybe_mark_start()
+            self._fill_until_full_or_eof()
+        return bool(self._window)
 
-
-@dataclass
-class WindowedFlatMap(FlatMapTransform):
-    """
-    Grain FlatMap that emits fixed-length sliding windows of an episode.
-
-    - `size`: required window length.
-    - `stride`: hop length between starts (default 1).
-    - Only full windows are emitted (drop remainder).
-    """
-
-    size: int
-    stride: int = 1
-
-    def len(self, L):
-        return 0 if self.size > L else (L - self.size) // self.stride + 1
-
-    def flat_map(self, episode: dict):
-        # 1) Infer T (time length) robustly from the episode py-tree.
-        lengths: list[int] = []
-        _collect_first_dim_lens(episode, lengths)
-        T = _mode_length(lengths)
-
-        if self.size <= 0:
-            raise ValueError(f"`size` must be > 0, got {self.size}")
-        if self.stride <= 0:
-            raise ValueError(f"`stride` must be > 0, got {self.stride}")
-
-        # 2) Yield sliding windows [t, t+size) where t+size <= T.
-        stop_max = T - self.size + 1
-        for start in range(0, max(0, stop_max), self.stride):
-            stop = start + self.size
-            yield _slice_window_with_tree(episode, start, stop, T)
-            # yield _slice_window(episode, start, stop, T)
-
-
-class _MyFlatMapTransform(Generic[T, U]):
-    """
-    Interface: must implement flat_map(elem: T) -> Iterable[U]
-    """
-
-    def flat_map(self, elem: T) -> Iterable[U]:
-        raise NotImplementedError
-
-
-class FlatMapDataset(Generic[T, U], Iterable[U]):
-    """
-    A dataset that wraps a parent dataset and applies a FlatMapTransform
-    to each element, flattening the resulting streams.
-    """
-
-    def __init__(self, parent: Iterable[T], tf: FlatMapTransform, L: int, seek: Callable | None = None):
-        # We can reuse parent's transforms / configuration
-        # super().__init__(parent)
-        # or if MapDataset has a different constructor, adapt accordingly
-        self.parent = parent
-        self.tf = tf
-        self.L = L
-        self.seek = seek
-
-    def __len__(self) -> int:
-        return self.L
-
-    def __getitem__(self, index):
-        raise NotImplementedError()
-
-    def __iter__(self) -> Iterator[U]:
-        for elem in self.parent:
-            outs = self.tf.flat_map(elem)
-            # allow flat_map to yield any iterable (list, generator, etc)
-            yield from outs
-
-
-@dataclass
-class MyFlatMap(grain.experimental.FlatMapTransform):
-    max_fan_out: int = 1000
-
-    def flat_map(self, element: dict) -> list[dict]:
-        n = len(element["info"]["step_id"])
-        return [jax.tree.map(lambda x: x[i], element) for i in range(n)]
-
-
-class FlattenTreeDataset(Generic[T, U], Iterable[U]):
-    def __init__(self, parent: Iterable[T], lengths: Sequence[int]):
-        self.parent = parent
-        self.L = sum(lengths)
-        self.lengths = lengths
-
-        self.idx_map = {}
-        self.build_map()
-        self.pcache = {}
-
-    def tf(self, tree: dict, j: int):
-        return jax.tree.map(lambda x: x[j], tree)
-
-    def __len__(self) -> int:
-        return self.L
-
-    def build_map(self):
-        """seeks the correct int after flattening"""
-        if self.idx_map is None:
-            return
-
-        # make dict where k 0->L-1, v is (i,j) where i is episode index, j is index in episode
-        self.idx_map, count = {}, 0
-        for i, eplen in enumerate(self.lengths):
-            for j in range(eplen):
-                self.idx_map[count] = (i, j)
-                count += 1
-
-    def seek(self, index) -> tuple[int, int]:
-        return self.idx_map[index]
-
-    def manage_cache(self, max_size: int = 100):
-        """simple cache management to avoid memory issues"""
-        if len(self.pcache) > max_size:
-            # pop a random key
-            self.pcache.pop(next(iter(self.pcache)))
-
-    @timeit
-    def __getitem__(self, index):
-        # overrides __iter__ and its slow because it cannot prefetch episodes (i think)
-        i, j = self.seek(index)
-
-        episode = self.pcache.get(i, self.parent[i])
-        self.pcache[i] = episode
-        self.manage_cache()
-
-        return self.tf(episode, j)
-
-    def __iter__(self) -> Iterator[U]:
-        return self
-
+    @stats.record_next_duration_if_output
     def __next__(self) -> U:
-        for i, j in self.idx_map.values():
-            episode = self.parent[i]
-            yield self.tf(episode, j)
-        raise StopIteration
+        if not self._prime_for_next():
+            raise StopIteration
+
+        # Emit on current window snapshot.
+        out = self._window_fn(list(self._window))
+
+        # Slide by one.
+        if self._window:
+            self._window.popleft()
+        if not self._parent_exhausted:
+            try:
+                self._window.append(next(self._parent))
+            except StopIteration:
+                self._parent_exhausted = True
+        return out
+
+    def get_state(self):
+        return {
+            "parent_window_start_state": self._parent_window_start_iter_state,
+            "pos_from_start": self._pos_from_start,
+            "parent_exhausted": self._parent_exhausted,
+        }
+
+    def set_state(self, state):
+        self._parent_window_start_iter_state = state["parent_window_start_state"]
+        self._parent.set_state(self._parent_window_start_iter_state)
+        self._pos_from_start = state["pos_from_start"]
+        self._parent_exhausted = state["parent_exhausted"]
+
+        # Rebuild window deterministically from the stored start.
+        self._window.clear()
+        self._fill_until_full_or_eof()
+        for _ in range(min(self._pos_from_start, len(self._window))):
+            self._window.popleft()
+            if not self._parent_exhausted:
+                try:
+                    self._window.append(next(self._parent))
+                except StopIteration:
+                    self._parent_exhausted = True
+
+    def __str__(self) -> str:
+        return "WindowFnDatasetIterator"
 
 
-class WindowFlatDataset(FlatMapDataset):
-    def __init__(self, parent: Iterable[T], w: WindowedFlatMap):
-        assert getattr(parent, "lengths", None) is not None, (
-            "Parent dataset must have lengths() method to estimate total length."
-        )
-        self._episode_lengths = list(parent.lengths())
-        self._win_counts = [w.len(_l) for _l in self._episode_lengths]
-        self._cumulative = list(accumulate(self._win_counts))
-        total = sum(self._win_counts)
-        super().__init__(parent, w, total)
+def mk_chunk(a: int, o: int = 1):
+    assert o == 1, "only support o=1 for now"
 
-    def __getitem__(self, index):
-        if not isinstance(index, int):
-            raise TypeError("WindowFlatDataset indices must be integers")
+    def chunk_fn(window):
+        # Assume pytree with keys "action" and "observation"
+        # Batch first a/o entries across the window
+        first = window[0]
+        actions = batch_fn([w["action"] for w in window[:a]])
+        # action_pad_mask = 1 if episode_id is the same as first else 0
+        get_id = lambda w: w["info"]["id"]["episode_id"]
+        action_pad_mask = batch_fn([get_id(w) == get_id(first) for w in window[:a]])
+        # augmax needs same window for obs and task
+        # obs     = batch_fn([w["observation"] for w in window[:o]])
+        return {
+            **first,
+            "action": actions,
+            "action_pad_mask": action_pad_mask,
+            # "observation": obs,
+        }
 
-        length = self.L
-        if index < 0:
-            index += length
-        if index < 0 or index >= length:
-            raise IndexError(index)
-
-        episode_idx = bisect_right(self._cumulative, index)
-        prev = self._cumulative[episode_idx - 1] if episode_idx > 0 else 0
-        offset = index - prev
-
-        stride = self.tf.stride
-        size = self.tf.size
-        start = offset * stride
-        stop = start + size
-
-        episode = self.parent[episode_idx]
-        T = self._episode_lengths[episode_idx]
-        if stop > T:
-            raise IndexError("Window exceeds episode length")
-        return _slice_window_with_tree(episode, start, stop, T)
+    return chunk_fn

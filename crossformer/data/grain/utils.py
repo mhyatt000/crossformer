@@ -15,71 +15,37 @@ TensorFlow as a dependency.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-import copy
+from collections.abc import Mapping
 from typing import Any
 
-import jax
+import flax.traverse_util as ftu
 import numpy as np
+
+from crossformer.utils.deco import deprecate
 
 Tree = Mapping[str, Any] | dict[str, Any]
 
 
-def tree_map(fn: Callable[[Any], Any], tree: Tree) -> Tree:
-    """Applies ``fn`` recursively to every leaf in ``tree``.
-
-    ``tree`` is expected to be made of nested ``dict`` instances.  Lists and
-    tuples are treated as leaves to avoid surprising conversions between data
-    structures.  This mirrors the behaviour of ``tf.nest.map_structure`` which
-    the TensorFlow pipeline relies on.
-    """
-
-    def _map(value: Any) -> Any:
-        if isinstance(value, dict):
-            return {key: _map(sub_value) for key, sub_value in value.items()}
-        return fn(value)
-
-    return _map(tree)
+def flat(tree):
+    return {".".join(k): v for k, v in ftu.flatten_dict(tree).items()}
 
 
-def tree_merge(*trees: Tree) -> Tree:
-    """Merges ``trees`` recursively with right-most values taking precedence."""
-
-    if not trees:
-        return {}
-    result: dict[str, Any] = {}
-    for tree in trees:
-        for key, value in tree.items():
-            if isinstance(value, dict) and isinstance(result.get(key), dict):
-                result[key] = tree_merge(result[key], value)  # type: ignore[arg-type]
-            elif isinstance(value, dict):
-                result[key] = tree_merge(value)
-            else:
-                result[key] = value
-    return result
+def unflat(tree):
+    return ftu.unflatten_dict({tuple(k.split(".")): v for k, v in tree.items()})
 
 
-def clone_structure(value: Any) -> Any:
-    """Returns a deep copy of ``value`` preserving NumPy arrays.
+def merge(lhs, rhs):
+    lhs, rhs = flat(lhs), flat(rhs)
+    out = lhs | rhs
+    return unflat(out)
 
-    ``copy.deepcopy`` would normally work but it has two undesirable
-    properties:
 
-    * it recursively copies NumPy arrays which is unnecessary and expensive
-      for large tensors;
-    * it is not guaranteed to work with objects backed by shared memory which
-      the Grain data sources may rely on.
-
-    This helper performs a deep copy for Python containers while keeping NumPy
-    arrays (and other objects that expose ``__array__``) as views.
-    """
-
-    def _clone(value: Any) -> Any:
-        if isinstance(value, np.ndarray):
-            return value.copy()
-        return copy.deepcopy(value)
-
-    return jax.tree.map(_clone, value)
+@deprecate("use info.length", strict=True)
+def traj_len(traj: dict, flatkey=None) -> int:
+    x = flat(traj)
+    k = flatkey if flatkey else next(iter(x.keys()))
+    n = len(x[k])
+    return n
 
 
 def is_padding(value: Any) -> np.ndarray:
@@ -95,20 +61,9 @@ def is_padding(value: Any) -> np.ndarray:
     The return type is always a boolean NumPy array matching the input shape.
     """
 
-    if isinstance(value, dict):
-        masks = [is_padding(sub_value) for sub_value in value.values()]
-        if not masks:
-            raise ValueError("Cannot infer padding mask for empty dict.")
-        mask = masks[0]
-        for sub_mask in masks[1:]:
-            mask = np.logical_and(mask, sub_mask)
-        return mask
-    value = np.asarray(value)
     if value.dtype.kind in {"U", "S"}:
         return value == ""
-    if value.dtype == np.bool_:
-        return ~value
-    return value == 0
+    return 0
 
 
 def to_padding(value: Any) -> Any:
@@ -120,23 +75,3 @@ def to_padding(value: Any) -> Any:
     if value.dtype == np.bool_:
         return np.zeros_like(value, dtype=bool)
     return np.zeros_like(value)
-
-
-def ensure_numpy(value: Any) -> np.ndarray:
-    """Converts ``value`` to a NumPy array if possible."""
-
-    if isinstance(value, np.ndarray):
-        return value
-    if hasattr(value, "__array__"):
-        return np.asarray(value)
-    return np.array(value)
-
-
-def as_dict(data: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Returns ``data`` as a mutable dictionary."""
-
-    if data is None:
-        return {}
-    if isinstance(data, dict):
-        return data
-    return dict(data)

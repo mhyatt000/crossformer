@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+import logging
 from typing import Any, ClassVar
 import warnings
 
@@ -12,6 +13,8 @@ import numpy as np
 import xgym
 from xgym.rlds.util.trajectory import binarize_gripper_actions as binarize
 from xgym.rlds.util.trajectory import scan_noop
+
+log = logging.getLogger(__name__)
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
@@ -142,6 +145,8 @@ class Builder:
         # print(self.root)
         # self.root = Path.home() / f"{self.name}:{ str(self.VERSION)[0]}"
         self.files = list(self.root.rglob("*.dat"))
+        if self.limit:
+            self.files = self.files[: self.limit]
         return self._generate_examples(self.files)
 
     def dict_unflatten(self, flat, sep="."):
@@ -159,7 +164,7 @@ class Builder:
         return nest
 
     def _parse_example(self, path):
-        print(path)
+        log.debug(path)
 
         try:
             info, ep = xgym.viz.memmap.read(path)
@@ -190,7 +195,7 @@ class Builder:
         if "/xgym/camera/wrist" not in ep:
             ep["/xgym/camera/wrist"] = ep.pop("/xgym/camera/rs")
 
-        ep["image"] = {k: ep.pop(f"/xgym/camera/{k}") for k in ["worm", "side", "overhead", "wrist"]}
+        ep["image"] = {k: ep.pop(f"/xgym/camera/{k}") for k in ["worm", "side", "wrist"]}
 
         ### scale and binarize
         ep["robot"]["gripper"] /= 850
@@ -208,7 +213,8 @@ class Builder:
         jmask = ~jnoop
         mask = np.logical_and(mask, jmask)
 
-        print(f"Kept {mask.sum()} of {n} steps")
+        log.debug(f"Kept {mask.sum()} of {n} steps")
+
         ep = jax.tree.map(select := lambda x: x[mask], ep)
 
         ### calculate action
@@ -241,7 +247,7 @@ class Builder:
         # if you want to skip an example for whatever reason, simply return None
         sample = {"steps": episode, "episode_metadata": {}}
         id = f"{path.parent.name}_{path.stem}"
-        return episode
+        return episode if len(episode) > 0 else None
         return id, sample
 
     def _generate_examples(self, ds) -> Iterator[tuple[str, Any]]:
@@ -252,17 +258,9 @@ class Builder:
         self.lang = np.load(self.taskfile)
 
         with ThreadPoolExecutor(max_workers=self.workers) as ex:
-            yield from ex.map(self._parse_example, ds)
-
-        # for path in tqdm(ds):
-        # try:
-        # ret = self._parse_example(path)
-        # except Exception as e:
-        # xgym.logger.error(f"Error parsing {path}")
-        # xgym.logger.error(e)
-        # ret = None
-        # if ret is not None:
-        # yield ret
+            for result in ex.map(self._parse_example, ds):
+                if result is not None:
+                    yield result
 
         # for large datasets use beam to parallelize data parsing (this will have initialization overhead)
         # beam = tfds.core.lazy_imports.apache_beam

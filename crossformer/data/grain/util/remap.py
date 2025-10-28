@@ -10,9 +10,13 @@ def rekey(tree: dict, inp: list[str], out: list[str]) -> dict:
     return tree
 
 
-def _remap_lang(tree: dict) -> dict:
+def _remap_lang(tree: dict, k="language.instruction") -> dict:
+    """
+    If `k` is in tree["task"] but not in tree,
+    copy it to tree["language.instruction"].
+    """
     tree = dict(tree)
     task = tree.get("task", {})
-    if "language.instruction" in task and "language.instruction" not in tree:
-        tree["language.instruction"] = task["language.instruction"]
+    if k in task and k not in tree:
+        tree[k] = task[k]
     return tree

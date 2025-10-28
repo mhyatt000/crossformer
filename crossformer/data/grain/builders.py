@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 import fnmatch
 from functools import partial
@@ -11,12 +11,14 @@ import json
 import logging
 from typing import Any
 
-import grain
 import grain.python as gp
+import jax.numpy as jnp
 import numpy as np
 
-from crossformer.data.grain import metadata, utils
+from crossformer.data.grain import metadata
+from crossformer.utils.jax_utils import cpu, str2jax
 from crossformer.utils.spec import ModuleSpec
+from crossformer.utils.typing import DeprecatedError
 
 log = logging.getLogger(__name__)
 
@@ -48,15 +50,8 @@ def _resolve_source(
     raise TypeError("Data source must be a Sequence, RandomAccessDataSource, or callable returning one.")
 
 
-def _iter_source(source: Sequence[dict] | gp.RandomAccessDataSource) -> Iterable[dict]:
-    for index in range(len(source)):  # type: ignore[arg-type]
-        element = source[index]
-        if hasattr(element, "data"):
-            element = element.data
-        yield utils.clone_structure(element)
-
-
 def _sample_match_key(traj: Mapping[str, Any], template: str) -> Any:
+    """Returns the first key in traj that matches the given template using fnmatch."""
     matches = [key for key in traj if fnmatch.fnmatch(key, template)]
     if not matches:
         raise ValueError(f"No keys match template {template!r}; available keys: {traj.keys()}")
@@ -77,6 +72,7 @@ class GrainDatasetConfig:
     name: str
     source: Sequence[dict] | gp.RandomAccessDataSource | Callable[[], Any]
     standardize_fn: ModuleSpec | Callable | None = None
+    episode_info: Any = None
 
     keys: Keys = field(default_factory=Keys)
     action_proprio_normalization_type: str = metadata.NormalizationType.NORMAL
@@ -98,48 +94,63 @@ def stable_hash_int(s: str) -> int:
 
 
 def _restructure_trajectory(
-    traj: dict,
+    step: dict,
     *,
     name: str,
-    standardize: Callable | None,
     config: GrainDatasetConfig,
 ) -> dict:
-    traj = utils.clone_structure(traj)
-    if standardize is not None:
-        traj = standardize(traj)
-    if "observation" not in traj or "action" not in traj:
+    if "observation" not in step or "action" not in step:
         raise ValueError("Trajectory must contain 'observation' and 'action' keys.")
 
     # @codex add some action processing fn here.
     # in place of hard coded action definition
 
-    # concat traj proprio joints and proprio gripper
-    proprio = traj["observation"]["proprio"]
-    action = np.concatenate([proprio["joints"], proprio["gripper"]], axis=-1)
-    traj_len = action.shape[0]
-    if action.ndim == 1 or traj_len == 0:
-        return {}
+    n = len(step["observation"]["proprio"]["joints"])
+    step_id = step.get("step_id", jnp.asarray(np.arange(n), device=cpu))
+    step_id = step_id.reshape(-1)
+    step["observation"]["timestep"] = step_id
+    step["step_id"] = step_id
+
+    eid = step["episode_id"]
+    step["episode_id"] = jnp.full((n,), eid)
+
+    step["observation"]["proprio"]["single_arm"] = jnp.concatenate(
+        [
+            step["observation"]["proprio"]["gripper"],
+            step["observation"]["proprio"]["joints"],
+            step["observation"]["proprio"]["position"],
+        ],
+        axis=-1,
+    )
+
+    # concat proprio joints and proprio gripper
+    proprio = step["observation"]["proprio"]
+    action = jnp.concatenate([proprio["joints"], proprio["gripper"]], axis=-1)
 
     task = {}
-    if config.keys.lang is not None:
-        language = _sample_match_key(traj, config.keys.lang)
-        language = np.asarray(language)
-        if language.shape == ():
-            language = np.repeat(language, traj_len)
-        if language.shape[0] != traj_len:
-            language = np.broadcast_to(language, (traj_len,))
-        task["language.instruction"] = language  # .astype(object)
+    task[config.keys.lang] = step[config.keys.lang]  # simple
+    if False:
+        raise DeprecatedError("opaque")
+        if config.keys.lang is not None:
+            language = _sample_match_key(step, config.keys.lang)
+            language = np.asarray(language)
+            if language.shape == ():
+                language = np.repeat(language, traj_len)
+            if language.shape[0] != traj_len:
+                language = np.broadcast_to(language, (traj_len,))
+            task[config.keys.lang] = language  # .astype(object)
 
-    # name = stable_hash_int(name)
     return {
-        "observation": traj.pop("observation"),
+        "observation": step["observation"],
         "task": task,
         "action": action,
-        "dataset_name": np.repeat(name, traj_len),
+        "dataset_name": str2jax(name),
         "info": {
-            "dataset_name": np.repeat(name, traj_len),
-            "step_id": traj.get("step_id", np.arange(traj_len)),
-        },
+            "dataset_name": str2jax(name),
+            "id": {k: v for k, v in step.items() if "_id" in k},
+            "step_id": step["step_id"],
+        }
+        | step.get("info", {}),
     }
 
     old_obs = traj["observation"]
@@ -179,7 +190,7 @@ def _restructure_trajectory(
 
 def _load_dataset_statistics(
     config: GrainDatasetConfig,
-    trajectories: Sequence[dict],
+    ds: Sequence[dict],
 ) -> metadata.DatasetStatistics:
     if isinstance(config.dataset_statistics, metadata.DatasetStatistics):
         return config.dataset_statistics
@@ -189,15 +200,16 @@ def _load_dataset_statistics(
         with open(config.dataset_statistics, "r") as f:
             return metadata.DatasetStatistics.from_json(json.load(f))
 
-    log.debug("Computing dataset statistics from scratch...")
+    log.info("Computing dataset statistics from scratch...")
     hash_dependencies = [
-        config.name,
+        config.name,  # str(asdict(config))
+        str(len(ds)),
         str(sorted(config.keys.image)),
         str(sorted(config.keys.depth)),
         str(sorted(config.keys.proprio.keys())),
     ]
     return metadata.compute_dataset_statistics(
-        trajectories,
+        ds,
         proprio_keys=list(config.keys.proprio.keys()),
         hash_dependencies=hash_dependencies,
         save_dir=config.statistics_save_dir,
@@ -214,35 +226,19 @@ def build_trajectory_dataset(
     standardize = _resolve_callable(config.standardize_fn)
     filter_functions = [_resolve_callable(fn) for fn in config.filter_fns if fn]
 
-    """
-    processed: list[dict] = []
-    bar = partial(logbar, desc="Processing trajectories", total=len(source), unit="ep")
-    for raw_traj in bar(_iter_source(source)):
-        if filter_functions and any(not fn(raw_traj) for fn in filter_functions):
-            continue
-        traj = _restructure_trajectory(
-            raw_traj,
-            name=config.name,
-            standardize=standardize,
-            config=config,
-        )
-        if not traj:
-            continue
-        processed.append(traj)
-    """
-
-    # new
-    log.debug("we are using the new lazy processing pipeline")
-    ds = grain.MapDataset.source(source)
+    log.info("we are using the new lazy processing pipeline")
+    ds = source
     for f in filter_functions:
         ds = ds.filter(f)
-    ds = ds.map(partial(_restructure_trajectory, name=config.name, standardize=standardize, config=config))
+    ds = ds.map(partial(_restructure_trajectory, name=config.name, config=config))
 
     stats = _load_dataset_statistics(config, ds)
+    # stats = jax.tree.map(jax.device_get, stats)
 
     mask = config.action_normalization_mask
+    norm = metadata.normalize_action_and_proprio
     norm = partial(
-        metadata.normalize_action_and_proprio,
+        norm,
         metadata=stats,
         normalization_type=config.action_proprio_normalization_type,
         proprio_keys=list(config.keys.proprio.keys()),
@@ -250,16 +246,8 @@ def build_trajectory_dataset(
         skip_norm_keys=config.skip_norm_keys,
     )
 
-    """
-    if not config.skip_norm:
-        normalized = [ norm(traj) for traj in logbar(ds, desc="normalizing...") ]
-    else:
-        normalized = ds
-    log.warning("TODO lazy data normalization")
-    dataset = gp.MapDataset.range(len(normalized)).map(lambda idx: utils.clone_structure(normalized[idx]))
-    """
-
-    log.debug("Applying lazy normalization to dataset...")
+    log.info("Applying lazy normalization to dataset...")
+    log.info("TODO vectorize normalization fn on batch")
     ds = ds.map(norm) if not config.skip_norm else ds
     ds.dataset_statistics = stats  # type: ignore[attr-defined]
     return ds, stats

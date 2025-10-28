@@ -22,13 +22,13 @@ def logged(fn):
 def logbar(it, **kwargs):
     """Wrap iterable in tqdm if logging level is DEBUG, else pass through."""
     logger = logging.getLogger()
-    if logger.getEffectiveLevel() <= logging.DEBUG:
+    if logger.getEffectiveLevel() <= logging.INFO:
         return tqdm(it, **kwargs)
     return it
 
 
-def timeit(fn):
-    """Decorator that logs how long a function call takes at DEBUG level."""
+def timeit(fn, log_fn=log.info):
+    """Decorator that logs how long a function call takes at log level."""
 
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -39,9 +39,9 @@ def timeit(fn):
         qualname = fn.__qualname__
         if "." in qualname:
             # e.g. "MyClass.method"
-            log.debug(f"{qualname} took {elapsed:.2f} seconds")
+            log_fn(f"{qualname} took {elapsed:.2f} seconds")
         else:
-            log.debug(f"{fn.__name__} took {elapsed:.2f} seconds")
+            log_fn(f"{fn.__name__} took {elapsed:.2f} seconds")
 
         return result
 

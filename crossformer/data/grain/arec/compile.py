@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import partial
 import json
 from pathlib import Path
@@ -21,19 +21,6 @@ import tyro
 _HAS_MSGPACK = True
 
 
-# -----------------------------
-# CLI config
-# -----------------------------
-@dataclass
-class Config:
-    dir: Path  # Directory containing .dat files (searched recursively)
-    workers: int = 16  # *.dat reader workers
-    verbose: bool = False  # Print per-file details while streaming
-
-
-# -----------------------------
-# Loading helpers
-# -----------------------------
 LoaderResult = Any
 
 
@@ -254,36 +241,49 @@ def merge_specs(a: Spec | None, b: Spec) -> Spec:
     return _merge_any(a, b)
 
 
-# -----------------------------
-# Main
-# -----------------------------
 class MyBuilder(generate.Builder):
     def __init__(self, **kwargs):
         super().__init__()
 
-        self.name = "sweep_single"
-        self.root = kwargs.get("root")
-        self.VERSION = "0.5.0"
+        self.name = kwargs.get("name")
+        self.root = kwargs.get("dir")
+        self.VERSION = kwargs.get("version", "0.5.0")
+
+        self.limit = kwargs.get("limit")
+
+
+@dataclass
+class Config:
+    dir: Path  # Directory containing .dat files (searched recursively)
+    name: str = "my_dataset"  # Dataset name
+    workers: int = 16  # *.dat reader workers
+    verbose: bool = False  # Print per-file details while streaming
+    version: str = "0.5.0"  # Dataset version
+
+    limit: int | None = None  # Optional limit on number of records to process
+    by_step: bool = False  # Whether to build by step (True) or by episode (False)
 
 
 def main(cfg: Config) -> None:
     if not cfg.dir.exists() or not cfg.dir.is_dir():
         raise SystemExit(f"Directory not found: {cfg.dir}")
-
     dat_files = sorted(cfg.dir.rglob("*.dat"))
     if not dat_files:
         raise SystemExit("No .dat files found.")
 
-    builder = MyBuilder(root=cfg.dir, workers=cfg.workers)
+    builder = MyBuilder(**asdict(cfg))
 
     ds = arec.ArrayRecordBuilder(
         name=builder.name,
-        root=str(Path("~/.cache/arrayrecords") / builder.name / builder.VERSION),
-        version=builder.VERSION,  # bump when schema/layout changes
-        shard_size=1000,  # records per shard
+        root=str(Path("~/.cache/arrayrecords") / builder.name / cfg.version),
+        version=cfg.version,  # bump when schema/layout changes
+        shard_size=1,  # records per shard
         writer_options="group_size:1",  # passed directly to ArrayRecordWriter
     )
-    ds.prepare(partial(arec.build_fn_per_step, fn=builder.build))
+    if cfg.by_step:
+        ds.prepare(partial(arec.build_fn_per_step, fn=builder.build))
+    else:
+        ds.prepare(partial(arec.build_fn_per_episode, fn=builder.build))
 
     pprint(builder.spec(ds[0]))
 

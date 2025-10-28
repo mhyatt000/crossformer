@@ -15,66 +15,72 @@ without introducing TensorFlow as a dependency.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
+from functools import partial
 import logging
-from typing import Any, Iterable
+from typing import Any
 
 import jax
+from jax import numpy as jnp
 import numpy as np
 from scipy import ndimage
 
-from crossformer.data.grain import utils
+from crossformer.data.grain.utils import merge
+from crossformer.data.oxe import HEAD_TO_DATASET
+from crossformer.utils.jax_utils import cpu, with_device
+from crossformer.utils.typing import PRNGKey
 
 log = logging.getLogger(__name__)
 
 ArrayDict = dict[str, Any]
-Trajectory = dict[str, Any]
+Step = dict[str, Any]
+Trajectory = dict[str, Step]
 
 
 _INTERPOLATION_TO_ORDER = {"nearest": 0, "bilinear": 1}
 
 
-def _ensure_array(value: Any) -> np.ndarray:
-    return jax.tree.map(utils.ensure_numpy, value)  # type: ignore[return-value]
+@with_device(cpu)
+def _mask(fn, *args, **kwargs):
+    return fn(*args, **kwargs)
 
 
-def _clone(traj: Trajectory) -> Trajectory:
-    return utils.clone_structure(traj)
+def add_pad_mask_dict(step: Step, device=cpu) -> Step:
+    """Annotates ``step`` with padding masks for observation/task dictionaries."""
+
+    # every item says if mask at that time
+    n = step["observation"]["timestep"].shape[0]
+
+    def maybe_full(x):
+        if x.shape and x.shape[0] == n:
+            return x.astype(bool)
+        return jnp.full((n,), x).astype(bool)
+
+    # is_mask = lambda x: ~ utils.is_padding(x)
+    @with_device(device)
+    def is_mask(*args):
+        return jnp.zeros((), dtype=bool, device=device)  # no native strings
+
+    pad_masks = jax.tree.map(is_mask, step)
+    pad_masks = jax.tree.map(maybe_full, pad_masks)
+
+    step["observation"]["pad_mask_dict"] = pad_masks.get("observation", {})
+    step["task"]["pad_mask_dict"] = pad_masks.get("task", {})
+    return step
 
 
-def add_pad_mask_dict(traj: Trajectory) -> Trajectory:
-    """Annotates ``traj`` with padding masks for observation/task dictionaries."""
-
-    traj = _clone(traj)
-    pad_masks = utils.tree_map(utils.is_padding, traj)
-    observation_masks = pad_masks.get("observation", {})
-    task_masks = pad_masks.get("task", {})
-    traj.setdefault("observation", {})
-    traj.setdefault("task", {})
-    traj["observation"]["pad_mask_dict"] = observation_masks
-    traj["task"]["pad_mask_dict"] = task_masks
-    return traj
-
-
-def add_head_action_mask(traj: Trajectory, head_to_dataset: Mapping[str, Sequence[str]] | None = None) -> Trajectory:
+def add_head_action_mask(step: Step, name=None) -> Step:
     """Adds per-head action masks mirroring TensorFlow implementation."""
 
-    traj = _clone(traj)
-    dataset_names = traj.get("dataset_name")
-    if dataset_names is None:
-        raise KeyError("Expected 'dataset_name' field when adding head masks.")
-    dataset_names = np.asarray(dataset_names)
-    if head_to_dataset is None:
-        traj["action_head_masks"] = {"action": np.ones_like(dataset_names, dtype=bool)}
-        return traj
-
-    action_masks = {}
-    for head, dataset_list in head_to_dataset.items():
-        dataset_array = np.asarray(dataset_list, dtype=dataset_names.dtype)
-        mask = np.isin(dataset_names, dataset_array)
-        action_masks[head] = mask
-    traj["action_head_masks"] = action_masks
-    return traj
+    heads = HEAD_TO_DATASET.keys()
+    assert HEAD_TO_DATASET and name
+    n = step["observation"]["timestep"].shape[0]
+    masks = {head: (name in d) for head, d in HEAD_TO_DATASET.items()}
+    arr = with_device(cpu)(jnp.array)
+    masks = jax.tree.map(partial(arr, dtype=bool), masks)
+    masks = jax.tree.map(lambda x: jnp.full((n,), x, dtype=bool), masks)
+    step["action_head_masks"] = masks
+    return step
 
 
 def pad_actions_and_proprio(
@@ -85,30 +91,39 @@ def pad_actions_and_proprio(
 ) -> Trajectory:
     """Pads actions/proprio streams and records action padding mask."""
 
-    traj = _clone(traj)
-    actions = _ensure_array(traj["action"])
-    traj["action_pad_mask"] = np.ones_like(actions, dtype=bool)
+    actions = traj["action"]
+    traj["action_pad_mask"] = with_device(cpu)(jnp.ones_like)(actions, dtype=bool)
+    pad = with_device(cpu)(jnp.pad)
 
     if max_action_dim is not None:
         action_dim = actions.shape[-1]
         if action_dim > max_action_dim:
             raise ValueError(f"action_dim ({action_dim}) is greater than max_action_dim ({max_action_dim})")
         pad_width = [(0, 0)] * (actions.ndim - 1) + [(0, max_action_dim - action_dim)]
-        traj["action"] = np.pad(actions, pad_width, mode="constant")
-        traj["action_pad_mask"] = np.pad(traj["action_pad_mask"], pad_width, mode="constant", constant_values=False)
+        traj["action"] = pad(actions, pad_width, mode="constant")
+        traj["action_pad_mask"] = pad(traj["action_pad_mask"], pad_width, mode="constant", constant_values=False)
 
     if max_proprio_dim is not None and "proprio" in traj.get("observation", {}):
-        proprio = _ensure_array(traj["observation"]["proprio"])
+        proprio = traj["observation"]["proprio"]
         proprio_dim = proprio.shape[-1]
         if proprio_dim > max_proprio_dim:
             raise ValueError(f"proprio_dim ({proprio_dim}) is greater than max_proprio_dim ({max_proprio_dim})")
         pad_width = [(0, 0), (0, max_proprio_dim - proprio_dim)]
-        traj["observation"]["proprio"] = np.pad(proprio, pad_width, mode="constant")
+        traj["observation"]["proprio"] = pad(proprio, pad_width, mode="constant")
 
     return traj
 
 
 log.debug("TODO chunk actions by jax.tree.map")
+
+
+def batch_fn(xs: list[dict[Any]]):
+    xs = jax.tree.map(lambda x: jax.device_put(x, cpu), xs)
+    stack = lambda *a: jnp.asarray(a, device=cpu)
+    tree = jax.tree.map(stack, *xs)
+    # iscpu = jax.tree.map(lambda x: x.platform() == 'cpu' , tree)
+    # iscpu_all = jax.tree.reduce(lambda x, y: x and y, iscpu)
+    return tree
 
 
 def chunk_action_and_observation(
@@ -120,24 +135,32 @@ def chunk_action_and_observation(
 ) -> Trajectory:
     """Chunks observations into histories and actions into windows."""
 
-    traj = _clone(traj)
-    actions = _ensure_array(traj["action"])
-    len = actions.shape[0]
+    actions = traj["action"]
+    n = actions.shape[0]
+    device = actions.device
+    # pprint(spec({'action': actions}))
 
-    history_indices = np.arange(len)[:, None] + np.arange(-window_size + 1, 1)[None, :]
+    def arange(*args, **kwargs):
+        return jnp.asarray(np.arange(*args, **kwargs), device=cpu)
+
+    # history_indices = jnp.arange(n)[:, None] + jnp.arange(-window_size + 1, 1)[None, :]
+    # now, in numpy
+    history_indices = arange(n)[:, None] + arange(-window_size + 1, 1)[None, :]
+
     timestep_pad_mask = history_indices >= 0
     if override_window_size is not None:
-        valid_history = np.arange(window_size) >= window_size - override_window_size
-        timestep_pad_mask = np.logical_and(timestep_pad_mask, valid_history)
-    history_indices = np.maximum(history_indices, 0)
+        valid_history = arange(window_size) >= window_size - override_window_size
+        timestep_pad_mask = jnp.logical_and(timestep_pad_mask, valid_history)
+    history_indices = jnp.maximum(history_indices, 0)
+    # pprint(spec({'history_indices': history_indices}))
 
     chunked_obs = jax.tree.map(lambda x: x[history_indices], traj["observation"])
     chunked_obs["timestep_pad_mask"] = timestep_pad_mask
     traj["observation"] = chunked_obs
 
     if actions.ndim == 2:
-        action_indices = np.arange(len)[:, None] + np.arange(action_horizon)[None, :]
-        action_indices = np.minimum(action_indices, len - 1)
+        action_indices = arange(n)[:, None] + arange(action_horizon)[None, :]
+        action_indices = jnp.minimum(action_indices, n - 1)
         actions = actions[action_indices]
     else:
         if actions.shape[1] < action_horizon:
@@ -148,36 +171,38 @@ def chunk_action_and_observation(
 
     actions = actions[history_indices]
     traj["action"] = actions
+    # pprint(spec({'action': actions}))
 
-    # if "task" not in traj:
-    traj["task"] = task = traj.pop("task", {})
-    # task = traj["task"]
+    if "task" not in traj:
+        traj["task"] = task = traj.pop("task", {})
+    task = traj["task"]
     goal_timestep = task.get("timestep")
-    goal_timestep = np.full((len,), len - 1, dtype=np.int32) if goal_timestep is None else _ensure_array(goal_timestep)
+    goal_timestep = jnp.full((n,), n - 1, dtype=jnp.int32, device=cpu) if goal_timestep is None else goal_timestep
+    # ezdiff(_t,traj['task'])
 
-    t, w, h = np.meshgrid(np.arange(len), np.arange(window_size), np.arange(action_horizon), indexing="ij")
+    t, w, h = jnp.meshgrid(arange(n), arange(window_size), arange(action_horizon), indexing="ij")
     relative_goal = goal_timestep[:, None, None] - (t - (window_size + 1) + w + h)
     traj["observation"]["task_completed"] = relative_goal <= 0
 
     action_pad_mask = traj.get("action_pad_mask")
+    # pprint(spec({'action_pad_mask': action_pad_mask}))
     if action_pad_mask is None:
-        action_pad_mask = np.ones((*actions.shape[:-1], actions.shape[-1]), dtype=bool)
+        action_pad_mask = jnp.ones((*actions.shape[:-1], actions.shape[-1]), dtype=bool)
     else:
-        action_pad_mask = _ensure_array(action_pad_mask)
+        action_pad_mask = action_pad_mask
         if action_pad_mask.ndim == 2:
             action_pad_mask = action_pad_mask[:, None, None, :]
         elif action_pad_mask.ndim == 3:
             action_pad_mask = action_pad_mask[:, None, :, :]
-    traj["action_pad_mask"] = np.logical_and(
+
+    traj["action_pad_mask"] = jnp.logical_and(
         action_pad_mask,
         ~traj["observation"]["task_completed"][:, :, :, None],
     )
-
     return traj
 
 
 def subsample(traj: Trajectory, *, length: int, rng: np.random.Generator) -> Trajectory:
-    traj = _clone(traj)
     traj_len = traj["action"].shape[0]
     if traj_len <= length:
         return traj
@@ -199,7 +224,6 @@ def subsample(traj: Trajectory, *, length: int, rng: np.random.Generator) -> Tra
 def zero_out_future_proprio(traj: Trajectory) -> Trajectory:
     """Removes all proprio inputs after first one to prevent causal confusion."""
     raise NotImplementedError()
-    traj = _clone(traj)
     proprio = traj["observation"].get("proprio")
     if proprio is None:
         return traj
@@ -209,27 +233,6 @@ def zero_out_future_proprio(traj: Trajectory) -> Trajectory:
     proprio[:, 1:] = 0
     traj["observation"]["proprio"] = proprio
     return traj
-
-
-def flatten_trajectory(traj: Trajectory) -> Iterable[dict[str, Any]]:
-    """Converts a chunked trajectory into a sequence of frame dictionaries."""
-
-    traj_len = traj["action"].shape[0]
-    for idx in range(traj_len):
-        frame = {
-            "observation": utils.tree_map(lambda x: _ensure_array(x)[idx], traj["observation"]),
-            "task": utils.tree_map(lambda x: _ensure_array(x)[idx], traj.get("task", {})),
-            "action": _ensure_array(traj["action"])[idx],
-            "action_pad_mask": _ensure_array(traj["action_pad_mask"])[idx],
-            "dataset_name": traj["dataset_name"][idx]
-            if isinstance(traj.get("dataset_name"), (np.ndarray, list))
-            else traj.get("dataset_name"),
-        }
-        if "action_head_masks" in traj:
-            frame["action_head_masks"] = {
-                head: np.asarray(mask)[idx] for head, mask in traj["action_head_masks"].items()
-            }
-        yield frame
 
 
 def _normalize_resize_size(size: int | tuple[int, int]) -> tuple[int, int]:
@@ -251,12 +254,11 @@ def _is_image_like(value: Any) -> bool:
 
 
 def _resize_image_array(
-    value: Any,
+    array: Any,
     *,
     size: tuple[int, int],
     order: int,
 ) -> np.ndarray:
-    array = _ensure_array(value)
     if array.ndim < 3:
         raise ValueError("Expected image-like array with channel dimension")
     height_axis = array.ndim - 3
@@ -307,9 +309,9 @@ def resize_frame_images(
             f"Unsupported interpolation '{interpolation}'. Expected one of {sorted(_INTERPOLATION_TO_ORDER)}"
         )
     target_size = _normalize_resize_size(size)
-    tree = utils.clone_structure(tree)
     obs = tree.get("observation")
     image = obs.get("image")
+    tim = tree.get("task").get("image")
     if not isinstance(image, dict):
         raise TypeError("Expected 'observation' to contain an 'image' dictionary.")
         return tree
@@ -318,12 +320,13 @@ def resize_frame_images(
         keys = [key for key, value in obs.items() if key != "pad_mask_dict" and _is_image_like(value)]
     for key in keys:
         image[key] = _resize_image_array(image[key], size=target_size, order=order)
+        tim[key] = _resize_image_array(tim[key], size=target_size, order=order)
     tree["observation"]["image"] = image
+    tree["task"]["image"] = tim
     return tree
 
 
 def drop_empty_language(traj: Trajectory) -> Trajectory:
-    traj = _clone(traj)
     language = traj.get("task", {}).get("language_instruction")
     if language is None:
         return traj
@@ -334,18 +337,22 @@ def drop_empty_language(traj: Trajectory) -> Trajectory:
     return traj
 
 
-def uniform_goal_relabel(traj: Trajectory, *, rng: np.random.Generator) -> Trajectory:
-    traj = _clone(traj)
+def uniform_goal_relabel(traj: Trajectory, *, rng: PRNGKey) -> Trajectory:
     obs = traj["observation"]
-    traj_len = _ensure_array(traj["action"]).shape[0]
-    rand = rng.uniform(size=traj_len)
-    low = np.arange(traj_len)
-    high = np.full(traj_len, traj_len)
+    n = obs["timestep"].shape[0]
+    rand = jax.random.uniform(rng, shape=(n,))
+    low = jnp.asarray(np.arange(int(n)), device=cpu)
+    high = jnp.full(n, n, device=cpu)
     goal_indices = (rand * (high - low) + low).astype(int)
-    goal_indices = np.clip(goal_indices, 0, traj_len - 1)
-    goal = utils.tree_map(lambda x: _ensure_array(x)[goal_indices], obs)
-    traj.setdefault("task", {})
-    traj["task"] = utils.tree_merge(traj["task"], goal)
+    goal_indices = jnp.clip(goal_indices, 0, n - 1)
+    goal = jax.tree.map(lambda x: x[goal_indices], obs)
+    _t = traj["task"]
+    traj["task"] = merge(traj["task"], goal)
+
+    iscpu = jax.tree.map(lambda x: x.platform() == "cpu", traj)
+    iscpu_all = jax.tree.reduce(lambda x, y: x and y, iscpu)
+    # pprint(iscpu_all)
+
     return traj
 
 
