@@ -3,18 +3,77 @@ from __future__ import annotations
 from collections.abc import Callable
 from functools import partial
 import importlib
-from typing import Any, TypedDict
+from typing import Any, Hashable, Iterable, TypedDict
 
 import jax
+from orbax import checkpoint as ocp
+
+Spec = dict[Hashable, tuple[Iterable[int], Any]]
 
 
-def spec(tree: dict[str, Any]) -> dict[str, Any]:
+def spec(tree: dict[str, Any], simple=True) -> Spec:
     """Create a spec dictionary for the given tree structure."""
+
+    sd = ocp.utils.to_shape_dtype_struct
 
     def toshape(x):
         return (x.shape, x.dtype) if getattr(x, "shape", None) else x
 
-    return jax.tree.map(toshape, tree)
+    return jax.tree.map(sd if not simple else toshape, tree)
+
+
+def _norm_shape(s) -> tuple[int, ...]:
+    # Accept list/tuple/np shape-like → tuple[int,...]
+    return tuple(s) if s is not None else ()
+
+
+def _norm_dtype(dt) -> str:
+    # Works for strings, numpy/jax dtypes, and objects with .name or .__name__
+    if dt is None:
+        return "None"
+    if hasattr(dt, "name"):  # numpy/jax dtype
+        return str(dt.name)
+    if hasattr(dt, "__name__"):  # Python types like int/float
+        return dt.__name__
+    return str(dt)
+
+
+def diff(a: Spec, b: Spec, simple=True):
+    """
+    Compare two flat specs {key: (shape, dtype)} and report added/removed/changed.
+    Returns:
+        {
+          "added":   {k: (shape, dtype)},
+          "removed": {k: (shape, dtype)},
+          "changed": {k: {"from": (shape, dtype), "to": (shape, dtype)}},
+        }
+    """
+    keys_a, keys_b = set(a), set(b)
+
+    added = {k: b[k] for k in (keys_b - keys_a)}
+    removed = {k: a[k] for k in (keys_a - keys_b)}
+
+    changed = {}
+    for k in keys_a & keys_b:
+        if simple:
+            sa, da = a[k][0], a[k][1]
+            sb, db = b[k][0], b[k][1]
+        else:
+            sa, da = a[k].shape, a[k].dtype
+            sb, db = b[k].shape, b[k].dtype
+        if _norm_shape(sa) != _norm_shape(sb) or _norm_dtype(da) != _norm_dtype(db):
+            changed[k] = {"from": a[k], "to": b[k]}
+
+    return {"added": added, "removed": removed, "changed": changed}
+
+
+def ezdiff(a: dict[str, Any], b: dict[str, Any], simple=True):
+    from crossformer.data.grain.utils import flat
+
+    a, b = spec(flat(a), simple=simple), spec(flat(b), simple=simple)
+    from rich.pretty import pprint
+
+    pprint(diff(a, b))
 
 
 class ModuleSpec(TypedDict):

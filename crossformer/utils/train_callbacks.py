@@ -13,9 +13,9 @@ import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
 import tqdm
-from xgym.rlds.util import apply_persp, perspective_projection
-from xgym.viz.mano import overlay_palm
 
+# from xgym.rlds.util import apply_persp, perspective_projection
+# from xgym.viz.mano import overlay_palm
 from crossformer.data.dataset import make_single_dataset
 from crossformer.data.oxe import HEAD_TO_DATASET
 from crossformer.data.utils.text_processing import TextProcessor
@@ -178,15 +178,9 @@ def remove_text(tasks: Data, zero_text_encoding: Data | None):
         )
         new_pad_dict = flax.core.copy(
             tasks["pad_mask_dict"],
-            {
-                "language_instruction": jnp.zeros_like(
-                    tasks["pad_mask_dict"]["language_instruction"]
-                )
-            },
+            {"language_instruction": jnp.zeros_like(tasks["pad_mask_dict"]["language_instruction"])},
         )
-        tasks = flax.core.copy(
-            tasks, {"language_instruction": new_language, "pad_mask_dict": new_pad_dict}
-        )
+        tasks = flax.core.copy(tasks, {"language_instruction": new_language, "pad_mask_dict": new_pad_dict})
     return tasks
 
 
@@ -195,11 +189,7 @@ def remove_images(tasks: Data):
     updates = {k: jnp.zeros_like(v) for k, v in tasks.items() if "image" in k}
     updates["pad_mask_dict"] = flax.core.copy(
         tasks["pad_mask_dict"],
-        {
-            k: jnp.zeros_like(v)
-            for k, v in tasks["pad_mask_dict"].items()
-            if "image" in k
-        },
+        {k: jnp.zeros_like(v) for k, v in tasks["pad_mask_dict"].items() if "image" in k},
     )
     return flax.core.copy(tasks, updates)
 
@@ -218,9 +208,7 @@ class ValidationCallback(Callback):
 
     def __post_init__(self):
         if self.text_processor is not None:
-            self.zero_text = jax.tree_map(
-                lambda x: x[0], self.text_processor.encode("")
-            )
+            self.zero_text = jax.tree_map(lambda x: x[0], self.text_processor.encode(""))
         else:
             self.zero_text = None
         self.val_iterators = {}
@@ -253,19 +241,14 @@ class ValidationCallback(Callback):
             if "base" in self.modes_to_evaluate:
                 all_tasks["base"] = batch["task"]
             if "image_conditioned" in self.modes_to_evaluate:
-                all_tasks["image_conditioned"] = remove_text(
-                    batch["task"], self.zero_text
-                )
+                all_tasks["image_conditioned"] = remove_text(batch["task"], self.zero_text)
             if "text_conditioned" in self.modes_to_evaluate:
                 all_tasks["text_conditioned"] = remove_images(batch["task"])
 
             if "unconditioned" in self.modes_to_evaluate:
-                all_tasks["unconditioned"] = remove_text(
-                    remove_images(batch["task"]), self.zero_text
-                )
+                all_tasks["unconditioned"] = remove_text(remove_images(batch["task"]), self.zero_text)
             return {
-                k: loss_fn_partial(batch=flax.core.copy(batch, {"task": tasks}))[1]
-                for k, tasks in all_tasks.items()
+                k: loss_fn_partial(batch=flax.core.copy(batch, {"task": tasks}))[1] for k, tasks in all_tasks.items()
             }
 
         self.eval_step = eval_step
@@ -304,9 +287,7 @@ class VisCallback(ValidationCallback):
                 if name in HEAD_TO_DATASET.get("mano", []):
                     # print(metric.keys())
                     k = next(iter(metric.keys()))[0]
-                    assert "vis" in metric[k], (
-                        "dont use VisCallback if no vis key in metric"
-                    )
+                    assert "vis" in metric[k], "dont use VisCallback if no vis key in metric"
                     vis = {k: v.pop("vis") for k, v in metric.items()}[k]
 
                     # NOTE you might want/need to use more of the dataset_kwargs

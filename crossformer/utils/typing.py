@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence, TypeAlias
 
 import jax
+from jax.typing import ArrayLike  # noqa
 
 PRNGKey: TypeAlias = jax.Array  # keys are just arrays: jax.random.PRNGKey
 PyTree: TypeAlias = jax.typing.ArrayLike | Mapping[str, "PyTree"]

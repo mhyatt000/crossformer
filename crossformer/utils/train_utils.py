@@ -49,9 +49,7 @@ class TrainState:
         )
 
     def apply_gradients(self, *, grads, rng):
-        updates, new_opt_state = self.tx.update(
-            grads, self.opt_state, self.model.params
-        )
+        updates, new_opt_state = self.tx.update(grads, self.opt_state, self.model.params)
         new_params = optax.apply_updates(self.model.params, updates)
 
         return self.replace(
@@ -151,22 +149,20 @@ def batched_apply(fn, batch_size):
         outputs = []
         for i in range(0, input_batch_size, batch_size):
             step_batch_size = min(batch_size, input_batch_size - i)
-            step_args, step_kwargs = jax.tree_map(
+            step_args, step_kwargs = jax.tree.map(
                 lambda arr: pad_to_size(arr[i : i + batch_size], batch_size),
                 (args, kwargs),
             )
-            step_args, step_kwargs = jax_utils.merge_along_axis(
-                (step_args, step_kwargs)
-            )
+            step_args, step_kwargs = jax_utils.merge_along_axis((step_args, step_kwargs))
             step_output = fn(*step_args, **step_kwargs)
             step_output = jax.device_get(jax_utils.split_along_axis(step_output))
             outputs.append(
-                jax.tree_map(
+                jax.tree.map(
                     lambda arr: arr[:step_batch_size],
                     step_output,
                 )
             )
-        return jax.tree_map(lambda *args: np.concatenate(args, axis=0), *outputs)
+        return jax.tree.map(lambda *args: np.concatenate(args, axis=0), *outputs)
 
     return wrapped_fn
 
@@ -219,8 +215,7 @@ def create_lr_schedule(name: str, **kwargs):
                     end_value=kwargs["peak_value"],
                     transition_steps=kwargs["warmup_steps"],
                 ),
-                lambda step: kwargs["peak_value"]
-                / jnp.sqrt((step + timescale) / timescale),
+                lambda step: kwargs["peak_value"] / jnp.sqrt((step + timescale) / timescale),
             ],
             [kwargs["warmup_steps"]],
         )
@@ -259,30 +254,20 @@ def freeze_weights(
     # freeze anything that matches fnmatch patterns in `frozen_keys`
     # path is a string of .-separated module names, e.g. ('crossformer_transformer.BlockTransformer_0...')
     param_partitions = flax.traverse_util.path_aware_map(
-        lambda path, v: (
-            "frozen"
-            if any(fnmatch(".".join(path), key) for key in frozen_keys)
-            else "trainable"
-        ),
+        lambda path, v: ("frozen" if any(fnmatch(".".join(path), key) for key in frozen_keys) else "trainable"),
         params_or_params_shape,
     )
     tx = optax.multi_transform(partition_optimizers, param_partitions)
 
     logging.debug("Frozen params:")
     flax.traverse_util.path_aware_map(
-        lambda path, opt_status: (
-            logging.debug(".".join(path)) if opt_status == "frozen" else None
-        ),
+        lambda path, opt_status: (logging.debug(".".join(path)) if opt_status == "frozen" else None),
         param_partitions,
     )
-    total_params = sum(
-        jax.tree_util.tree_leaves(
-            jax.tree_map(lambda x: x.size, params_or_params_shape)
-        )
-    )
+    total_params = sum(jax.tree_util.tree_leaves(jax.tree.map(lambda x: x.size, params_or_params_shape)))
     trainable_params = sum(
         jax.tree_util.tree_leaves(
-            jax.tree_map(
+            jax.tree.map(
                 lambda x, y: x.size if y == "trainable" else 0,
                 params_or_params_shape,
                 param_partitions,
@@ -295,9 +280,7 @@ def freeze_weights(
     return (tx, param_partitions) if return_partitions else tx
 
 
-def create_optimizer(
-    params_or_params_shape: Params, **kwargs: dict
-) -> optax.GradientTransformation:
+def create_optimizer(params_or_params_shape: Params, **kwargs: dict) -> optax.GradientTransformation:
     """Creates optimizer for CrossFormer.
 
     kwargs are the kwargs for optax.adamw; if the "learning_rate" key is a dict, it is interpreted
@@ -318,9 +301,7 @@ def create_optimizer(
     kwargs["learning_rate"] = lr_callable
 
     # Following ViT, timm, MAE: this mask skips weight decay on biases and LayerNorm parameters
-    wd_mask = jax.tree_util.tree_map_with_path(
-        lambda path, x: "kernel" in jax.tree_util.keystr(path), params_or_params_shape
-    )
+    wd_mask = jax.tree.map_with_path(lambda path, x: "kernel" in jax.tree_util.keystr(path), params_or_params_shape)
 
     clip_gradient = kwargs.pop("clip_gradient", None)
     frozen_keys = kwargs.pop("frozen_keys", None)
@@ -336,17 +317,13 @@ def create_optimizer(
         )
 
     if frozen_keys:
-        tx, param_partitions = freeze_weights(
-            tx, params_or_params_shape, frozen_keys, return_partitions=True
-        )
-        zero_frozen_params = lambda params: jax.tree_map(
+        tx, param_partitions = freeze_weights(tx, params_or_params_shape, frozen_keys, return_partitions=True)
+        zero_frozen_params = lambda params: jax.tree.map(
             lambda x, y: x if y == "trainable" else jnp.zeros(()),
             params,
             param_partitions,
         )
-        param_norm_callable = lambda params: optax.global_norm(
-            zero_frozen_params(params)
-        )
+        param_norm_callable = lambda params: optax.global_norm(zero_frozen_params(params))
     else:
         param_norm_callable = optax.global_norm
 
@@ -394,15 +371,13 @@ def merge_params(target_params: Params, pretrained_params: Params) -> Params:
     keys_to_update = [
         k
         for k in flat_target_params
-        if k in flat_pretrained_params
-        and flat_target_params[k].shape == flat_pretrained_params[k].shape
+        if k in flat_pretrained_params and flat_target_params[k].shape == flat_pretrained_params[k].shape
     ]
     missing_keys = [k for k in flat_target_params if k not in flat_pretrained_params]
     shape_mismatch_keys = [
         k
         for k in flat_target_params
-        if k in flat_pretrained_params
-        and flat_target_params[k].shape != flat_pretrained_params[k].shape
+        if k in flat_pretrained_params and flat_target_params[k].shape != flat_pretrained_params[k].shape
     ]
 
     for key in keys_to_update:
@@ -410,17 +385,11 @@ def merge_params(target_params: Params, pretrained_params: Params) -> Params:
     if missing_keys or shape_mismatch_keys:
         logging.info("########## Parameters skipped during model loading: ##########")
         for key in missing_keys:
-            logging.info(
-                f"Param missing in pre-trained model, skipping: {'.'.join(key)}"
-            )
+            logging.info(f"Param missing in pre-trained model, skipping: {'.'.join(key)}")
         for key in shape_mismatch_keys:
-            logging.info(
-                f"Param with differing shape in pre-trained model, skipping: {'.'.join(key)}"
-            )
+            logging.info(f"Param with differing shape in pre-trained model, skipping: {'.'.join(key)}")
 
-    flat_target_params = flax.core.copy(
-        flat_target_params, {k: flat_pretrained_params[k] for k in keys_to_update}
-    )
+    flat_target_params = flax.core.copy(flat_target_params, {k: flat_pretrained_params[k] for k in keys_to_update})
     target_params = flax.traverse_util.unflatten_dict(flat_target_params)
     return target_params
 
@@ -473,18 +442,14 @@ def hf_weights_loader(params, hf_model):
     return params
 
 
-def siglip_weights_loader(
-    params, siglip_path="gs://big_vision/siglip/webli_en_b16_256_60500360.npz"
-):
+def siglip_weights_loader(params, siglip_path="gs://big_vision/siglip/webli_en_b16_256_60500360.npz"):
     # load siglip params, and parse keys from np array
     with tf.io.gfile.GFile(siglip_path, "rb") as f:
         siglip_params = np.load(f)
 
     flat_params = flax.traverse_util.flatten_dict(params)
     relevant_params = {
-        k: jnp.array(v)
-        for k, v in siglip_params.items()
-        if k.startswith("params/img/Transformer/encoderblock")
+        k: jnp.array(v) for k, v in siglip_params.items() if k.startswith("params/img/Transformer/encoderblock")
     }
     translated_params = {
         k.replace(
@@ -495,9 +460,7 @@ def siglip_weights_loader(
     }
     translated_params = {tuple(k.split("/")): v for k, v in translated_params.items()}
     assert set(translated_params) - set(flat_params) == set()
-    assert all(
-        translated_params[k].shape == flat_params[k].shape for k in translated_params
-    )
+    assert all(translated_params[k].shape == flat_params[k].shape for k in translated_params)
     flat_params.update(translated_params)
     updated_params = flax.traverse_util.unflatten_dict(flat_params)
 
@@ -511,9 +474,7 @@ def resnet_26_loader(
 ):
     if "hf://" in restore_path:
         restore_path = restore_path.removeprefix("hf://")
-        resnet_params = np.load(
-            hf_hub_download(repo_id=restore_path, filename="params.npz")
-        )
+        resnet_params = np.load(hf_hub_download(repo_id=restore_path, filename="params.npz"))
     else:
         with tf.io.gfile.GFile(restore_path, "rb") as f:
             resnet_params = np.load(f)
