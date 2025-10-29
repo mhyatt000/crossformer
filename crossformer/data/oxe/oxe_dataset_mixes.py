@@ -17,6 +17,7 @@ HEAD_TO_DATASET = {
         "xgym_stack_single",
         "xgym_duck_single",
         "xgym_sweep_single",
+        "my_dataset",
         #
         "berkeley_mvp_converted_externally_to_rlds",
         "nyu_rot_dataset_converted_externally_to_rlds",
@@ -69,6 +70,8 @@ HEAD_TO_DATASET = {
 }
 HEAD_TO_DATASET = {k: HEAD_TO_DATASET[k] for k in ["single_arm", "mano"]}
 
+DATASET_TO_HEAD = {d: head for head, dsets in HEAD_TO_DATASET.items() for d in dsets}
+
 OXE_MAGIC_SOUP_BALANCED = [
     ("kuka", 0.14503701874493363),
     ("taco_play", 0.06657998827701668),
@@ -106,9 +109,9 @@ CROSS_EMBODIMENT_TARGET = [
     ("omnimimic_gnm_dataset", 0.2),
 ]
 
-CROSS_EMBODIMENT = [
-    (name, weight * 0.15) for name, weight in OXE_MAGIC_SOUP_BALANCED
-] + [(name, weight * 0.85) for name, weight in CROSS_EMBODIMENT_TARGET]
+CROSS_EMBODIMENT = [(name, weight * 0.15) for name, weight in OXE_MAGIC_SOUP_BALANCED] + [
+    (name, weight * 0.85) for name, weight in CROSS_EMBODIMENT_TARGET
+]
 
 
 allweight = lambda arr, w: [(name, weight * w) for name, weight in arr]

@@ -180,6 +180,7 @@ OXE_DATASET_CONFIGS = {
     "xgym_sweep_single": xgym,
     "xgym_play_single": xgym,
     "xgym_single": xgym,
+    "my_dataset": xgym,
     # "rlds_oakink": mano,  # OAK INK Dataset
     # the rest were removed for now since we dont use that data
 }
