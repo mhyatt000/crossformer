@@ -143,6 +143,7 @@ ignore = [ # exceptions to select
 # whitelist potentially 'unsafe' linter fixes
 fixable = [
     "I", "W", "E4", "E7",
+    "E702", #  Multiple statements on one line (semicolon)
     "F401",   # unused imports
     "F541", # f-string without any placeholders
     "UP006",  # Use `list` instead of `List` for type annotation
