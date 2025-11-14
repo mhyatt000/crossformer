@@ -1,30 +1,26 @@
-""" saves the oakink sequences (with horizon=4) to disk as gifs """
+"""saves the oakink sequences (with horizon=4) to disk as gifs"""
 
-import argparse
-import json
-import os
-from typing import Callable, Tuple
+from __future__ import annotations
+
+from typing import Callable, ClassVar
 
 import cv2
-import jax
-import jax.numpy as jnp
+import imageio
+import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
-from termcolor import cprint
-from tqdm import tqdm
+import wandb
+
+from crossformer.data.oxe import ActionDim
 
 # from manotorch.manolayer import ManoLayer
 # from oikit.oi_image.oi_image import OakInkImageSequence
 # from oikit.oi_image.utils import persp_project
 from crossformer.viz._oikit import (  # OpenDRRenderer,
-    caption_view,
-    edge_color_hand,
     edge_list_hand,
     edge_list_obj,
-    vert_color_hand,
     vert_type_hand,
 )
-import wandb
 
 
 def persp_project(points3d, cam_intr):
@@ -34,13 +30,9 @@ def persp_project(points3d, cam_intr):
 
 
 def imgs2gif(imgs, gif_path, fps=10):
-    import imageio
-
     imageio.mimsave(gif_path, imgs, fps=fps)
     return
 
-
-import matplotlib.pyplot as plt
 
 # Get the magma colormap
 cmap = plt.get_cmap("plasma")
@@ -89,7 +81,6 @@ def draw_wireframe(
     vert_type=None,
     vert_mask=None,
 ):
-
     vert_list = np.asarray(vert_list)
     n_vert = len(vert_list)
     n_edge = len(edge_list)
@@ -118,9 +109,8 @@ def draw_wireframe(
 
     # draw edge
     for edge_id, connection in enumerate(edge_list):
-        if vert_mask is not None:
-            if not vert_mask[int(connection[1])] or not vert_mask[int(connection[0])]:
-                continue
+        if vert_mask is not None and (not vert_mask[int(connection[1])] or not vert_mask[int(connection[0])]):
+            continue
         coord1 = vert_list[int(connection[1])]
         coord2 = vert_list[int(connection[0])]
         cv2.line(
@@ -132,9 +122,8 @@ def draw_wireframe(
         )
 
     for vert_id in range(vert_list.shape[0]):
-        if vert_mask is not None:
-            if not vert_mask[vert_id]:
-                continue
+        if vert_mask is not None and not vert_mask[vert_id]:
+            continue
         draw_type = vert_type[vert_id]
 
         markers = {
@@ -174,7 +163,6 @@ def draw_wireframe_hand(img, hand_joint_arr, hand_joint_mask, hcolor=horizon_col
 
 
 def draw(img, points, color=horizon_colors[0], size=1):
-
     parent = points[0]
     color = [int(x * 255) for x in color[:3]]
     for point in points[1:]:
@@ -245,12 +233,8 @@ def denormalize(thing, stats, ds_key="rlds_oakink", key="action"):
     return thing
 
 
-from crossformer.data.oxe import ActionDim
-
-
 class SequenceViz:
-
-    videos = []
+    videos: ClassVar = []
 
     def __init__(self, imgs, joints, actions, preds, cam):
         self.imgs = imgs
@@ -268,17 +252,10 @@ class SequenceViz:
 
     @staticmethod
     def from_batch(batch, stats):
-
         proprio = np.array(batch["observation"]["proprio_mano"])
 
-        preds = (
-            denormalize(np.array(batch["predict"]), stats=stats)[:, :, :, : 21 * 3]
-            if "predict" in batch
-            else None
-        )
-        actions = denormalize(np.array(batch["action"]), stats=stats)[
-            :, :, :, : 21 * 3
-        ]  # h dim
+        preds = denormalize(np.array(batch["predict"]), stats=stats)[:, :, :, : 21 * 3] if "predict" in batch else None
+        actions = denormalize(np.array(batch["action"]), stats=stats)[:, :, :, : 21 * 3]  # h dim
 
         joints = proprio[:, :, : 21 * 3]
         cam_intr = proprio[:, :, -3 * 3 :]
@@ -314,9 +291,7 @@ class SequenceViz:
             # task = s["language_instruction"].numpy().decode("utf-8")
 
             j2d = persp_project(joints[i].reshape(21, 3), cams[i].reshape(3, 3))
-            draw_wireframe_hand(
-                image, j2d, hand_joint_mask=None, hcolor=horizon_colors[0]
-            )
+            draw_wireframe_hand(image, j2d, hand_joint_mask=None, hcolor=horizon_colors[0])
 
             ji = joints[i].reshape(21, 3)
             if preds[i][0].reshape(-1).shape[0] == ActionDim.DMANO_PFING:
@@ -347,7 +322,6 @@ class SequenceViz:
             ### predictions
             pframe = preds[i]
             for h, p in enumerate(pframe):
-
                 if self.use_delta:
                     act = pframe[: h + 1].sum(axis=0)
                     j = ji + act.reshape(-1)
@@ -379,11 +353,9 @@ class SequenceViz:
                 )
                 SequenceViz.videos.append(video)
         else:
-            video = self._wandb(
-                self.imgs, self.joints, self.actions, self.cam, task=self.task
-            )
+            video = self._wandb(self.imgs, self.joints, self.actions, self.cam, task=self.task)
             SequenceViz.videos.append(video)
 
     def flush(i, limit=32):
-        wandb.log({f"videos/mesh.vid": SequenceViz.videos[:limit]}, step=i)
+        wandb.log({"videos/mesh.vid": SequenceViz.videos[:limit]}, step=i)
         SequenceViz.videos = []

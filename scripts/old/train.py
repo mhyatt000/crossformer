@@ -19,6 +19,7 @@ from ml_collections import config_flags
 import optax
 from tpu_utils import prevent_cross_region
 import tqdm
+import wandb
 
 import crossformer
 from crossformer.data.dataset import make_interleaved_dataset
@@ -37,7 +38,6 @@ from crossformer.utils.train_utils import (
     TrainState,
 )
 from crossformer.utils.typing import Data
-import wandb
 
 FLAGS = flags.FLAGS
 

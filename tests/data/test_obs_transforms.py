@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pytest
 import tensorflow as tf
 
@@ -23,11 +25,13 @@ class _DummyTransforms:
 
     def augment_image(self, image, *, seed, **kwargs):
         shape = tuple(tf.shape(image).numpy().tolist())
-        self.augment_calls.append({
-            "shape": shape,
-            "seed": tuple(tf.reshape(seed, [-1]).numpy().tolist()),
-            "kwargs": kwargs,
-        })
+        self.augment_calls.append(
+            {
+                "shape": shape,
+                "seed": tuple(tf.reshape(seed, [-1]).numpy().tolist()),
+                "kwargs": kwargs,
+            }
+        )
         return tf.identity(image)
 
 
@@ -69,24 +73,16 @@ def dummy_transforms(monkeypatch):
     dummy = _DummyTransforms()
     transforms_module = obs_transforms.dl.transforms
     monkeypatch.setattr(transforms_module, "resize_image", dummy.resize_image)
-    monkeypatch.setattr(
-        transforms_module, "resize_depth_image", dummy.resize_depth_image
-    )
-    monkeypatch.setattr(
-        transforms_module, "augment_image", dummy.augment_image
-    )
+    monkeypatch.setattr(transforms_module, "resize_depth_image", dummy.resize_depth_image)
+    monkeypatch.setattr(transforms_module, "augment_image", dummy.augment_image)
     return dummy
 
 
 def test_decode_and_resize_decodes_strings_and_preserves_tensors(dummy_transforms):
-    rgb_tensor = tf.constant(
-        [[[255, 0, 0], [0, 255, 0]], [[0, 0, 255], [255, 255, 0]]], dtype=tf.uint8
-    )
+    rgb_tensor = tf.constant([[[255, 0, 0], [0, 255, 0]], [[0, 0, 255], [255, 255, 0]]], dtype=tf.uint8)
     rgb_string = tf.io.encode_png(rgb_tensor)
 
-    depth_tensor = tf.constant(
-        [[[0], [128]], [[255], [64]]], dtype=tf.uint16
-    )
+    depth_tensor = tf.constant([[[0], [128]], [[255], [64]]], dtype=tf.uint16)
     depth_string = tf.io.encode_png(depth_tensor)
 
     predecoded_rgb = tf.ones((2, 2, 3), dtype=tf.uint8)

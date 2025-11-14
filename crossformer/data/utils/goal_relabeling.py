@@ -3,14 +3,14 @@ Contains simple goal relabeling logic for BC use-cases where rewards and next_ob
 Each function should add entries to the "task" dict.
 """
 
-from typing import Optional
+from __future__ import annotations
 
 import tensorflow as tf
 
 from crossformer.data.utils.data_utils import tree_merge
 
 
-def uniform(traj: dict, max_goal_distance: Optional[int] = None) -> dict:
+def uniform(traj: dict, max_goal_distance: int | None = None) -> dict:
     """
     Relabels with a true uniform distribution over future states.
     Optionally caps goal distance.
@@ -21,9 +21,7 @@ def uniform(traj: dict, max_goal_distance: Optional[int] = None) -> dict:
     rand = tf.random.uniform([traj_len])
     low = tf.cast(tf.range(traj_len), tf.float32)
     if max_goal_distance is not None:
-        high = tf.cast(
-            tf.minimum(tf.range(traj_len) + max_goal_distance, traj_len), tf.float32
-        )
+        high = tf.cast(tf.minimum(tf.range(traj_len) + max_goal_distance, traj_len), tf.float32)
     else:
         high = tf.cast(traj_len, tf.float32)
     goal_idxs = tf.cast(rand * (high - low) + low, tf.int32)

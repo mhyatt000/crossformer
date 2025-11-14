@@ -12,6 +12,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from ml_collections import config_flags, ConfigDict
 import tensorflow as tf
 import tqdm
+import wandb
 
 from crossformer.data.dataset import make_interleaved_dataset, make_single_dataset
 from crossformer.data.oxe import (
@@ -26,7 +27,6 @@ from crossformer.utils.train_utils import (
     process_text,
     Timer,
 )
-import wandb
 
 try:
     from jax_smi import initialise_tracking  # type: ignore

@@ -4,7 +4,7 @@ FUNCTION infer(image paths, human detector, keypoint model, device, hand reconst
         # Load and preprocess the image
 
         # Use the detector to find humans in the img_cv2
-        # # Get predicted bboxes and confidence scores 
+        # # Get predicted bboxes and confidence scores
 
         # Use the keypoint model to detect keypoints based on the detected bounding boxes and scores
 
@@ -12,9 +12,9 @@ FUNCTION infer(image paths, human detector, keypoint model, device, hand reconst
 
         IF there are no bounding boxes:
             # skip to the next image
-            CONTINUE 
+            CONTINUE
 
-        ### reconstruct the hands 
+        ### reconstruct the hands
             # Create a dataset with the provided configuration, image, bounding boxes, and hand orientation
             # Create a DataLoader for batching the dataset
             # Initialize a Store instance for storing results
@@ -32,7 +32,7 @@ FUNCTION infer(image paths, human detector, keypoint model, device, hand reconst
 FUNCTION render_hand_view(renderer, batch, out, pred_cam_t_full, img_size, img_path, S):
 
     FOR item in batch
-        # Get the base filename and person ID 
+        # Get the base filename and person ID
         # Normalize the image using default mean and standard deviation
 
         # Get predicted vertices and camera translation for the current person

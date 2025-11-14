@@ -1,15 +1,18 @@
-import sys
+from __future__ import annotations
+
 from pathlib import Path
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import jax  # noqa: E402
-from jax._src import config as jax_internal_config  # noqa: E402
-import types  # noqa: E402
-import jax.numpy as jnp  # noqa: E402
-import numpy as np  # noqa: E402
+import types
+
+import jax
+from jax._src import config as jax_internal_config
+import jax.numpy as jnp
+import numpy as np
 
 # Flax expects newer JAX builds that expose define_bool_state; alias to the
 # modern equivalent when running tests on newer releases.
@@ -29,6 +32,7 @@ if "jax.experimental.maps" not in sys.modules:
         setattr(jax.experimental, "maps", maps_module)
 
 if not hasattr(jax.nn, "normalize"):
+
     def _normalize(x, axis=-1, epsilon=1e-12):
         norm = jnp.linalg.norm(x, axis=axis, keepdims=True)
         return x / (norm + epsilon)
@@ -107,31 +111,24 @@ if "tensorflow" not in sys.modules:
     tf_module.constant = lambda value, dtype=None: _to_tensor(value, dtype)
     tf_module.shape = lambda value: np.shape(value)
     tf_module.range = _range
+
     def _dtype_of(*values, default=None):
         for value in values:
             if isinstance(value, _Tensor) and getattr(value, "_tf_dtype", None) is not None:
                 return value._tf_dtype
         return default
 
-    tf_module.maximum = lambda x, y: _tensor_from(
-        np.maximum(_asarray(x), _asarray(y)), _dtype_of(x, y)
-    )
-    tf_module.minimum = lambda x, y: _tensor_from(
-        np.minimum(_asarray(x), _asarray(y)), _dtype_of(x, y)
-    )
+    tf_module.maximum = lambda x, y: _tensor_from(np.maximum(_asarray(x), _asarray(y)), _dtype_of(x, y))
+    tf_module.minimum = lambda x, y: _tensor_from(np.minimum(_asarray(x), _asarray(y)), _dtype_of(x, y))
     tf_module.where = lambda cond, x, y: _tensor_from(
         np.where(_asarray(cond), _asarray(x), _asarray(y)), _dtype_of(x, y)
     )
-    tf_module.logical_and = lambda x, y: _tensor_from(
-        np.logical_and(_asarray(x), _asarray(y)), np.bool_
-    )
+    tf_module.logical_and = lambda x, y: _tensor_from(np.logical_and(_asarray(x), _asarray(y)), np.bool_)
     tf_module.logical_not = lambda x: _tensor_from(np.logical_not(_asarray(x)), np.bool_)
     tf_module.fill = lambda dims, value: _tensor_from(
         np.full(tuple(np.asarray(dims, dtype=int).tolist()), value), type(value)
     )
-    tf_module.meshgrid = lambda *args, **kwargs: [
-        _Tensor(arr) for arr in np.meshgrid(*map(_asarray, args), **kwargs)
-    ]
+    tf_module.meshgrid = lambda *args, **kwargs: [_Tensor(arr) for arr in np.meshgrid(*map(_asarray, args), **kwargs)]
     tf_module.concat = lambda values, axis=0: _tensor_from(
         np.concatenate([_asarray(v) for v in values], axis=axis),
         _dtype_of(*values),
@@ -152,20 +149,19 @@ if "tensorflow" not in sys.modules:
         np.array([fn(elem) for elem in _asarray(elems)]), fn_output_signature
     )
     tf_module.reduce_any = lambda value, axis=None: np.any(value, axis=axis)
-    tf_module.equal = lambda x, y: _tensor_from(
-        np.equal(_asarray(x), _asarray(y)), np.bool_
-    )
+    tf_module.equal = lambda x, y: _tensor_from(np.equal(_asarray(x), _asarray(y)), np.bool_)
     tf_module.reshape = lambda tensor, shape: _tensor_from(
         np.reshape(_asarray(tensor), tuple(shape)), getattr(tensor, "dtype", None)
     )
     tf_module.cast = lambda value, dtype: _tensor_from(
         _asarray(value).astype(getattr(dtype, "as_numpy_dtype", dtype)), dtype
     )
+
     def _string_length(value):
         arr = _asarray(value)
 
         def _len(elem):
-            if isinstance(elem, bytes) or isinstance(elem, np.bytes_):
+            if isinstance(elem, (bytes, np.bytes_)):
                 return len(elem.decode("utf-8"))
             return len(str(elem))
 
@@ -174,9 +170,7 @@ if "tensorflow" not in sys.modules:
 
     tf_module.strings = types.SimpleNamespace(length=_string_length)
     tf_module.nest = types.SimpleNamespace(
-        map_structure=lambda func, *structures: jax.tree_util.tree_map(
-            lambda *xs: func(*xs), *structures
-        )
+        map_structure=lambda func, *structures: jax.tree_util.tree_map(lambda *xs: func(*xs), *structures)
     )
 
     sys.modules["tensorflow"] = tf_module

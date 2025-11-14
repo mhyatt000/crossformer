@@ -127,11 +127,7 @@ class CNMeta(type):
 
     def __new__(cls, name, bases, class_dict):
         # auto wrap with default_factory
-        N = (
-            lambda k, v: k.startswith("_")
-            or isinstance(v, Field)
-            or inspect.ismethod(v)
-        )
+        N = lambda k, v: k.startswith("_") or isinstance(v, Field) or inspect.ismethod(v)
         Y = lambda k, v: isinstance(v, (list, dict)) or is_dataclass(v)
         cond = lambda k, v: Y(k, v) and not N(k, v)
 
@@ -227,9 +223,7 @@ def asdataclass(target: type[T]):
             cfg: target = OmegaConf.to_object(cfg)  # ._clean()
             pprint(cfg)
 
-            assert isinstance(cfg, target), (
-                f"cfg must be of type {target}, got {type(cfg)}"
-            )
+            assert isinstance(cfg, target), f"cfg must be of type {target}, got {type(cfg)}"
             return func(cfg, *args, **kwargs)
 
         return wrapper

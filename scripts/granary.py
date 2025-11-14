@@ -1,5 +1,6 @@
-from arec import ArrayRecordBuilder
-from arec import unpack_record
+from __future__ import annotations
+
+from arec import ArrayRecordBuilder, unpack_record
 import grain
 from grain._src.python import options as grain_options
 import jax
@@ -41,9 +42,7 @@ def spec(x):
 
 h = 4  # horizon
 batch_size = 256
-read_options = grain_options.ReadOptions(
-    num_threads=10, prefetch_buffer_size=8 * batch_size
-)
+read_options = grain_options.ReadOptions(num_threads=10, prefetch_buffer_size=8 * batch_size)
 
 ds = (
     # You can also use a shortcut grain.MapDataset.range for

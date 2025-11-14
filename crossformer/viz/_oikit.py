@@ -1,13 +1,12 @@
-""" from OakInk oikit.oi_image.viz_tool """
+"""from OakInk oikit.oi_image.viz_tool"""
 
-import math
+from __future__ import annotations
+
+from collections.abc import Iterable, Sized
 
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-
-import numpy as np
-from collections.abc import Iterable, Sized
 
 # import transforms3d as t3d
 # from opendr.camera import ProjectPoints
@@ -15,8 +14,7 @@ from collections.abc import Iterable, Sized
 # from opendr.lighting import LambertianPointLight
 
 
-class OpenDRRenderer(object):
-
+class OpenDRRenderer:
     def __init__(self, img_size=256, flength=500.0):  # 822.79041):  #
         self.w = img_size
         self.h = img_size
@@ -62,8 +60,12 @@ class OpenDRRenderer(object):
                     final_vertex_color = vertex_color
             else:
                 final_vertex_color = None
-        elif (isinstance(verts, Iterable) and isinstance(verts, Sized) and isinstance(faces, Iterable) and
-              isinstance(faces, Sized)):
+        elif (
+            isinstance(verts, Iterable)
+            and isinstance(verts, Sized)
+            and isinstance(faces, Iterable)
+            and isinstance(faces, Sized)
+        ):
             # support multiple mesh
             assert len(verts) == len(faces), f"verts and faces do not match, got {len(verts)} and {len(faces)}"
 
@@ -84,7 +86,8 @@ class OpenDRRenderer(object):
                 for mesh_id in range(n_mesh):
                     if vertex_color[mesh_id].ndim == 1:
                         final_vertex_color.append(
-                            np.repeat(vertex_color[mesh_id][None, ...], len(verts[mesh_id]), axis=0))
+                            np.repeat(vertex_color[mesh_id][None, ...], len(verts[mesh_id]), axis=0)
+                        )
                     else:
                         final_vertex_color.append(vertex_color[mesh_id])
                 final_vertex_color = np.concatenate(final_vertex_color, axis=0)
@@ -92,7 +95,8 @@ class OpenDRRenderer(object):
                 final_vertex_color = None
         else:
             raise NotImplementedError(
-                f"opendr do not support verts and faces, got type {type(verts)} and {type(faces)}")
+                f"opendr do not support verts and faces, got type {type(verts)} and {type(faces)}"
+            )
 
         dist = np.zeros(5)
         dist = dist.flatten()
@@ -117,7 +121,7 @@ class OpenDRRenderer(object):
             t=t,
             f=f,
             c=pp,
-            k=dist  # camera translation  # focal lengths  # camera center (principal point)
+            k=dist,  # camera translation  # focal lengths  # camera center (principal point)
         )  # OpenCv distortion params
 
         if near is None:
@@ -190,7 +194,6 @@ def simple_renderer(rn, verts, faces, yrot=np.radians(120), color=None):
 
 
 def _create_renderer(w=640, h=480, rt=np.zeros(3), t=np.zeros(3), f=None, c=None, k=None, near=0.5, far=10.0):
-
     f = np.array([w, w]) / 2.0 if f is None else f
     c = np.array([w, h]) / 2.0 if c is None else c
     k = np.zeros(5) if k is None else k
@@ -245,57 +248,61 @@ edge_list_hand = [
     (18, 19),
     (19, 20),
 ]
-vert_color_hand = np.array([
-    [1.0, 0.0, 0.0],
-    #
-    [0.0, 0.4, 0.2],
-    [0.0, 0.6, 0.3],
-    [0.0, 0.8, 0.4],
-    [0.0, 1.0, 0.5],
-    #
-    [0.0, 0.0, 0.4],
-    [0.0, 0.0, 0.6],
-    [0.0, 0.0, 0.8],
-    [0.0, 0.0, 1.0],
-    #
-    [0.0, 0.4, 0.4],
-    [0.0, 0.6, 0.6],
-    [0.0, 0.8, 0.8],
-    [0.0, 1.0, 1.0],
-    #
-    [0.4, 0.4, 0.0],
-    [0.6, 0.6, 0.0],
-    [0.8, 0.8, 0.0],
-    [1.0, 1.0, 0.0],
-    #
-    [0.4, 0.0, 0.4],
-    [0.6, 0.0, 0.6],
-    [0.7, 0.0, 0.8],
-    [1.0, 0.0, 1.0],
-])
+vert_color_hand = np.array(
+    [
+        [1.0, 0.0, 0.0],
+        #
+        [0.0, 0.4, 0.2],
+        [0.0, 0.6, 0.3],
+        [0.0, 0.8, 0.4],
+        [0.0, 1.0, 0.5],
+        #
+        [0.0, 0.0, 0.4],
+        [0.0, 0.0, 0.6],
+        [0.0, 0.0, 0.8],
+        [0.0, 0.0, 1.0],
+        #
+        [0.0, 0.4, 0.4],
+        [0.0, 0.6, 0.6],
+        [0.0, 0.8, 0.8],
+        [0.0, 1.0, 1.0],
+        #
+        [0.4, 0.4, 0.0],
+        [0.6, 0.6, 0.0],
+        [0.8, 0.8, 0.0],
+        [1.0, 1.0, 0.0],
+        #
+        [0.4, 0.0, 0.4],
+        [0.6, 0.0, 0.6],
+        [0.7, 0.0, 0.8],
+        [1.0, 0.0, 1.0],
+    ]
+)
 vert_color_hand = vert_color_hand[:, ::-1]
-edge_color_hand = np.array([
-    vert_color_hand[1, :],
-    vert_color_hand[2, :],
-    vert_color_hand[3, :],
-    vert_color_hand[4, :],
-    vert_color_hand[5, :],
-    vert_color_hand[6, :],
-    vert_color_hand[7, :],
-    vert_color_hand[8, :],
-    vert_color_hand[9, :],
-    vert_color_hand[10, :],
-    vert_color_hand[11, :],
-    vert_color_hand[12, :],
-    vert_color_hand[13, :],
-    vert_color_hand[14, :],
-    vert_color_hand[15, :],
-    vert_color_hand[16, :],
-    vert_color_hand[17, :],
-    vert_color_hand[18, :],
-    vert_color_hand[19, :],
-    vert_color_hand[20, :],
-])
+edge_color_hand = np.array(
+    [
+        vert_color_hand[1, :],
+        vert_color_hand[2, :],
+        vert_color_hand[3, :],
+        vert_color_hand[4, :],
+        vert_color_hand[5, :],
+        vert_color_hand[6, :],
+        vert_color_hand[7, :],
+        vert_color_hand[8, :],
+        vert_color_hand[9, :],
+        vert_color_hand[10, :],
+        vert_color_hand[11, :],
+        vert_color_hand[12, :],
+        vert_color_hand[13, :],
+        vert_color_hand[14, :],
+        vert_color_hand[15, :],
+        vert_color_hand[16, :],
+        vert_color_hand[17, :],
+        vert_color_hand[18, :],
+        vert_color_hand[19, :],
+        vert_color_hand[20, :],
+    ]
+)
 vert_type_hand = [
     "star",
     "circle",
@@ -360,16 +367,17 @@ def draw_wireframe_hand(img, hand_joint_arr, hand_joint_mask):
     )
 
 
-def draw_wireframe(img,
-                   vert_list,
-                   vert_color=np.array([200.0, 0.0, 0.0]),
-                   edge_color=np.array([0.0, 0.0, 200.0]),
-                   edge_list=edge_list_obj,
-                   vert_size=3,
-                   edge_size=1,
-                   vert_type=None,
-                   vert_mask=None):
-
+def draw_wireframe(
+    img,
+    vert_list,
+    vert_color=np.array([200.0, 0.0, 0.0]),
+    edge_color=np.array([0.0, 0.0, 200.0]),
+    edge_list=edge_list_obj,
+    vert_size=3,
+    edge_size=1,
+    vert_type=None,
+    vert_mask=None,
+):
     vert_list = np.asarray(vert_list)
     n_vert = len(vert_list)
     n_edge = len(edge_list)
@@ -398,9 +406,8 @@ def draw_wireframe(img,
 
     # draw edge
     for edge_id, connection in enumerate(edge_list):
-        if vert_mask is not None:
-            if not vert_mask[int(connection[1])] or not vert_mask[int(connection[0])]:
-                continue
+        if vert_mask is not None and (not vert_mask[int(connection[1])] or not vert_mask[int(connection[0])]):
+            continue
         coord1 = vert_list[int(connection[1])]
         coord2 = vert_list[int(connection[0])]
         cv2.line(
@@ -412,9 +419,8 @@ def draw_wireframe(img,
         )
 
     for vert_id in range(vert_list.shape[0]):
-        if vert_mask is not None:
-            if not vert_mask[vert_id]:
-                continue
+        if vert_mask is not None and not vert_mask[vert_id]:
+            continue
         draw_type = vert_type[vert_id]
         # if vert_id in [1, 5, 9, 13, 17]:  # mcp joint
         if draw_type == "circle":

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -5,18 +7,16 @@ import numpy as np
 from crossformer.model.components.base import TokenGroup
 from crossformer.model.components.transformer import (
     AddPositionEmbs,
+    common_transformer_sizes,
     Encoder1DBlock,
     MAPHead,
     MlpBlock,
     Transformer,
-    common_transformer_sizes,
 )
 
 
 def test_add_position_embs_adds_bias():
-    module = AddPositionEmbs(
-        posemb_init=lambda key, shape, dtype=jnp.float32: jnp.ones(shape, dtype)
-    )
+    module = AddPositionEmbs(posemb_init=lambda key, shape, dtype=jnp.float32: jnp.ones(shape, dtype))
     inputs = jnp.zeros((2, 3, 4))
     variables = module.init(jax.random.PRNGKey(0), inputs)
     outputs = module.apply(variables, inputs)

@@ -27,10 +27,7 @@ def generate_proper_pad_mask(
         logging.warning("No pad_mask_dict found. Nothing will be masked.")
         return jnp.ones(tokens.shape[:-1])
     if not all(key in pad_mask_dict for key in keys):
-        logging.warning(
-            f"pad_mask_dict missing keys {set(keys) - set(pad_mask_dict.keys())}."
-            "Nothing will be masked."
-        )
+        logging.warning(f"pad_mask_dict missing keys {set(keys) - set(pad_mask_dict.keys())}.Nothing will be masked.")
         return jnp.ones(tokens.shape[:-1])
 
     pad_mask = jnp.stack([pad_mask_dict[key] for key in keys], axis=-1)
@@ -109,10 +106,7 @@ class ImageTokenizer(nn.Module):
 
         obs_stack_keys = regex_filter(self.obs_stack_keys, sorted(observations.keys()))
         if len(obs_stack_keys) == 0:
-            logging.info(
-                f"No image inputs matching {self.obs_stack_keys} were found."
-                "Skipping tokenizer entirely."
-            )
+            logging.info(f"No image inputs matching {self.obs_stack_keys} were found.Skipping tokenizer entirely.")
             assert self.proper_pad_mask, "Cannot skip unless using proper_pad_mask."
             return None
 
@@ -123,17 +117,11 @@ class ImageTokenizer(nn.Module):
             # if any task inputs are missing, replace with zero padding (TODO: be more flexible)
             for k in needed_task_keys:
                 if k not in tasks:
-                    logging.info(
-                        f"No task inputs matching {k} were found. Replacing with zero padding."
-                    )
-                    tasks = flax.core.copy(
-                        tasks, {k: jnp.zeros_like(observations[k][:, 0])}
-                    )
+                    logging.info(f"No task inputs matching {k} were found. Replacing with zero padding.")
+                    tasks = flax.core.copy(tasks, {k: jnp.zeros_like(observations[k][:, 0])})
             task_stack_keys = regex_filter(self.task_stack_keys, sorted(tasks.keys()))
             if len(task_stack_keys) == 0:
-                raise ValueError(
-                    f"No task inputs matching {self.task_stack_keys} were found."
-                )
+                raise ValueError(f"No task inputs matching {self.task_stack_keys} were found.")
             task_inputs = extract_inputs(task_stack_keys, tasks, check_spatial=True)
             task_inputs = task_inputs[:, None].repeat(enc_inputs.shape[1], axis=1)
             enc_inputs = jnp.concatenate([enc_inputs, task_inputs], axis=-1)
@@ -145,9 +133,7 @@ class ImageTokenizer(nn.Module):
         if self.task_film_keys:
             film_inputs = extract_inputs(self.task_film_keys, tasks)
             film_inputs = film_inputs[:, None].repeat(t, axis=1)
-            encoder_input_kwargs.update(
-                {"cond_var": jnp.reshape(film_inputs, (b * t, -1))}
-            )
+            encoder_input_kwargs.update({"cond_var": jnp.reshape(film_inputs, (b * t, -1))})
 
         # run visual encoder
         encoder_def = ModuleSpec.instantiate(self.encoder)()
@@ -155,9 +141,7 @@ class ImageTokenizer(nn.Module):
         image_tokens = jnp.reshape(image_tokens, (b, t, -1, image_tokens.shape[-1]))
 
         if self.use_token_learner:
-            image_tokens = TokenLearner(num_tokens=self.num_tokens)(
-                image_tokens, train=train
-            )
+            image_tokens = TokenLearner(num_tokens=self.num_tokens)(image_tokens, train=train)
 
         if self.proper_pad_mask:
             pad_mask = generate_proper_pad_mask(
@@ -206,9 +190,7 @@ class LanguageTokenizer(nn.Module):
             return None
 
         if not isinstance(tasks["language_instruction"], (jax.Array, np.ndarray)):
-            assert self.encoder is not None, (
-                "Received language tokens but no encoder specified."
-            )
+            assert self.encoder is not None, "Received language tokens but no encoder specified."
             tokens = self.hf_model(**tasks["language_instruction"]).last_hidden_state
         else:
             # add a # tokens dimension to language
@@ -255,17 +237,13 @@ class BinTokenizer(nn.Module):
         elif self.bin_type == "normal":
             self.thresholds = norm.ppf(jnp.linspace(EPS, 1 - EPS, self.n_bins + 1))
         else:
-            raise ValueError(
-                f"Binning type {self.bin_type} not supported in BinTokenizer."
-            )
+            raise ValueError(f"Binning type {self.bin_type} not supported in BinTokenizer.")
 
     def __call__(self, inputs):
         if self.bin_type == "uniform":
             inputs = jnp.clip(inputs, self.low + EPS, self.high - EPS)
         inputs = inputs[..., None]
-        token_one_hot = (inputs < self.thresholds[1:]) & (
-            inputs >= self.thresholds[:-1]
-        ).astype(jnp.uint8)
+        token_one_hot = (inputs < self.thresholds[1:]) & (inputs >= self.thresholds[:-1]).astype(jnp.uint8)
         output_tokens = jnp.argmax(token_one_hot, axis=-1)
         return output_tokens
 
@@ -294,15 +272,10 @@ class LowdimObsTokenizer(BinTokenizer):
         super().setup()
         self.obs_dropout = nn.Dropout(rate=self.dropout_rate)
 
-    def __call__(
-        self, observations, tasks, train: bool = True, *unused_args, **unused_kwargs
-    ):
+    def __call__(self, observations, tasks, train: bool = True, *unused_args, **unused_kwargs):
         assert self.obs_keys, "Need to specify observation keys to tokenize."
         if len(regex_filter(self.obs_keys, sorted(observations.keys()))) == 0:
-            logging.warning(
-                f"No observation inputs matching {self.obs_keys} were found."
-                "Skipping tokenizer entirely."
-            )
+            logging.warning(f"No observation inputs matching {self.obs_keys} were found.Skipping tokenizer entirely.")
             assert self.proper_pad_mask, "Cannot skip unless using proper pad mask."
             return None
 

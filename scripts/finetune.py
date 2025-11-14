@@ -15,6 +15,7 @@ from rich.pretty import pprint
 import tensorflow as tf
 import tqdm
 import tyro
+import wandb
 
 from crossformer import cn
 from crossformer.data.grain import pipelines
@@ -35,7 +36,6 @@ from crossformer.utils.train_utils import (
     Timer,
     TrainState,
 )
-import wandb
 
 # from absl import logging
 log = logging.getLogger(__name__)

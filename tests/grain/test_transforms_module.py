@@ -22,12 +22,8 @@ def base_trajectory() -> dict:
         "dataset_name": np.array(["demo"] * length, dtype=object),
     }
     trajectory = transforms.add_pad_mask_dict(trajectory)
-    trajectory = transforms.pad_actions_and_proprio(
-        trajectory, max_action_dim=3, max_proprio_dim=4
-    )
-    trajectory = transforms.chunk_action_and_observation(
-        trajectory, window_size=window, action_horizon=2
-    )
+    trajectory = transforms.pad_actions_and_proprio(trajectory, max_action_dim=3, max_proprio_dim=4)
+    trajectory = transforms.chunk_action_and_observation(trajectory, window_size=window, action_horizon=2)
     return trajectory
 
 
@@ -52,9 +48,7 @@ def test_pad_actions_and_proprio_padding_behavior():
         "action": np.ones((2, 2), dtype=np.float32),
         "observation": {"proprio": np.ones((2, 2), dtype=np.float32)},
     }
-    padded = transforms.pad_actions_and_proprio(
-        traj, max_action_dim=4, max_proprio_dim=3
-    )
+    padded = transforms.pad_actions_and_proprio(traj, max_action_dim=4, max_proprio_dim=3)
     assert padded["action"].shape == (2, 4)
     assert padded["observation"]["proprio"].shape == (2, 3)
     assert np.all(padded["action_pad_mask"][:, :2])

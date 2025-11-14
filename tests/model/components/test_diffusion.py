@@ -1,15 +1,17 @@
+from __future__ import annotations
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from crossformer.model.components.diffusion import (
+    cosine_beta_schedule,
+    create_diffusion_model,
     FourierFeatures,
     MLP,
     MLPResNet,
     MLPResNetBlock,
     ScoreActor,
-    cosine_beta_schedule,
-    create_diffusion_model,
 )
 
 

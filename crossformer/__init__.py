@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 
 BASE = Path(__file__).parents[1]

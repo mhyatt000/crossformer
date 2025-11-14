@@ -18,5 +18,5 @@ hydra:
   mode: MULTIRUN # needed or else -m flag
   sweeper:
     params:
-      seed: 31,44,55 
+      seed: 31,44,55
       batch_size: 32,64,256

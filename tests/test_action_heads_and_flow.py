@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import sys
 from types import SimpleNamespace
 
@@ -19,9 +21,7 @@ if not hasattr(jax.config, "define_bool_state"):
 
 # @codex re: above
 if "jax.experimental.maps" not in sys.modules:
-    dummy_env = SimpleNamespace(
-        physical_mesh=SimpleNamespace(devices=SimpleNamespace(shape=()))
-    )
+    dummy_env = SimpleNamespace(physical_mesh=SimpleNamespace(devices=SimpleNamespace(shape=())))
     maps_module = SimpleNamespace(thread_resources=SimpleNamespace(env=dummy_env))
     sys.modules["jax.experimental.maps"] = maps_module
     setattr(jax.experimental, "maps", maps_module)
@@ -34,9 +34,7 @@ if not hasattr(jax.nn, "normalize"):
 
     jax.nn.normalize = _normalize
 
-from crossformer.model.components.action_heads import ContinuousActionHead
-from crossformer.model.components.action_heads import DiffusionActionHead
-from crossformer.model.components.action_heads import FlowMatchingActionHead
+from crossformer.model.components.action_heads import ContinuousActionHead, DiffusionActionHead, FlowMatchingActionHead
 from crossformer.model.components.base import TokenGroup
 
 
@@ -93,9 +91,7 @@ def test_continuous_action_head_forward_and_masks():
     actions = mean
     actions_modified = actions.at[1].add(0.5)
 
-    timestep_mask, action_mask = make_masks(
-        batch_size, window_size, horizon, action_dim
-    )
+    timestep_mask, action_mask = make_masks(batch_size, window_size, horizon, action_dim)
 
     masked_loss, metrics = head.apply(
         variables,
@@ -156,9 +152,7 @@ def test_diffusion_action_head_end_to_end():
         head.apply(variables, transformer_outputs, train=False)
 
     time = jnp.zeros((batch_size, window_size, 1), dtype=jnp.float32)
-    noisy = jnp.zeros(
-        (batch_size, window_size, horizon * action_dim), dtype=jnp.float32
-    )
+    noisy = jnp.zeros((batch_size, window_size, horizon * action_dim), dtype=jnp.float32)
     eps = head.apply(
         variables,
         transformer_outputs,
@@ -168,12 +162,8 @@ def test_diffusion_action_head_end_to_end():
     )
     assert eps.shape == (batch_size, window_size, horizon * action_dim)
 
-    timestep_mask, action_mask = make_masks(
-        batch_size, window_size, horizon, action_dim
-    )
-    actions = jnp.zeros(
-        (batch_size, window_size, horizon, action_dim), dtype=jnp.float32
-    )
+    timestep_mask, action_mask = make_masks(batch_size, window_size, horizon, action_dim)
+    actions = jnp.zeros((batch_size, window_size, horizon, action_dim), dtype=jnp.float32)
     actions_modified = actions.at[1].add(1.0)
 
     rng = jax.random.PRNGKey(0)
@@ -250,9 +240,7 @@ def test_flow_matching_action_head_end_to_end():
         head.apply(variables, transformer_outputs, train=False)
 
     time = jnp.full((batch_size, window_size, 1), 0.5, dtype=jnp.float32)
-    current = jnp.zeros(
-        (batch_size, window_size, horizon, action_dim), dtype=jnp.float32
-    )
+    current = jnp.zeros((batch_size, window_size, horizon, action_dim), dtype=jnp.float32)
     velocity = head.apply(
         variables,
         transformer_outputs,
@@ -262,12 +250,8 @@ def test_flow_matching_action_head_end_to_end():
     )
     assert velocity.shape == (batch_size, window_size, horizon * action_dim)
 
-    timestep_mask, action_mask = make_masks(
-        batch_size, window_size, horizon, action_dim
-    )
-    actions = jnp.zeros(
-        (batch_size, window_size, horizon, action_dim), dtype=jnp.float32
-    )
+    timestep_mask, action_mask = make_masks(batch_size, window_size, horizon, action_dim)
+    actions = jnp.zeros((batch_size, window_size, horizon, action_dim), dtype=jnp.float32)
     actions_modified = actions.at[1].add(1.0)
 
     rng = jax.random.PRNGKey(5)

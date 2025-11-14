@@ -1,23 +1,25 @@
+from __future__ import annotations
+
+from flax import linen as nn
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from crossformer.model.components.vit_encoders import (
+    normalize_images,
     PatchEncoder,
+    ResidualUnit,
     ResNet26,
     ResNet26FILM,
     ResNetStage,
-    ResidualUnit,
     SmallStem,
     SmallStem16,
     SmallStem32,
-    ViTResnet,
-    normalize_images,
+    StdConv,
     vit_encoder_configs,
+    ViTResnet,
     weight_standardize,
 )
-from crossformer.model.components.vit_encoders import StdConv
-from flax import linen as nn
 
 
 def test_normalize_images_default_and_imagenet():
@@ -51,9 +53,7 @@ def test_stdconv_applies_weight_standardization():
     ref_params = {
         "params": {
             "kernel": standardized_kernel,
-            "bias": params["bias"]
-            if "bias" in params
-            else jnp.zeros((kernel.shape[-1],), kernel.dtype),
+            "bias": params["bias"] if "bias" in params else jnp.zeros((kernel.shape[-1],), kernel.dtype),
         }
     }
     ref_outputs = ref_conv.apply(ref_params, inputs)
@@ -134,7 +134,7 @@ def test_vit_encoder_configs_return_modules():
     for name, factory in vit_encoder_configs.items():
         module = factory()
         assert isinstance(module, nn.Module)
-        kwargs = dict(train=False)
+        kwargs = {"train": False}
         if getattr(module, "use_film", False):
             kwargs["cond_var"] = cond
         variables = module.init(jax.random.PRNGKey(hash(name) & 0xFFFF), inputs, **kwargs)

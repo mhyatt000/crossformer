@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from ml_collections import ConfigDict
 from ml_collections.config_dict import FieldReference, placeholder
 
@@ -66,83 +68,78 @@ def get_config():
     window_size = FieldReference(default=5)
 
     return ConfigDict(
-        dict(
-            seed=42,
-            num_steps=300000,
-            save_dir="",
-            model=get_model_config("detr"),
-            window_size=window_size,
-            dataset_kwargs=get_dataset_config("multi", window_size, 100),
-            skip_norm_keys=["proprio_bimanual"],
-            optimizer=dict(
-                learning_rate=dict(
-                    name="rsqrt",
-                    init_value=0.0,
-                    peak_value=3e-4,
-                    warmup_steps=2000,
-                    timescale=10000,
-                ),
-                weight_decay=0.1,
-                clip_gradient=1.0,
-                frozen_keys=tuple(),
-            ),
-            prefetch_num_batches=0,
-            start_step=placeholder(int),
-            log_interval=500,
-            eval_interval=1,
-            save_interval=1,
-            val_kwargs=dict(
-                val_shuffle_buffer_size=1000,
-                num_val_batches=16,
-            ),
-            resume_path=placeholder(str),
-            text_processor=ModuleSpec.create(UniversalSentenceEncoder),
-            pretrained_loaders=(
+        {
+            "seed": 42,
+            "num_steps": 300000,
+            "save_dir": "",
+            "model": get_model_config("detr"),
+            "window_size": window_size,
+            "dataset_kwargs": get_dataset_config("multi", window_size, 100),
+            "skip_norm_keys": ["proprio_bimanual"],
+            "optimizer": {
+                "learning_rate": {
+                    "name": "rsqrt",
+                    "init_value": 0.0,
+                    "peak_value": 3e-4,
+                    "warmup_steps": 2000,
+                    "timescale": 10000,
+                },
+                "weight_decay": 0.1,
+                "clip_gradient": 1.0,
+                "frozen_keys": (),
+            },
+            "prefetch_num_batches": 0,
+            "start_step": placeholder(int),
+            "log_interval": 500,
+            "eval_interval": 1,
+            "save_interval": 1,
+            "val_kwargs": {
+                "val_shuffle_buffer_size": 1000,
+                "num_val_batches": 16,
+            },
+            "resume_path": placeholder(str),
+            "text_processor": ModuleSpec.create(UniversalSentenceEncoder),
+            "pretrained_loaders": (
                 ModuleSpec.create(
                     resnet_26_loader,
                     restore_path="hf://rail-berkeley/ResNet-26-ImageNet",
                 ),
             ),
-            wandb=dict(
-                project="crossformer",
-                group=placeholder(str),
-                entity=placeholder(str),
-            ),
-            wandb_resume_id=placeholder(str),
-            eval_datasets=(),
-        )
+            "wandb": {
+                "project": "crossformer",
+                "group": placeholder(str),
+                "entity": placeholder(str),
+            },
+            "wandb_resume_id": placeholder(str),
+            "eval_datasets": (),
+        }
     )
 
 
 def get_dataset_config(task_cond, window_size, action_horizon):
-    traj_transform_kwargs, frame_transform_kwargs = get_augmentation_config(
-        task_cond, window_size, action_horizon
-    )
+    traj_transform_kwargs, frame_transform_kwargs = get_augmentation_config(task_cond, window_size, action_horizon)
 
     mix = "cross_embodiment"
     assert all(
-        [
-            any([name in datasets for datasets in HEAD_TO_DATASET.values()])
-            for name, weight in OXE_NAMED_MIXES[mix]
-        ]
+        any(name in datasets for datasets in HEAD_TO_DATASET.values()) for name, weight in OXE_NAMED_MIXES[mix]
     ), "Dataset in mix doesn't have assigned head."
 
-    return dict(
-        oxe_kwargs=dict(
-            data_mix=mix,
-            data_dir="",
-            load_camera_views=("primary", "high", "nav", "left_wrist", "right_wrist"),
-            load_proprio=True,
-            load_depth=False,
-        ),
-        traj_transform_kwargs=traj_transform_kwargs,
-        frame_transform_kwargs=frame_transform_kwargs,
-        batch_size=512,
-        shuffle_buffer_size=50000,
-        balance_weights=False,
-        traj_transform_threads=48,
-        traj_read_threads=48,
-    )
+    return {
+        "oxe_kwargs": {
+            "data_mix": mix,
+            "data_dir": "",
+            "load_camera_views": ("primary", "high", "nav", "left_wrist", "right_wrist"),
+            "load_proprio": True,
+            "load_depth": False,
+        },
+        "traj_transform_kwargs": traj_transform_kwargs,
+        "frame_transform_kwargs": frame_transform_kwargs,
+        "batch_size": 512,
+        "shuffle_buffer_size": 50000,
+        "balance_weights": False,
+        "traj_transform_threads": 48,
+        "traj_read_threads": 48,
+    }
 
 
 def get_augmentation_config(task_cond, window_size, action_horizon):
@@ -155,125 +152,123 @@ def get_augmentation_config(task_cond, window_size, action_horizon):
     else:
         raise ValueError("Invalid modality")
 
-    traj_transform_kwargs = dict(
-        window_size=window_size,
-        action_horizon=action_horizon,
-        max_action_dim=BIMANUAL_ACTION_DIM,
-        head_to_dataset=HEAD_TO_DATASET,
-        goal_relabeling_strategy="uniform",
-        task_augment_strategy="delete_task_conditioning",
-        task_augment_kwargs=dict(
-            keep_image_prob=keep_image_prob,
-        ),
-        subsample_length=100,
-    )
+    traj_transform_kwargs = {
+        "window_size": window_size,
+        "action_horizon": action_horizon,
+        "max_action_dim": BIMANUAL_ACTION_DIM,
+        "head_to_dataset": HEAD_TO_DATASET,
+        "goal_relabeling_strategy": "uniform",
+        "task_augment_strategy": "delete_task_conditioning",
+        "task_augment_kwargs": {
+            "keep_image_prob": keep_image_prob,
+        },
+        "subsample_length": 100,
+    }
 
-    aloha_image_augment_kwargs = dict(
-        random_resized_crop=dict(scale=[0.9, 1.0], ratio=[0.75, 4.0 / 3]),
-        random_brightness=[0.1],
-        random_contrast=[0.9, 1.1],
-        random_saturation=[0.9, 1.1],
-        random_hue=[0.05],
-        augment_order=[
+    aloha_image_augment_kwargs = {
+        "random_resized_crop": {"scale": [0.9, 1.0], "ratio": [0.75, 4.0 / 3]},
+        "random_brightness": [0.1],
+        "random_contrast": [0.9, 1.1],
+        "random_saturation": [0.9, 1.1],
+        "random_hue": [0.05],
+        "augment_order": [
             "random_resized_crop",
             "random_brightness",
             "random_contrast",
             "random_saturation",
             "random_hue",
         ],
-    )
+    }
 
-    bridge_image_augment_kwargs = dict(
-        random_resized_crop=dict(scale=[0.8, 1.0], ratio=[0.9, 1.1]),
-        random_brightness=[0.1],
-        random_contrast=[0.9, 1.1],
-        random_saturation=[0.9, 1.1],
-        random_hue=[0.05],
-        augment_order=[
+    bridge_image_augment_kwargs = {
+        "random_resized_crop": {"scale": [0.8, 1.0], "ratio": [0.9, 1.1]},
+        "random_brightness": [0.1],
+        "random_contrast": [0.9, 1.1],
+        "random_saturation": [0.9, 1.1],
+        "random_hue": [0.05],
+        "augment_order": [
             "random_resized_crop",
             "random_brightness",
             "random_contrast",
             "random_saturation",
             "random_hue",
         ],
-    )
+    }
 
-    frame_transform_kwargs = dict(
-        resize_size={
+    frame_transform_kwargs = {
+        "resize_size": {
             "primary": (224, 224),
             "high": (224, 224),
             "nav": (224, 224),
             "left_wrist": (224, 224),
             "right_wrist": (224, 224),
         },
-        image_augment_kwargs={
+        "image_augment_kwargs": {
             "primary": bridge_image_augment_kwargs,
             "high": aloha_image_augment_kwargs,
             "nav": bridge_image_augment_kwargs,
             "left_wrist": aloha_image_augment_kwargs,
             "right_wrist": aloha_image_augment_kwargs,
         },
-        num_parallel_calls=200,
-    )
+        "num_parallel_calls": 200,
+    }
     return traj_transform_kwargs, frame_transform_kwargs
 
 
 def get_model_config(transformer_size):
-    token_embedding_size, transformer_kwargs = common_transformer_sizes(
-        transformer_size
-    )
+    token_embedding_size, transformer_kwargs = common_transformer_sizes(transformer_size)
 
     encoder = ModuleSpec.create(ResNet26FILM)
-    return dict(
-        observation_tokenizers=dict(
-            primary=ModuleSpec.create(
+    return {
+        "observation_tokenizers": {
+            "primary": ModuleSpec.create(
                 ImageTokenizer,
                 obs_stack_keys=["image_primary"],
                 task_stack_keys=["image_primary"],
                 task_film_keys=["language_instruction"],
                 encoder=encoder,
             ),
-            high=ModuleSpec.create(
+            "high": ModuleSpec.create(
                 ImageTokenizer,
                 obs_stack_keys=["image_high"],
                 task_stack_keys=["image_high"],
                 task_film_keys=["language_instruction"],
                 encoder=encoder,
             ),
-            nav=ModuleSpec.create(
+            "nav": ModuleSpec.create(
                 ImageTokenizer,
                 obs_stack_keys=["image_nav"],
                 task_stack_keys=["image_nav"],
                 task_film_keys=[],
                 encoder=ModuleSpec.create(ResNet26),
             ),
-            left=ModuleSpec.create(
+            "left": ModuleSpec.create(
                 ImageTokenizer,
                 obs_stack_keys=["image_left_wrist"],
                 task_stack_keys=[],
                 task_film_keys=["language_instruction"],
                 encoder=encoder,
             ),
-            right=ModuleSpec.create(
+            "right": ModuleSpec.create(
                 ImageTokenizer,
                 obs_stack_keys=["image_right_wrist"],
                 task_stack_keys=[],
                 task_film_keys=["language_instruction"],
                 encoder=encoder,
             ),
-            bimanual=ModuleSpec.create(
+            "bimanual": ModuleSpec.create(
                 LowdimObsTokenizer,
                 obs_keys=["proprio_bimanual"],
                 dropout_rate=0.2,
             ),
-            quadruped=ModuleSpec.create(
+            "quadruped": ModuleSpec.create(
                 LowdimObsTokenizer,
                 obs_keys=["proprio_quadruped"],
             ),
-        ),
-        task_tokenizers=dict(),
-        heads=dict(
-            bimanual=ModuleSpec.create(
+        },
+        "task_tokenizers": {},
+        "heads": {
+            "bimanual": ModuleSpec.create(
                 L1ActionHead,
                 action_horizon=100,
                 action_dim=BIMANUAL_ACTION_DIM,
@@ -284,7 +279,7 @@ def get_model_config(transformer_size):
                 loss_weight=1.0,
                 constrain_loss_dims=True,
             ),
-            single_arm=ModuleSpec.create(
+            "single_arm": ModuleSpec.create(
                 L1ActionHead,
                 action_horizon=4,
                 action_dim=SINGLE_ARM_ACTION_DIM,
@@ -295,7 +290,7 @@ def get_model_config(transformer_size):
                 loss_weight=1.0,
                 constrain_loss_dims=True,
             ),
-            nav=ModuleSpec.create(
+            "nav": ModuleSpec.create(
                 L1ActionHead,
                 action_horizon=4,
                 action_dim=NAV_ACTION_DIM,
@@ -306,7 +301,7 @@ def get_model_config(transformer_size):
                 loss_weight=1.0,
                 constrain_loss_dims=True,
             ),
-            quadruped=ModuleSpec.create(
+            "quadruped": ModuleSpec.create(
                 L1ActionHead,
                 action_horizon=1,
                 action_dim=QUADRUPED_ACTION_DIM,
@@ -317,9 +312,9 @@ def get_model_config(transformer_size):
                 loss_weight=1.0,
                 constrain_loss_dims=True,
             ),
-        ),
-        readouts=dict(bimanual=100, single_arm=4, nav=4, quadruped=1),
-        token_embedding_size=token_embedding_size,
-        transformer_kwargs=transformer_kwargs,
-        max_horizon=10,
-    )
+        },
+        "readouts": {"bimanual": 100, "single_arm": 4, "nav": 4, "quadruped": 1},
+        "token_embedding_size": token_embedding_size,
+        "transformer_kwargs": transformer_kwargs,
+        "max_horizon": 10,
+    }

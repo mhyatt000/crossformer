@@ -1,13 +1,14 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 import logging
 from typing import Mapping
 
 import jax
 import numpy as np
-
-from crossformer.utils.typing import Any
-from crossformer.utils.typing import Data
 import wandb
+
+from crossformer.utils.typing import Any, Data
 
 
 @dataclass
@@ -37,9 +38,7 @@ class InspectCallback:
 
         return self._collect_logs(action, mask_array, self.prefix)
 
-    def _collect_logs(
-        self, value: Any, mask: np.ndarray | None, prefix: str
-    ) -> dict[str, Any]:
+    def _collect_logs(self, value: Any, mask: np.ndarray | None, prefix: str) -> dict[str, Any]:
         if isinstance(value, Mapping):
             logs: dict[str, Any] = {}
             for key, sub_value in value.items():
@@ -47,9 +46,7 @@ class InspectCallback:
             return logs
         return self._hist_for_array(value, mask, prefix)
 
-    def _hist_for_array(
-        self, value: Any, mask: np.ndarray | None, prefix: str
-    ) -> dict[str, Any]:
+    def _hist_for_array(self, value: Any, mask: np.ndarray | None, prefix: str) -> dict[str, Any]:
         arr = np.asarray(jax.device_get(value))
         arr = arr.reshape(-1, 1) if arr.ndim <= 1 else arr.reshape(-1, arr.shape[-1])
 
@@ -57,9 +54,7 @@ class InspectCallback:
             if mask.shape[0] == arr.shape[0]:
                 arr = arr[mask]
             else:
-                logging.warning(
-                    f"mask has incompatible shape {mask.shape} (expected {arr.shape})"
-                )
+                logging.warning(f"mask has incompatible shape {mask.shape} (expected {arr.shape})")
 
         if arr.size == 0:
             return {}

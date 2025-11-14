@@ -1,13 +1,15 @@
+from __future__ import annotations
+
 import jax
 import jax.numpy as jnp
 import pytest
 
 from crossformer.model.components.action_heads import (
+    continuous_loss,
     ContinuousActionHead,
     DiffusionActionHead,
     L1ActionHead,
     MSEActionHead,
-    continuous_loss,
 )
 from crossformer.model.components.base import TokenGroup
 

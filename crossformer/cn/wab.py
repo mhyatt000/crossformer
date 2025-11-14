@@ -7,10 +7,10 @@ from pathlib import Path
 from typing import TypeAlias
 
 from flax.traverse_util import flatten_dict
+import wandb
 
 import crossformer
 from crossformer.cn.base import CN
-import wandb
 
 StrPath: TypeAlias = str | Path
 

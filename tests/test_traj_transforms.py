@@ -1,9 +1,10 @@
+from __future__ import annotations
+
+from hypothesis import given, settings
+from hypothesis import strategies as st
 import numpy as np
 import pytest
 import tensorflow as tf
-from hypothesis import given
-from hypothesis import settings
-from hypothesis import strategies as st
 
 from crossformer.data import traj_transforms
 
@@ -18,18 +19,10 @@ from crossformer.data import traj_transforms
     use_goal=st.booleans(),
     data=st.data(),
 )
-def test_chunk_act_obs_history_alignment(
-    traj_len, window_size, action_horizon, obs_dim, action_dim, use_goal, data
-):
+def test_chunk_act_obs_history_alignment(traj_len, window_size, action_horizon, obs_dim, action_dim, use_goal, data):
     """Chunking should assemble histories and masks consistently for raw actions."""
-    observation = {
-        "state": tf.random.uniform(
-            (traj_len, obs_dim), minval=-1.0, maxval=1.0, dtype=tf.float32
-        )
-    }
-    action = tf.random.uniform(
-        (traj_len, action_dim), minval=-1.0, maxval=1.0, dtype=tf.float32
-    )
+    observation = {"state": tf.random.uniform((traj_len, obs_dim), minval=-1.0, maxval=1.0, dtype=tf.float32)}
+    action = tf.random.uniform((traj_len, action_dim), minval=-1.0, maxval=1.0, dtype=tf.float32)
     traj = {
         "observation": observation,
         "action": action,
@@ -38,9 +31,7 @@ def test_chunk_act_obs_history_alignment(
     }
     if use_goal:
         goal_value = data.draw(st.integers(min_value=0, max_value=traj_len - 1))
-        traj["task"]["timestep"] = tf.constant(
-            [goal_value] * traj_len, dtype=tf.int32
-        )
+        traj["task"]["timestep"] = tf.constant([goal_value] * traj_len, dtype=tf.int32)
 
     result = traj_transforms.chunk_act_obs(
         traj,
@@ -55,12 +46,8 @@ def test_chunk_act_obs_history_alignment(
     history_indices_clipped = np.maximum(history_indices, 0)
 
     expected_state = np.take(state_np, history_indices_clipped, axis=0)
-    np.testing.assert_allclose(
-        result["observation"]["state"].numpy(), expected_state
-    )
-    np.testing.assert_array_equal(
-        result["observation"]["timestep_pad_mask"].numpy(), expected_timestep_mask
-    )
+    np.testing.assert_allclose(result["observation"]["state"].numpy(), expected_state)
+    np.testing.assert_array_equal(result["observation"]["timestep_pad_mask"].numpy(), expected_timestep_mask)
 
     chunk_indices = np.arange(traj_len)[:, None] + np.arange(action_horizon)
     chunk_indices = np.minimum(chunk_indices, traj_len - 1)
@@ -77,17 +64,13 @@ def test_chunk_act_obs_history_alignment(
     h = np.arange(action_horizon)[None, None, :]
     relative_goal = goal_vec[:, None, None] - (t - (window_size + 1) + w + h)
     expected_task_completed = relative_goal <= 0
-    np.testing.assert_array_equal(
-        result["observation"]["task_completed"].numpy(), expected_task_completed
-    )
+    np.testing.assert_array_equal(result["observation"]["task_completed"].numpy(), expected_task_completed)
 
     expected_action_mask = np.broadcast_to(
         np.logical_not(expected_task_completed)[..., None],
         (*expected_task_completed.shape, action_dim),
     )
-    np.testing.assert_array_equal(
-        result["action_pad_mask"].numpy(), expected_action_mask
-    )
+    np.testing.assert_array_equal(result["action_pad_mask"].numpy(), expected_action_mask)
 
 
 @settings(max_examples=25, deadline=None)
@@ -99,15 +82,9 @@ def test_chunk_act_obs_history_alignment(
     action_dim=st.integers(min_value=1, max_value=4),
     data=st.data(),
 )
-def test_chunk_act_obs_prechunked_actions(
-    traj_len, window_size, action_horizon, obs_dim, action_dim, data
-):
+def test_chunk_act_obs_prechunked_actions(traj_len, window_size, action_horizon, obs_dim, action_dim, data):
     """When actions are pre-chunked the history axis should still be correct."""
-    observation = {
-        "state": tf.random.uniform(
-            (traj_len, obs_dim), minval=-1.0, maxval=1.0, dtype=tf.float32
-        )
-    }
+    observation = {"state": tf.random.uniform((traj_len, obs_dim), minval=-1.0, maxval=1.0, dtype=tf.float32)}
     action = tf.random.uniform(
         (traj_len, action_horizon, action_dim),
         minval=-1.0,
@@ -118,16 +95,12 @@ def test_chunk_act_obs_prechunked_actions(
         "observation": observation,
         "action": action,
         "task": {},
-        "action_pad_mask": tf.ones(
-            (traj_len, action_horizon, action_dim), dtype=tf.bool
-        ),
+        "action_pad_mask": tf.ones((traj_len, action_horizon, action_dim), dtype=tf.bool),
     }
     include_goal = data.draw(st.booleans())
     if include_goal:
         goal_value = data.draw(st.integers(min_value=0, max_value=traj_len - 1))
-        traj["task"]["timestep"] = tf.constant(
-            [goal_value] * traj_len, dtype=tf.int32
-        )
+        traj["task"]["timestep"] = tf.constant([goal_value] * traj_len, dtype=tf.int32)
 
     result = traj_transforms.chunk_act_obs(
         traj,
@@ -139,15 +112,9 @@ def test_chunk_act_obs_prechunked_actions(
     expected_timestep_mask = history_indices >= 0
     history_indices_clipped = np.maximum(history_indices, 0)
 
-    expected_state = np.take(
-        observation["state"].numpy(), history_indices_clipped, axis=0
-    )
-    np.testing.assert_allclose(
-        result["observation"]["state"].numpy(), expected_state
-    )
-    np.testing.assert_array_equal(
-        result["observation"]["timestep_pad_mask"].numpy(), expected_timestep_mask
-    )
+    expected_state = np.take(observation["state"].numpy(), history_indices_clipped, axis=0)
+    np.testing.assert_allclose(result["observation"]["state"].numpy(), expected_state)
+    np.testing.assert_array_equal(result["observation"]["timestep_pad_mask"].numpy(), expected_timestep_mask)
 
     expected_action = np.take(action.numpy(), history_indices_clipped, axis=0)
     np.testing.assert_allclose(result["action"].numpy(), expected_action)
@@ -161,17 +128,13 @@ def test_chunk_act_obs_prechunked_actions(
     h = np.arange(action_horizon)[None, None, :]
     relative_goal = goal_vec[:, None, None] - (t - (window_size + 1) + w + h)
     expected_task_completed = relative_goal <= 0
-    np.testing.assert_array_equal(
-        result["observation"]["task_completed"].numpy(), expected_task_completed
-    )
+    np.testing.assert_array_equal(result["observation"]["task_completed"].numpy(), expected_task_completed)
 
     expected_action_mask = np.broadcast_to(
         np.logical_not(expected_task_completed)[..., None],
         (*expected_task_completed.shape, action_dim),
     )
-    np.testing.assert_array_equal(
-        result["action_pad_mask"].numpy(), expected_action_mask
-    )
+    np.testing.assert_array_equal(result["action_pad_mask"].numpy(), expected_action_mask)
 
 
 @settings(max_examples=30, deadline=None)
@@ -183,18 +146,10 @@ def test_chunk_act_obs_prechunked_actions(
     action_dim=st.integers(min_value=1, max_value=4),
     data=st.data(),
 )
-def test_chunk_act_obs_override_window_size(
-    traj_len, window_size, action_horizon, obs_dim, action_dim, data
-):
+def test_chunk_act_obs_override_window_size(traj_len, window_size, action_horizon, obs_dim, action_dim, data):
     """Override window sizes should limit how many history steps remain valid."""
-    observation = {
-        "state": tf.random.uniform(
-            (traj_len, obs_dim), minval=-1.0, maxval=1.0, dtype=tf.float32
-        )
-    }
-    action = tf.random.uniform(
-        (traj_len, action_dim), minval=-1.0, maxval=1.0, dtype=tf.float32
-    )
+    observation = {"state": tf.random.uniform((traj_len, obs_dim), minval=-1.0, maxval=1.0, dtype=tf.float32)}
+    action = tf.random.uniform((traj_len, action_dim), minval=-1.0, maxval=1.0, dtype=tf.float32)
     traj = {
         "observation": observation,
         "action": action,
@@ -202,12 +157,7 @@ def test_chunk_act_obs_override_window_size(
         "action_pad_mask": tf.ones((traj_len, action_dim), dtype=tf.bool),
     }
 
-    if window_size > 1:
-        override = data.draw(
-            st.integers(min_value=1, max_value=window_size - 1)
-        )
-    else:
-        override = 1
+    override = data.draw(st.integers(min_value=1, max_value=window_size - 1)) if window_size > 1 else 1
 
     result = traj_transforms.chunk_act_obs(
         traj,
@@ -220,20 +170,14 @@ def test_chunk_act_obs_override_window_size(
     base_mask = history_indices >= 0
     history_indices_clipped = np.maximum(history_indices, 0)
 
-    expected_state = np.take(
-        observation["state"].numpy(), history_indices_clipped, axis=0
-    )
-    np.testing.assert_allclose(
-        result["observation"]["state"].numpy(), expected_state
-    )
+    expected_state = np.take(observation["state"].numpy(), history_indices_clipped, axis=0)
+    np.testing.assert_allclose(result["observation"]["state"].numpy(), expected_state)
 
     keep = min(window_size, override)
     expected_mask = np.zeros_like(base_mask)
     if keep:
         expected_mask[:, -keep:] = base_mask[:, -keep:]
-    np.testing.assert_array_equal(
-        result["observation"]["timestep_pad_mask"].numpy(), expected_mask
-    )
+    np.testing.assert_array_equal(result["observation"]["timestep_pad_mask"].numpy(), expected_mask)
 
 
 @settings(max_examples=25, deadline=None)
@@ -243,20 +187,14 @@ def test_chunk_act_obs_override_window_size(
     action_dim=st.integers(min_value=1, max_value=4),
     deficit=st.integers(min_value=1, max_value=3),
 )
-def test_chunk_act_obs_raises_when_prechunk_too_small(
-    traj_len, prechunk, action_dim, deficit
-):
+def test_chunk_act_obs_raises_when_prechunk_too_small(traj_len, prechunk, action_dim, deficit):
     """Requests for longer horizons than available pre-chunks should fail."""
-    action = tf.random.uniform(
-        (traj_len, prechunk, action_dim), minval=-1.0, maxval=1.0, dtype=tf.float32
-    )
+    action = tf.random.uniform((traj_len, prechunk, action_dim), minval=-1.0, maxval=1.0, dtype=tf.float32)
     traj = {
         "observation": {"state": tf.zeros((traj_len, 1), dtype=tf.float32)},
         "action": action,
         "task": {},
-        "action_pad_mask": tf.ones(
-            (traj_len, prechunk, action_dim), dtype=tf.bool
-        ),
+        "action_pad_mask": tf.ones((traj_len, prechunk, action_dim), dtype=tf.bool),
     }
     with pytest.raises(ValueError):
         traj_transforms.chunk_act_obs(
@@ -279,28 +217,20 @@ def test_pad_actions_and_proprio_padding(
     traj_len, action_dim, action_padding, include_proprio, proprio_dim, proprio_padding
 ):
     """Padding should preserve existing values and mark new dims as masked."""
-    action = tf.random.uniform(
-        (traj_len, action_dim), minval=-1.0, maxval=1.0, dtype=tf.float32
-    )
+    action = tf.random.uniform((traj_len, action_dim), minval=-1.0, maxval=1.0, dtype=tf.float32)
     observation = {}
     if include_proprio:
-        observation["proprio"] = tf.random.uniform(
-            (traj_len, proprio_dim), minval=-1.0, maxval=1.0, dtype=tf.float32
-        )
+        observation["proprio"] = tf.random.uniform((traj_len, proprio_dim), minval=-1.0, maxval=1.0, dtype=tf.float32)
     traj = {
         "observation": observation,
         "action": action,
     }
 
     max_action_dim = action_dim + action_padding
-    max_proprio_dim = (
-        proprio_dim + proprio_padding if include_proprio else None
-    )
+    max_proprio_dim = proprio_dim + proprio_padding if include_proprio else None
 
     action_before = action.numpy()
-    proprio_before = (
-        observation["proprio"].numpy() if include_proprio else None
-    )
+    proprio_before = observation["proprio"].numpy() if include_proprio else None
 
     result = traj_transforms.pad_actions_and_proprio(
         traj, max_action_dim=max_action_dim, max_proprio_dim=max_proprio_dim
@@ -310,19 +240,13 @@ def test_pad_actions_and_proprio_padding(
     assert padded_action.shape == (traj_len, max_action_dim)
     np.testing.assert_allclose(padded_action[:, :action_dim], action_before)
     if action_padding:
-        np.testing.assert_array_equal(
-            padded_action[:, action_dim:], np.zeros((traj_len, action_padding))
-        )
+        np.testing.assert_array_equal(padded_action[:, action_dim:], np.zeros((traj_len, action_padding)))
 
     action_mask = result["action_pad_mask"].numpy()
     assert action_mask.shape == (traj_len, max_action_dim)
-    np.testing.assert_array_equal(
-        action_mask[:, :action_dim], np.ones((traj_len, action_dim), dtype=bool)
-    )
+    np.testing.assert_array_equal(action_mask[:, :action_dim], np.ones((traj_len, action_dim), dtype=bool))
     if action_padding:
-        np.testing.assert_array_equal(
-            action_mask[:, action_dim:], np.zeros((traj_len, action_padding), dtype=bool)
-        )
+        np.testing.assert_array_equal(action_mask[:, action_dim:], np.zeros((traj_len, action_padding), dtype=bool))
 
     if include_proprio:
         proprio_after = result["observation"]["proprio"].numpy()
@@ -354,9 +278,7 @@ def test_pad_actions_and_proprio_action_dim_validation(traj_len, action_dim, shr
         "action": action,
     }
     with pytest.raises(ValueError):
-        traj_transforms.pad_actions_and_proprio(
-            traj, max_action_dim=max_action_dim, max_proprio_dim=None
-        )
+        traj_transforms.pad_actions_and_proprio(traj, max_action_dim=max_action_dim, max_proprio_dim=None)
 
 
 @settings(max_examples=25, deadline=None)
@@ -365,23 +287,17 @@ def test_pad_actions_and_proprio_action_dim_validation(traj_len, action_dim, shr
     proprio_dim=st.integers(min_value=2, max_value=5),
     shrink=st.integers(min_value=1, max_value=3),
 )
-def test_pad_actions_and_proprio_proprio_dim_validation(
-    traj_len, proprio_dim, shrink
-):
+def test_pad_actions_and_proprio_proprio_dim_validation(traj_len, proprio_dim, shrink):
     """Proprio dimensions larger than the allowed maximum should error."""
     max_proprio_dim = proprio_dim - shrink
     if max_proprio_dim <= 0:
         pytest.skip("Shrink removed all proprio dimensions")
     traj = {
-        "observation": {
-            "proprio": tf.zeros((traj_len, proprio_dim), dtype=tf.float32)
-        },
+        "observation": {"proprio": tf.zeros((traj_len, proprio_dim), dtype=tf.float32)},
         "action": tf.zeros((traj_len, 1), dtype=tf.float32),
     }
     with pytest.raises(ValueError):
-        traj_transforms.pad_actions_and_proprio(
-            traj, max_action_dim=None, max_proprio_dim=max_proprio_dim
-        )
+        traj_transforms.pad_actions_and_proprio(traj, max_action_dim=None, max_proprio_dim=max_proprio_dim)
 
 
 def test_pad_actions_and_proprio_action_dim_value_error():
@@ -391,23 +307,17 @@ def test_pad_actions_and_proprio_action_dim_value_error():
         "action": tf.zeros((2, 3), dtype=tf.float32),
     }
     with pytest.raises(ValueError):
-        traj_transforms.pad_actions_and_proprio(
-            traj, max_action_dim=2, max_proprio_dim=None
-        )
+        traj_transforms.pad_actions_and_proprio(traj, max_action_dim=2, max_proprio_dim=None)
 
 
 def test_pad_actions_and_proprio_proprio_dim_value_error():
     """A wider proprio tensor than allowed should trigger validation."""
     traj = {
-        "observation": {
-            "proprio": tf.zeros((2, 4), dtype=tf.float32)
-        },
+        "observation": {"proprio": tf.zeros((2, 4), dtype=tf.float32)},
         "action": tf.zeros((2, 1), dtype=tf.float32),
     }
     with pytest.raises(ValueError):
-        traj_transforms.pad_actions_and_proprio(
-            traj, max_action_dim=None, max_proprio_dim=3
-        )
+        traj_transforms.pad_actions_and_proprio(traj, max_action_dim=None, max_proprio_dim=3)
 
 
 def test_add_head_action_mask_defaults_to_all_true():
@@ -487,9 +397,7 @@ def test_subsample_preserves_structure(traj_len, subsample_length, feature_dim):
 )
 def test_zero_out_future_proprio(traj_len, history, feature_dim):
     """Future proprio steps should be zeroed while the first step stays intact."""
-    proprio = tf.random.uniform(
-        (traj_len, history, feature_dim), minval=-1.0, maxval=1.0, dtype=tf.float32
-    )
+    proprio = tf.random.uniform((traj_len, history, feature_dim), minval=-1.0, maxval=1.0, dtype=tf.float32)
     before = proprio.numpy()
     traj = {"observation": {"proprio": proprio}}
 
@@ -511,23 +419,11 @@ def test_zero_out_future_proprio(traj_len, history, feature_dim):
 )
 def test_add_pad_mask_dict_string_detection(traj_len, data):
     """String tensors are marked as padding based on emptiness while numerics stay true."""
-    obs_string_flags = np.array(
-        data.draw(
-            st.lists(st.booleans(), min_size=traj_len, max_size=traj_len)
-        )
-    )
-    task_string_flags = np.array(
-        data.draw(
-            st.lists(st.booleans(), min_size=traj_len, max_size=traj_len)
-        )
-    )
+    obs_string_flags = np.array(data.draw(st.lists(st.booleans(), min_size=traj_len, max_size=traj_len)))
+    task_string_flags = np.array(data.draw(st.lists(st.booleans(), min_size=traj_len, max_size=traj_len)))
 
-    observation_strings = tf.constant(
-        [b"text" if flag else b"" for flag in obs_string_flags], dtype=tf.string
-    )
-    task_strings = tf.constant(
-        [b"goal" if flag else b"" for flag in task_string_flags], dtype=tf.string
-    )
+    observation_strings = tf.constant([b"text" if flag else b"" for flag in obs_string_flags], dtype=tf.string)
+    task_strings = tf.constant([b"goal" if flag else b"" for flag in task_string_flags], dtype=tf.string)
 
     traj = {
         "observation": {

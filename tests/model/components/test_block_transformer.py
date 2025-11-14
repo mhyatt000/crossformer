@@ -1,7 +1,10 @@
+from __future__ import annotations
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+
 from crossformer.model.components.block_transformer import (
     AttentionRule,
     BlockTransformer,
@@ -52,38 +55,32 @@ def test_token_metadata_rules():
 def test_block_transformer_call_and_split_roundtrip():
     prefix_groups, timestep_groups = _make_groups()
     block = BlockTransformer(
-        transformer_kwargs=dict(
-            num_layers=1,
-            mlp_dim=16,
-            num_attention_heads=2,
-            dropout_rate=0.0,
-            attention_dropout_rate=0.0,
-            repeat_pos_enc=False,
-        )
+        transformer_kwargs={
+            "num_layers": 1,
+            "mlp_dim": 16,
+            "num_attention_heads": 2,
+            "dropout_rate": 0.0,
+            "attention_dropout_rate": 0.0,
+            "repeat_pos_enc": False,
+        }
     )
 
     params = block.init(jax.random.PRNGKey(0), prefix_groups, timestep_groups, train=False)
-    prefix_out, timestep_out = block.apply(
-        params, prefix_groups, timestep_groups, train=False
-    )
+    prefix_out, timestep_out = block.apply(params, prefix_groups, timestep_groups, train=False)
 
     assert len(prefix_out) == 1 and len(timestep_out) == 1
     assert prefix_out[0].tokens.shape == prefix_groups[0].tokens.shape
     assert timestep_out[0].tokens.shape == timestep_groups[0].tokens.shape
 
-    tokens, pos = block.assemble_input_tokens(prefix_groups, timestep_groups)
-    rebuilt_prefix, rebuilt_timestep = block.split_output_tokens(
-        tokens, prefix_groups, timestep_groups
-    )
+    tokens, _pos = block.assemble_input_tokens(prefix_groups, timestep_groups)
+    rebuilt_prefix, rebuilt_timestep = block.split_output_tokens(tokens, prefix_groups, timestep_groups)
     np.testing.assert_allclose(rebuilt_prefix[0].tokens, prefix_groups[0].tokens)
-    np.testing.assert_allclose(
-        rebuilt_timestep[0].tokens, timestep_groups[0].tokens
-    )
+    np.testing.assert_allclose(rebuilt_timestep[0].tokens, timestep_groups[0].tokens)
 
 
 def test_attention_mask_generation():
     prefix_groups, timestep_groups = _make_groups(batch_size=1, horizon=2, embed_dim=4)
-    block = BlockTransformer(transformer_kwargs=dict(num_layers=1, mlp_dim=8, num_attention_heads=2))
+    block = BlockTransformer(transformer_kwargs={"num_layers": 1, "mlp_dim": 8, "num_attention_heads": 2})
     mask = block.generate_attention_mask(prefix_groups, timestep_groups)
 
     assert mask.shape == (1, 1, 5, 5)
@@ -104,17 +101,13 @@ def test_attention_mask_generation():
 
 def test_generate_pad_attention_mask_respects_padding():
     prefix_groups, timestep_groups = _make_groups(batch_size=1, horizon=2, embed_dim=2)
-    timestep_groups[0] = timestep_groups[0].replace(
-        mask=jnp.array([[[True, False], [True, True]]])
-    )
+    timestep_groups[0] = timestep_groups[0].replace(mask=jnp.array([[[True, False], [True, True]]]))
 
-    block = BlockTransformer(transformer_kwargs=dict(num_layers=1, mlp_dim=8, num_attention_heads=2))
+    block = BlockTransformer(transformer_kwargs={"num_layers": 1, "mlp_dim": 8, "num_attention_heads": 2})
     generated = block.generate_pad_attention_mask(prefix_groups, timestep_groups)
 
     assert generated.shape == (1, 1, 5, 5)
-    pad_vector = jnp.concatenate(
-        [prefix_groups[0].mask, timestep_groups[0].mask.reshape(1, -1)], axis=1
-    )
+    pad_vector = jnp.concatenate([prefix_groups[0].mask, timestep_groups[0].mask.reshape(1, -1)], axis=1)
     expected = jnp.broadcast_to(pad_vector[:, None, :], (1, 5, 5))[0]
     np.testing.assert_array_equal(generated[0, 0], expected)
 
@@ -124,7 +117,7 @@ def test_verify_causality_raises_for_future_attention():
     timestep_groups[0] = timestep_groups[0].replace(
         attention_rules={"task": AttentionRule.ALL, "obs": AttentionRule.ALL}
     )
-    block = BlockTransformer(transformer_kwargs=dict(num_layers=1, mlp_dim=8, num_attention_heads=2))
+    block = BlockTransformer(transformer_kwargs={"num_layers": 1, "mlp_dim": 8, "num_attention_heads": 2})
 
     with pytest.raises(AssertionError):
         block.verify_causality(prefix_groups, timestep_groups)

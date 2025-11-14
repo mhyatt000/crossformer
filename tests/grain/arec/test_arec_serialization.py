@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import numpy as np
 import pytest
 
@@ -43,7 +45,7 @@ def _assert_nested_equal(left, right):
                 },
                 {
                     "embedding": np.linspace(-1.0, 1.0, num=4, dtype=np.float64),
-                    "payload": b"\x00\xFF\x7F",
+                    "payload": b"\x00\xff\x7f",
                 },
             ),
             "attributes": [

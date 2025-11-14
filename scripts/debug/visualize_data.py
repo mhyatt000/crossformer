@@ -6,22 +6,25 @@ from dataclasses import dataclass
 import logging
 from pathlib import Path
 from typing import Any, Sequence
+
 import matplotlib.pyplot as plt
 import numpy as np
 from rich.pretty import pprint
 import tyro
+import wandb
 
 from crossformer import cn
 from crossformer.data.grain import builders, pipelines
 from crossformer.data.grain.datasets import _DecodedArrayRecord, _EpisodeDataset
 from crossformer.utils.spec import spec
-import wandb
 
 logger = logging.getLogger(__name__)
+
+
 class _DropKeyDataset(Sequence[dict]):
     """Dataset wrapper that filters observation keys."""
 
-    def __init__(self, dataset: Sequence[dict], drop_keys: Sequence[str] = ()):  # noqa: D401
+    def __init__(self, dataset: Sequence[dict], drop_keys: Sequence[str] = ()):
         self._dataset = dataset
         self._drop_keys = set(drop_keys)
 
@@ -33,6 +36,7 @@ class _DropKeyDataset(Sequence[dict]):
         if not self._drop_keys:
             return traj
         return _drop_observation_keys(traj, self._drop_keys)
+
 
 def _drop_observation_keys(traj: dict, drop_keys: set[str]) -> dict:
     obs = traj.get("observation")
@@ -143,9 +147,7 @@ def _to_uint8(arr: np.ndarray) -> np.ndarray:
     return (arr * 255).astype(np.uint8)
 
 
-def _stack_views(
-    frame: dict, views: list[str]
-) -> tuple[np.ndarray, list[np.ndarray]] | None:
+def _stack_views(frame: dict, views: list[str]) -> tuple[np.ndarray, list[np.ndarray]] | None:
     panels = []
     for view in views:
         key = f"image_{view}"
@@ -205,9 +207,7 @@ def main(cfg: Config) -> None:
         raise ValueError("Trajectory missing observation key")
     image_keys, depth_keys, proprio_keys, proprio_dims = mappings
 
-    language = first_traj.get("language_instruction") or first_traj.get("task", {}).get(
-        "language_instruction"
-    )
+    language = first_traj.get("language_instruction") or first_traj.get("task", {}).get("language_instruction")
     standardize_fn = _standardize_language if language is not None else None
 
     dataset_config = builders.GrainDatasetConfig(
@@ -262,9 +262,7 @@ def main(cfg: Config) -> None:
             preview = _render_preview(panels, camera_views)
             wandb.log(
                 {
-                    f"videos/{dataset_name}": wandb.Video(
-                        video.transpose(0, 3, 1, 2), fps=cfg.fps, format="gif"
-                    ),
+                    f"videos/{dataset_name}": wandb.Video(video.transpose(0, 3, 1, 2), fps=cfg.fps, format="gif"),
                     f"preview/{dataset_name}": wandb.Image(preview),
                     f"language/{dataset_name}": language or "",
                 },

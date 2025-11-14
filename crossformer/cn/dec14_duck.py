@@ -14,13 +14,10 @@ from crossformer.utils.spec import ModuleSpec
 
 
 def get_dataset_config(task_cond, window_size, action_horizon, mix="bafl"):
-    traj_transform_kwargs, frame_transform_kwargs = get_augmentation_config(
-        task_cond, window_size, action_horizon
-    )
+    traj_transform_kwargs, frame_transform_kwargs = get_augmentation_config(task_cond, window_size, action_horizon)
 
     assert all(
-        any(name in datasets for datasets in HEAD_TO_DATASET.values())
-        for name, weight in OXE_NAMED_MIXES[mix]
+        any(name in datasets for datasets in HEAD_TO_DATASET.values()) for name, weight in OXE_NAMED_MIXES[mix]
     ), f"Dataset in mix: {mix} doesn't have assigned head."
 
     return {
@@ -220,9 +217,7 @@ def get_config():
     # window_size = 3
 
     action_horizon = 4
-    dataset_kwargs = get_dataset_config(
-        "multi", window_size, action_horizon=action_horizon, mix="xgym_duck_single"
-    )
+    dataset_kwargs = get_dataset_config("multi", window_size, action_horizon=action_horizon, mix="xgym_duck_single")
     config = {
         "pretrained_path": "hf://rail-berkeley/crossformer",
         "pretrained_step": placeholder(int),
@@ -263,9 +258,7 @@ def get_config():
         "log_interval": 100,
         "eval_interval": 2000,  # 2000
         "save_interval": 2000,
-        "save_dir": os.path.expanduser(
-            os.environ.get("BAFL_SAVE", os.path.expanduser("~"))
-        ),
+        "save_dir": os.path.expanduser(os.environ.get("BAFL_SAVE", os.path.expanduser("~"))),
         "seed": 42,
         # dataset_kwargs=FINETUNING_KWARGS,
         "dataset_kwargs": dataset_kwargs,
