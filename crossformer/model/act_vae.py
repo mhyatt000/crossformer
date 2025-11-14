@@ -1,10 +1,10 @@
-# act_model_flax_vae.py
 from __future__ import annotations
 
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
-from resnet_encoder_flax import ResNetEncoder
+
+from crossformer.model.components.vit_encoders import ResNet26FILM
 
 
 class TransformerBlock(nn.Module):
@@ -75,7 +75,7 @@ class ACTVAEModel(nn.Module):
         side = images[..., 3:6].reshape(B * Tctx, H, W, 3)
         wrist = images[..., 6:9].reshape(B * Tctx, H, W, 3)
 
-        enc = ResNetEncoder(variant=self.resnet_variant, d_model=self.d_model, name="shared_resnet")
+        enc = ResNet26FILM(use_film=False)
         e_low = enc(low, train=train)
         e_side = enc(side, train=train)
         e_wrist = enc(wrist, train=train)
