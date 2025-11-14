@@ -2,6 +2,8 @@
 Contains basic logic for randomly zero-ing out keys in the task specification.
 """
 
+from __future__ import annotations
+
 import pickle
 
 import tensorflow as tf
@@ -9,9 +11,7 @@ import tensorflow as tf
 from crossformer.data.utils.data_utils import to_padding
 
 
-def delete_and_rephrase(
-    traj, pickle_file_path: str, rephrase_prob: float, keep_image_prob: float
-):
+def delete_and_rephrase(traj, pickle_file_path: str, rephrase_prob: float, keep_image_prob: float):
     traj = rephrase_instruction(traj, pickle_file_path, rephrase_prob)
     traj = delete_task_conditioning(traj, keep_image_prob)
     return traj
@@ -22,9 +22,7 @@ class Rephraser:
         """Takes a python dictionary with string keys and values and creates a tf static hash table"""
         keys = list(dictionary.keys())
         values = list(dictionary.values())
-        initializer = tf.lookup.KeyValueTensorInitializer(
-            keys, values, key_dtype=tf.string, value_dtype=tf.string
-        )
+        initializer = tf.lookup.KeyValueTensorInitializer(keys, values, key_dtype=tf.string, value_dtype=tf.string)
         hash_table = tf.lookup.StaticHashTable(initializer, default_value="")
         return hash_table
 
@@ -36,9 +34,7 @@ class Rephraser:
                 self.rephrase_lookup = self.create_static_hash_table(lang_paraphrases)
 
 
-def rephrase_instruction(
-    traj: dict, pickle_file_path: str, rephrase_prob: float
-) -> dict:
+def rephrase_instruction(traj: dict, pickle_file_path: str, rephrase_prob: float) -> dict:
     """Randomly rephrases language instructions with precomputed paraphrases
     Args:
        traj: A dictionary containing trajectory data. Should have a "task" key.
@@ -97,11 +93,7 @@ def delete_task_conditioning(
     if "language_instruction" not in traj["task"]:
         return traj
 
-    image_keys = {
-        key
-        for key in traj["task"].keys()
-        if key.startswith("image_") or key.startswith("depth_")
-    }
+    image_keys = {key for key in traj["task"] if key.startswith(("image_", "depth_"))}
     if not image_keys:
         return traj
 
@@ -109,9 +101,7 @@ def delete_task_conditioning(
     should_keep_images = tf.random.uniform([traj_len]) < keep_image_prob
     should_keep_images |= ~traj["task"]["pad_mask_dict"]["language_instruction"]
     # don't keep goal images if they are all padding
-    should_keep_images &= tf.reduce_any(
-        [traj["task"]["pad_mask_dict"][key] for key in image_keys]
-    )
+    should_keep_images &= tf.reduce_any([traj["task"]["pad_mask_dict"][key] for key in image_keys])
 
     for key in image_keys | {"language_instruction"}:
         should_keep = should_keep_images if key in image_keys else ~should_keep_images

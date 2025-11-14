@@ -94,18 +94,14 @@ def xgym_mano_dataset_transform(trajectory: dict[str, Any]) -> dict[str, Any]:
         Compatible with symbolic execution.
         """
         # Expand dimensions to compute pairwise differences
-        diff = tf.expand_dims(fingers, axis=1) - tf.expand_dims(
-            fingers, axis=0
-        )  # Shape: (N, N, 3)
+        diff = tf.expand_dims(fingers, axis=1) - tf.expand_dims(fingers, axis=0)  # Shape: (N, N, 3)
 
         # Compute the Euclidean distances
         distances = tf.norm(diff, axis=2)  # Shape: (N, N)
 
         # Create a mask for the upper triangle (excluding the diagonal)
         num_fingers = tf.shape(fingers)[0]
-        row_indices, col_indices = tf.meshgrid(
-            tf.range(num_fingers), tf.range(num_fingers), indexing="ij"
-        )
+        row_indices, col_indices = tf.meshgrid(tf.range(num_fingers), tf.range(num_fingers), indexing="ij")
         upper_triangle_mask = tf.cast(row_indices < col_indices, tf.bool)
 
         # Apply the mask to get the upper triangle distances

@@ -3,8 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from conftest import make_synthetic_trajectory
-from conftest import standardize_synthetic
+from conftest import make_synthetic_trajectory, standardize_synthetic
 import numpy as np
 import pytest
 
@@ -63,9 +62,7 @@ def test_build_trajectory_dataset_applies_standardization(
     assert dataset.dataset_statistics.action.mean.shape == (4,)
 
 
-def test_build_trajectory_dataset_with_existing_statistics(
-    dataset_config: builders.GrainDatasetConfig, tmp_path: Path
-):
+def test_build_trajectory_dataset_with_existing_statistics(dataset_config: builders.GrainDatasetConfig, tmp_path: Path):
     dataset, stats = builders.build_trajectory_dataset(dataset_config)
     stats_path = tmp_path / "precomputed.json"
     stats_path.write_text(json.dumps(stats.to_json()))

@@ -16,9 +16,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass()
 class Augment(CN):
-    random_resized_crop: dict[str, Any] = default(
-        {"scale": [0.8, 1.0], "ratio": [0.9, 1.1]}
-    )
+    random_resized_crop: dict[str, Any] = default({"scale": [0.8, 1.0], "ratio": [0.9, 1.1]})
 
     random_brightness: list[float] = default([0.1])
     random_contrast: list[float] = default([0.9, 1.1])
@@ -37,16 +35,12 @@ class Augment(CN):
 
 @dataclass()
 class AlohaAug(Augment):
-    random_resized_crop: dict[str, Any] = default(
-        {"scale": [0.9, 1.0], "ratio": [0.75, 4.0 / 3.0]}
-    )
+    random_resized_crop: dict[str, Any] = default({"scale": [0.9, 1.0], "ratio": [0.75, 4.0 / 3.0]})
 
 
 @dataclass()
 class BridgeAug(Augment):
-    random_resized_crop: dict[str, Any] = default(
-        {"scale": [0.8, 1.0], "ratio": [0.9, 1.1]}
-    )
+    random_resized_crop: dict[str, Any] = default({"scale": [0.8, 1.0], "ratio": [0.9, 1.1]})
 
 
 #
@@ -75,8 +69,6 @@ class FrameTransform(CN):
         d = {
             "resize_size": dict.fromkeys(load_camera_views, self.resize_size),
             "num_parallel_calls": self.num_parallel_calls,
-            "image_augment_kwargs": {
-                k: self.image_augment_kwargs.asdict() for k in load_camera_views
-            },
+            "image_augment_kwargs": {k: self.image_augment_kwargs.asdict() for k in load_camera_views},
         }
         return d

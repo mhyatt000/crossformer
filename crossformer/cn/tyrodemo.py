@@ -73,9 +73,7 @@ _CONFIGS_DICT = {config.name: config for config in _CONFIGS}
 
 
 def cli() -> Config:
-    return tyro.extras.overridable_config_cli(
-        {k: (k, v) for k, v in _CONFIGS_DICT.items()}
-    )
+    return tyro.extras.overridable_config_cli({k: (k, v) for k, v in _CONFIGS_DICT.items()})
 
 
 if __name__ == "__main__":

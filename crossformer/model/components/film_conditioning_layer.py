@@ -1,4 +1,5 @@
 # adapted from https://github.com/google-research/robotics_transformer/blob/master/film_efficientnet/film_conditioning_layer.py
+from __future__ import annotations
 
 import flax.linen as nn
 import jax.numpy as jnp

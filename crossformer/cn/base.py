@@ -1,8 +1,6 @@
-from dataclasses import asdict
-from dataclasses import dataclass
-from dataclasses import field
-from dataclasses import fields
-from dataclasses import is_dataclass
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from enum import Enum
 import logging
 from typing import Any

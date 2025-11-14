@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Optional, Sequence
+from typing import Sequence
 
 import numpy as np
 import tensorflow as tf
@@ -21,7 +23,7 @@ class HFTokenizer(TextProcessor):
     def __init__(
         self,
         tokenizer_name: str,
-        tokenizer_kwargs: Optional[dict] = {
+        tokenizer_kwargs: dict | None = {
             "max_length": 64,
             "padding": "max_length",
             "truncation": True,
@@ -64,7 +66,7 @@ class MuseEmbedding(TextProcessor):
 class CLIPTextProcessor(TextProcessor):
     def __init__(
         self,
-        tokenizer_kwargs: Optional[dict] = {
+        tokenizer_kwargs: dict | None = {
             "max_length": 64,
             "padding": "max_length",
             "truncation": True,
@@ -81,9 +83,9 @@ class CLIPTextProcessor(TextProcessor):
             text=strings,
             **self.kwargs,
         )
-        inputs["position_ids"] = np.expand_dims(
-            np.arange(inputs["input_ids"].shape[1]), axis=0
-        ).repeat(inputs["input_ids"].shape[0], axis=0)
+        inputs["position_ids"] = np.expand_dims(np.arange(inputs["input_ids"].shape[1]), axis=0).repeat(
+            inputs["input_ids"].shape[0], axis=0
+        )
         return inputs
 
 
@@ -92,9 +94,7 @@ class UniversalSentenceEncoder(TextProcessor):
         import tensorflow_hub as hub  # lazy import
         import tensorflow_text  # noqa: F401
 
-        self.sentence_encoder = hub.load(
-            "https://tfhub.dev/google/universal-sentence-encoder-large/5"
-        )
+        self.sentence_encoder = hub.load("https://tfhub.dev/google/universal-sentence-encoder-large/5")
 
     def encode(self, strings: Sequence[str]):
         with tf.device("/cpu:0"):

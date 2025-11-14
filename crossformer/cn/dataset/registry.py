@@ -22,9 +22,7 @@ taco_play = BasicDataSpec(
     image_obs_keys=IMOBS(primary="rgb_static"),
     depth_obs_keys=DIMOBS(primary="depth_static", wrist="depth_gripper"),
 )
-taco_extra = BasicDataSpec(
-    name="taco_extra", image_obs_keys=IMOBS(primary="rgb_static")
-)
+taco_extra = BasicDataSpec(name="taco_extra", image_obs_keys=IMOBS(primary="rgb_static"))
 jaco_play = BasicDataSpec(name="jaco_play")
 
 bcable = BasicDataSpec(

@@ -1,4 +1,6 @@
 # adapted from https://github.com/google-research/vision_transformer/blob/main/vit_jax/models_vit.py
+from __future__ import annotations
+
 from typing import Callable
 
 import flax.linen as nn
@@ -6,9 +8,7 @@ import jax
 import jax.numpy as jnp
 
 from crossformer.model.components.base import TokenGroup
-from crossformer.utils.typing import Dtype
-from crossformer.utils.typing import PRNGKey
-from crossformer.utils.typing import Shape
+from crossformer.utils.typing import Dtype, PRNGKey, Shape
 
 
 class AddPositionEmbs(nn.Module):
@@ -31,9 +31,7 @@ class AddPositionEmbs(nn.Module):
           Output tensor with shape `(bs, timesteps, in_dim)`.
         """
         # inputs.shape is (batch_size, seq_len, emb_dim).
-        assert inputs.ndim == 3, (
-            "Number of dimensions should be 3, but it is: %d" % inputs.ndim
-        )
+        assert inputs.ndim == 3, "Number of dimensions should be 3, but it is: %d" % inputs.ndim
         pos_emb_shape = (1, inputs.shape[1], inputs.shape[2])
         pe = self.param("pos_embedding", self.posemb_init, pos_emb_shape)
         return inputs + pe
@@ -46,12 +44,8 @@ class MlpBlock(nn.Module):
     dtype: Dtype = jnp.float32
     out_dim: int | None = None
     dropout_rate: float = 0.1
-    kernel_init: Callable[[PRNGKey, Shape, Dtype], jax.Array] = (
-        nn.initializers.xavier_uniform()
-    )
-    bias_init: Callable[[PRNGKey, Shape, Dtype], jax.Array] = nn.initializers.normal(
-        stddev=1e-6
-    )
+    kernel_init: Callable[[PRNGKey, Shape, Dtype], jax.Array] = nn.initializers.xavier_uniform()
+    bias_init: Callable[[PRNGKey, Shape, Dtype], jax.Array] = nn.initializers.normal(stddev=1e-6)
 
     @nn.compact
     def __call__(self, inputs, *, deterministic):
@@ -106,20 +100,16 @@ class MAPHead(nn.Module):
 
         if mask is not None:
             mask = mask.reshape(-1, l)
-            mask = jnp.broadcast_to(
-                mask[:, None, None, :], (batch_size, 1, self.num_readouts, l)
-            )
+            mask = jnp.broadcast_to(mask[:, None, None, :], (batch_size, 1, self.num_readouts, l))
 
-        out = nn.MultiHeadDotProductAttention(
-            num_heads=self.num_heads, kernel_init=nn.initializers.xavier_uniform()
-        )(probe, x, mask=mask)
+        out = nn.MultiHeadDotProductAttention(num_heads=self.num_heads, kernel_init=nn.initializers.xavier_uniform())(
+            probe, x, mask=mask
+        )
 
         # TODO: dropout on head?
         y = nn.LayerNorm()(out)
 
-        out = out + MlpBlock(mlp_dim=nn.merge_param("mlp_dim", self.mlp_dim, 4 * d))(
-            y, deterministic=not train
-        )
+        out = out + MlpBlock(mlp_dim=nn.merge_param("mlp_dim", self.mlp_dim, 4 * d))(y, deterministic=not train)
         out = out.reshape(*batch_dims, self.num_readouts, d)
         return out
 
@@ -175,9 +165,9 @@ class Encoder1DBlock(nn.Module):
 
         # MLP block.
         y = nn.LayerNorm(dtype=self.dtype)(x)
-        y = MlpBlock(
-            mlp_dim=self.mlp_dim, dtype=self.dtype, dropout_rate=self.dropout_rate
-        )(y, deterministic=deterministic)
+        y = MlpBlock(mlp_dim=self.mlp_dim, dtype=self.dtype, dropout_rate=self.dropout_rate)(
+            y, deterministic=deterministic
+        )
 
         return x + y
 

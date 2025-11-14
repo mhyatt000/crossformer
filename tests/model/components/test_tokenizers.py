@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -6,13 +8,13 @@ import pytest
 from crossformer.model.components.base import TokenGroup
 from crossformer.model.components.tokenizers import (
     BinTokenizer,
+    generate_proper_pad_mask,
     ImageTokenizer,
     LanguageTokenizer,
     LowdimObsTokenizer,
-    TokenLearner,
-    generate_proper_pad_mask,
     regex_filter,
     regex_match,
+    TokenLearner,
 )
 from crossformer.model.components.vit_encoders import PatchEncoder
 from crossformer.utils.spec import ModuleSpec
@@ -137,12 +139,8 @@ def test_lowdim_obs_tokenizer_continuous_and_discrete():
     group = tokenizer.apply(variables, observations, tasks, train=False)
     assert group.tokens.shape == (1, 2, 3, 1)
 
-    tokenizer_discrete = LowdimObsTokenizer(
-        obs_keys=("state",), discretize=True, n_bins=8
-    )
-    variables_disc = tokenizer_discrete.init(
-        {"params": jax.random.PRNGKey(7)}, observations, tasks, train=False
-    )
+    tokenizer_discrete = LowdimObsTokenizer(obs_keys=("state",), discretize=True, n_bins=8)
+    variables_disc = tokenizer_discrete.init({"params": jax.random.PRNGKey(7)}, observations, tasks, train=False)
     group_disc = tokenizer_discrete.apply(variables_disc, observations, tasks, train=False)
     assert group_disc.tokens.shape == (1, 2, 3, 8)
-    assert jnp.all((group_disc.tokens.sum(axis=-1) == 1))
+    assert jnp.all(group_disc.tokens.sum(axis=-1) == 1)

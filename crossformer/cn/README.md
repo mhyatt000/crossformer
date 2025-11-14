@@ -13,14 +13,14 @@ my priorities:
 * less boilerplate code.
 
 what hydra offers that i dont care about:
-* lots of yaml. python is usually cleaner i think 
+* lots of yaml. python is usually cleaner i think
     * (we might use yaml for sweeps if sweep classes arent possible, but only last resort)
 
 ## How to use
 
 to add config node, build a class that is child of CN (registered via CNMeta)
 
-CNMeta manages the registration of nodes and ConfigStore tree building 
+CNMeta manages the registration of nodes and ConfigStore tree building
 
 all CN are also dataclass
 
@@ -28,7 +28,7 @@ all CN are also dataclass
 
 hydra nodes can only see other CN if they are childeren of the same parent node
 
-ie: 
+ie:
 ```
     /
         <the base config>
@@ -46,7 +46,7 @@ ie:
 
 also they have to use the same name for the attribute as they are registered under
 
-ie: 
+ie:
 
 ```python
 class Run(CN):
@@ -54,8 +54,8 @@ class Run(CN):
     data: Data # cannot name this attr dataset, since registered in data group
 ```
 
-this is kind of annoying but thats the rule. 
-* if you cant change the attr name to be like the group 
+this is kind of annoying but thats the rule.
+* if you cant change the attr name to be like the group
     * then you can double register the node with your preffered name
     * but not recommended since it will be confusing... also might break at some point
 
@@ -64,7 +64,7 @@ this is kind of annoying but thats the rule.
 if you read the hydra docs you see that they require a defaults list in the config class
 
 CNMeta builds this under the hood because it looks ugly and confusing in the nodes
-* in short, it instantiates your class without the defaults 
+* in short, it instantiates your class without the defaults
 * then retroactively looks for other config nodes
     * defines a new class with the defaults list added and returns this as the original class
 * this forces the `__self__` attr of defaults to be at the end of defaults list
@@ -86,6 +86,6 @@ path = 'path/from/repo_beginning_at_cn/group/subgroup/file_name_doesnt_matter.py
 ConfigStore.instance().store(name='any', node=MyNode, group='group/subgroup')
 ```
 
-usually 
-* base.py is the file with base/default config 
+usually
+* base.py is the file with base/default config
 * other.py is some modification to the base node
