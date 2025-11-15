@@ -26,6 +26,7 @@ def resize(img, size=(224, 224)):
         img = img.reshape(n * m, h, w, c)
 
     img = tf.image.resize(img, size=size, method="lanczos3", antialias=True)
+    h, w = size  # no longer the initial h,w
     img = tf.cast(tf.clip_by_value(tf.round(img), 0, 255), tf.uint8).numpy()
     if stack:
         img = img.reshape(n, m, h, w, c)
@@ -115,13 +116,14 @@ class Policy(BasePolicy):
 
         self.dataset_name = TASKS[cfg.task]["dataset_name"]
         self.text = TASKS[cfg.task]["text"]
+        self.exob = self.model.example_batch["observation"]
 
         self.reset_history()
         self.reset({"text": self.text})  # trigger compilation
 
-        for _ in range(self.horizon):
-            pprint(spec(self.model.example_batch))
-            print(self.infer(self.model.example_batch))
+        # for _ in range(self.horizon):
+        pprint(spec(self.model.example_batch))
+        print(self.infer(self.model.example_batch))
 
         self.reset_history()
 
@@ -133,7 +135,8 @@ class Policy(BasePolicy):
     def reset(self, payload: dict):
         name = payload.get("model", "crossformer")
         if "goal" in payload:
-            goal_img = resize(payload["goal"]["image_primary"])
+            imsize = self.exob["image_primary"].shape[-2]
+            goal_img = resize(payload["goal"]["image_primary"], size=(imsize, imsize))
             goal = {"image_primary": goal_img[None]}
             self.task = self.model.create_tasks(goals=goal)
         elif "text" in payload:
@@ -158,13 +161,16 @@ class Policy(BasePolicy):
 
         obs = payload["observation"]
         obs["timestep_pad_mask"] = self.model.example_batch["observation"]["timestep_pad_mask"]  # dummy
+        imsize = self.exob["image_primary"].shape[-2]
         for key in obs:
             if "image" in key:
-                obs[key] = resize(obs[key])
+                obs[key] = resize(obs[key], size=(imsize, imsize))
             # NOTE... single proprio might fail if not processed accordingly
             # normalize proprioception expect for bimanual proprioception
             if "proprio" in key and key != "proprio_bimanual":
                 obs[key] = (obs[key] - norm_stats[key]["mean"]) / (norm_stats[key]["std"])
+
+        pprint(spec(obs))
 
         self.history.append(obs)
         self.num_obs += 1
@@ -184,7 +190,7 @@ class Policy(BasePolicy):
 
         actions = np.array(actions)
         pprint(spec({"action": actions}))
-        pprint(actions)
+        # pprint(actions)
 
         # whether to temporally ensemble the action predictions or return the full chunk
         if not payload.get("ensemble", True):
