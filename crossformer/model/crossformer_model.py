@@ -269,6 +269,11 @@ class CrossFormerModel:
             dataset_statistics = json.load(f)
             dataset_statistics = jax.tree.map(np.array, dataset_statistics, is_leaf=lambda x: not isinstance(x, dict))
 
+        # ignore sharding
+        shardings = Path(ckpt_path).rglob("_sharding")
+        for s in shardings:  # rename to _sharding.bak to ignore sharding info
+            s.rename(s.with_suffix(".bak"))
+
         # create model def (a CrossFormerModule)
         module = CrossFormerModule.create(**config["model"])
 
