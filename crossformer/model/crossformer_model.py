@@ -26,6 +26,9 @@ from crossformer.utils.spec import ModuleSpec, spec
 from crossformer.utils.typing import Config, Data, Params, PRNGKey, Sequence
 
 
+import numpy as np
+
+
 @struct.dataclass
 class CrossFormerModel:
     """Recommended way of interacting with CrossFormer models.
@@ -317,7 +320,7 @@ class CrossFormerModel:
 
         # use new orbax API for flexible restore
         # beware rough edges
-
+        """
         target = jax.tree.map(jnp.zeros_like, params_shape)
         sharding = jax.sharding.NamedSharding(
             jax.sharding.Mesh(jax.devices(), ("model",)),
@@ -329,11 +332,47 @@ class CrossFormerModel:
         spec = lambda x: (x.shape, x.dtype)
         target = jax.tree.map(doshard, target)
         abstract = jax.tree.map(ocp.utils.to_shape_dtype_struct, target)
+        """
 
-        manager = ocp.CheckpointManager(checkpoint_path, ocp.StandardCheckpointer())
+
+        def _canonicalize_restored_params(restored):
+            # Old TrainState-style: {"model": {"params": ...}, ...}
+            if isinstance(restored, dict):
+                model = restored.get("model", None)
+                if isinstance(model, dict) and "params" in model:
+                    return model["params"]
+                # Sometimes {"params": ...}
+                if "params" in restored:
+                    return restored["params"]
+            # New style: bare params pytree
+            return restored
+
+        manager = ocp.CheckpointManager(checkpoint_path, ocp.PyTreeCheckpointer())
+
+
+        ### manager = ocp.CheckpointManager(checkpoint_path, ocp.StandardCheckpointer())
         # structure = manager.item_metadata(step)
         # target = jax.tree.map(lambda x: np.zeros(x.shape), structure)
-        params = manager.restore(step, args=ocp.args.StandardRestore(abstract))
+
+        if step is None:
+            step = manager.latest_step()
+            if step is None:
+                raise ValueError(f"No checkpoints found under: {checkpoint_path}")
+
+        ### params = manager.restore(step, args=ocp.args.StandardRestore(abstract))
+        structure = manager.item_metadata(step)
+        restored = manager.restore(
+            step,
+            restore_kwargs={
+                "restore_args": jax.tree.map(
+                    lambda _: ocp.RestoreArgs(restore_type=np.ndarray),
+                    structure,
+                )
+            },
+        )
+        params = _canonicalize_restored_params(restored)
+
+
 
         """ this is original from crossformer... has problem with 4gpu->2gpu server
         original=False
