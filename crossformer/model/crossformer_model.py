@@ -385,6 +385,8 @@ class CrossFormerModel:
             params = checkpointer.restore(step, params_shape)
         """
 
+
+
         if config["text_processor"] is not None:
             text_processor = ModuleSpec.instantiate(config["text_processor"])()
         else:
