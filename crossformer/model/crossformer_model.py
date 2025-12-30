@@ -22,12 +22,9 @@ from crossformer.data.utils.data_utils import NormalizationType
 from crossformer.data.utils.text_processing import TextProcessor
 from crossformer.model.components.action_heads import ActionHead
 from crossformer.model.crossformer_module import CrossFormerModule
+from crossformer.utils.checkpoint_utils import canonicalize_restored_params
 from crossformer.utils.spec import ModuleSpec, spec
 from crossformer.utils.typing import Config, Data, Params, PRNGKey, Sequence
-
-
-import numpy as np
-from crossformer.utils.checkpoint_utils import canonicalize_restored_params
 
 
 @struct.dataclass
@@ -335,9 +332,7 @@ class CrossFormerModel:
         abstract = jax.tree.map(ocp.utils.to_shape_dtype_struct, target)
         """
 
-
         manager = ocp.CheckpointManager(checkpoint_path, ocp.PyTreeCheckpointer())
-
 
         ### manager = ocp.CheckpointManager(checkpoint_path, ocp.StandardCheckpointer())
         # structure = manager.item_metadata(step)
@@ -362,8 +357,6 @@ class CrossFormerModel:
 
         params = canonicalize_restored_params(restored)
 
-
-
         """ this is original from crossformer... has problem with 4gpu->2gpu server
         original=False
         if original:
@@ -374,8 +367,6 @@ class CrossFormerModel:
             step = step if step is not None else checkpointer.latest_step()
             params = checkpointer.restore(step, params_shape)
         """
-
-
 
         if config["text_processor"] is not None:
             text_processor = ModuleSpec.instantiate(config["text_processor"])()

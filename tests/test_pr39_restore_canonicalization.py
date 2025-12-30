@@ -1,7 +1,9 @@
-import numpy as np
-import pytest
+from __future__ import annotations
+
 from flax.core import FrozenDict
 from jax.tree_util import tree_leaves
+import numpy as np
+import pytest
 
 
 def canonicalize_restored_params(restored):
@@ -29,10 +31,7 @@ def canonicalize_restored_params(restored):
     if "params" in restored:
         return restored["params"]
 
-    raise KeyError(
-        "Unsupported restore format: expected TrainState-style "
-        "('model.params') or bare 'params'"
-    )
+    raise KeyError("Unsupported restore format: expected TrainState-style ('model.params') or bare 'params'")
 
 
 def _assert_valid_param_tree(params):
@@ -45,18 +44,7 @@ def _assert_valid_param_tree(params):
 
 def test_pr38_trainstate_style_restore():
     restored = {
-        "model": {
-            "params": FrozenDict(
-                {
-                    "encoder": {
-                        "layer1": {
-                            "kernel": np.zeros((2, 2)),
-                            "bias": np.zeros((2,))
-                        }
-                    }
-                }
-            )
-        },
+        "model": {"params": FrozenDict({"encoder": {"layer1": {"kernel": np.zeros((2, 2)), "bias": np.zeros((2,))}}})},
         "opt_state": {},
         "rng": None,
         "step": 100,
@@ -72,16 +60,7 @@ def test_pr38_trainstate_style_restore():
 
 
 def test_pr38_bare_params_restore():
-    restored = {
-        "params": {
-            "decoder": {
-                "layer2": {
-                    "kernel": np.ones((4, 4)),
-                    "bias": np.ones((4,))
-                }
-            }
-        }
-    }
+    restored = {"params": {"decoder": {"layer2": {"kernel": np.ones((4, 4)), "bias": np.ones((4,))}}}}
 
     params = canonicalize_restored_params(restored)
 
@@ -93,11 +72,7 @@ def test_pr38_bare_params_restore():
 
 
 def test_pr38_unsupported_restore_format_errors():
-    restored = {
-        "weights": {
-            "layer": np.zeros((1,))
-        }
-    }
+    restored = {"weights": {"layer": np.zeros((1,))}}
 
     with pytest.raises(KeyError):
         canonicalize_restored_params(restored)

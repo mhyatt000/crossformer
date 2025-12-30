@@ -1,6 +1,8 @@
 # crossformer/utils/checkpoint_utils.py
+from __future__ import annotations
 
 from typing import Mapping
+
 from flax.core import FrozenDict
 
 
@@ -26,10 +28,7 @@ def canonicalize_restored_params(restored: Mapping):
     Any other format raises an explicit error.
     """
     if not isinstance(restored, Mapping):
-        raise TypeError(
-            "Restored object must be a mapping (dict-like), "
-            f"got {type(restored)}"
-        )
+        raise TypeError(f"Restored object must be a mapping (dict-like), got {type(restored)}")
 
     # Primary: TrainState-style restore
     model = restored.get("model", None)
@@ -57,7 +56,4 @@ def _validate_param_tree(params):
     looks like a Flax parameter PyTree.
     """
     if not isinstance(params, (dict, FrozenDict)):
-        raise TypeError(
-            "Extracted params must be a dict or FrozenDict, "
-            f"got {type(params)}"
-        )
+        raise TypeError(f"Extracted params must be a dict or FrozenDict, got {type(params)}")

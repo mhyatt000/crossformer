@@ -1,6 +1,8 @@
-import numpy as np
+from __future__ import annotations
+
 from flax.core import FrozenDict
 from jax.tree_util import tree_leaves
+import numpy as np
 
 
 def _canonicalize_restored_params(restored):
@@ -20,18 +22,7 @@ def _canonicalize_restored_params(restored):
 def test_orbax_restore_canonicalization_trainstate_format():
     # Simulated Orbax TrainState-style restore output
     restored = {
-        "model": {
-            "params": FrozenDict(
-                {
-                    "encoder": {
-                        "layer1": {
-                            "kernel": np.zeros((2, 2)),
-                            "bias": np.zeros((2,))
-                        }
-                    }
-                }
-            )
-        },
+        "model": {"params": FrozenDict({"encoder": {"layer1": {"kernel": np.zeros((2, 2)), "bias": np.zeros((2,))}}})},
         "opt_state": {},
         "rng": None,
         "step": 123,
