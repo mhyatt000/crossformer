@@ -27,6 +27,7 @@ from crossformer.utils.typing import Config, Data, Params, PRNGKey, Sequence
 
 
 import numpy as np
+from crossformer.utils.checkpoint_utils import canonicalize_restored_params
 
 
 @struct.dataclass
@@ -335,18 +336,6 @@ class CrossFormerModel:
         """
 
 
-        def _canonicalize_restored_params(restored):
-            # Old TrainState-style: {"model": {"params": ...}, ...}
-            if isinstance(restored, dict):
-                model = restored.get("model", None)
-                if isinstance(model, dict) and "params" in model:
-                    return model["params"]
-                # Sometimes {"params": ...}
-                if "params" in restored:
-                    return restored["params"]
-            # New style: bare params pytree
-            return restored
-
         manager = ocp.CheckpointManager(checkpoint_path, ocp.PyTreeCheckpointer())
 
 
@@ -370,7 +359,8 @@ class CrossFormerModel:
                 )
             },
         )
-        params = _canonicalize_restored_params(restored)
+
+        params = canonicalize_restored_params(restored)
 
 
 
