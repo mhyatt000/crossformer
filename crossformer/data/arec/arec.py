@@ -113,6 +113,7 @@ class ArrayRecordBuilder:
             name="tinystories",
             root="~/.cache/arrds",
             version="v1",  # bump when schema changes
+            branch="main",  # logical branch under the dataset/version
             shard_size=200_000,  # records per shard
             writer_options="group_size:32",  # passed through to ArrayRecordWriter
         )
@@ -137,14 +138,16 @@ class ArrayRecordBuilder:
     def __init__(
         self,
         name: str,
-        root: str,
         version: str,
+        branch: str = "main",
+        root: str = Path("~/.cache/arrayrecords"),
         shard_size: int = 100_000,
-        writer_options: str | None = None,
+        writer_options: str | None = "group_size:1",
         build_meta: dict[str, Any] | None = None,  # things that affect schema
     ):
         self.name = name
-        self.root = Path(root).expanduser()
+        self.branch = branch
+        self.root = Path(root).expanduser() / name / version / branch
         Path(self.root).mkdir(parents=True, exist_ok=True)
         self.version = version
         self.shard_size = int(shard_size)
@@ -254,6 +257,7 @@ class ArrayRecordBuilder:
         meta = {
             "name": self.name,
             "version": self.version,
+            "branch": self.branch,
             "schema_fingerprint": _schema_fingerprint(self.version, self.build_meta),
             "writer_options": self.writer_options or "",
             "shard_size": self.shard_size,
@@ -266,6 +270,11 @@ class ArrayRecordBuilder:
         # Re-open reader with fresh shard list.
         self._ds = None
         self._ensure_reader()
+
+    @property
+    def source(self) -> ArrayRecordDataSource:
+        self._ensure_reader()
+        return self._ds
 
     def _ensure_reader(self) -> None:
         if self._ds is not None:
@@ -280,6 +289,7 @@ class ArrayRecordBuilder:
             self._meta = {
                 "name": self.name,
                 "version": self.version,
+                "branch": self.branch,
                 "num_records": len(self._ds),
             }
 
@@ -298,6 +308,7 @@ class ArrayRecordBuilder:
                 self._meta = {
                     "name": self.name,
                     "version": self.version,
+                    "branch": self.branch,
                     "num_records": len(self._ds),
                 }
         return self._meta
@@ -361,7 +372,13 @@ def build_fn_per_episode(*, episodes=None, fn=None):
     assert episodes or fn
     iter = episodes if episodes else fn()
     for ep_id, ep in enumerate(iter):
-        rec = {"episode_id": ep_id, **stackem(*ep)}
+        print(type(ep))
+        if isinstance(ep, list):
+            rec = {"episode_id": ep_id, **stackem(*ep)}
+        elif isinstance(ep, dict):
+            rec = {"episode_id": ep_id, **ep}
+        else:
+            raise ValueError(f"Unexpected episode type: {type(ep)}")
         yield rec
 
 
