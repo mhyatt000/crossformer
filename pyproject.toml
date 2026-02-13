@@ -71,6 +71,7 @@ dependencies = [
     "typeguard>=4.4.4",
     "pyright>=1.1.408",
     "beartype>=0.22.9",
+    "structlog>=25.5.0",
 ]
 
 [dependency-groups]
