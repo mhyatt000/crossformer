@@ -16,6 +16,9 @@ cov = { cmd = "uv run pytest -vv -s --cov --cov-report=term-missing" }
 [tasks.test-v]
 cmd = 'uv run pytest -vvrs'
 
+[tasks.test-print]
+cmd = 'uv run pytest -vvrs -s'
+
 [tasks.test-log]
 cmd = 'uv run pytest -vvrs  -o log_cli=true --log-cli-level=INFO'
 
