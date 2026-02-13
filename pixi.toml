@@ -13,4 +13,10 @@ load = { cmd = "uv run scripts/debug/data_grain.py --data.mix xgym_sweep" , depe
 setup = { cmd = "uvx pre-commit install && uvx pre-commit autoupdate" }
 cov = { cmd = "uv run pytest -vv -s --cov --cov-report=term-missing" }
 
+[tasks.test-v]
+cmd = 'uv run pytest -vvrs'
+
+[tasks.test-log]
+cmd = 'uv run pytest -vvrs  -o log_cli=true --log-cli-level=INFO'
+
 [dependencies]
