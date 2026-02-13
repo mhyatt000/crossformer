@@ -59,7 +59,8 @@ class FrameTransform(CN):
     num_parallel_calls: int = 200
 
     def __post_init__(self):
-        logger.warn("TODO: set self.threads")
+        # TODO: set self.threads
+        pass
 
     def create(self, load_camera_views: Sequence[str]):
         """Create a per-view frame transform for the specified camera views."""

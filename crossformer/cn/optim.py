@@ -23,8 +23,7 @@ class LearningRate(CN):
 
     def __post_init__(self):
         assert self.name in ["linear", "cosine", "exponential", "rsqrt"]
-        logger.warn(f" decay is none: {self.decay_steps is None}")
-        logger.warn("TODO make scheduler")
+        # TODO: make scheduler
 
     def create(self):
         assert self.decay_steps is not None, "decay_steps must be set to train steps"
@@ -79,7 +78,8 @@ class Optimizer(CN):
     mode: FreezeMode = FreezeMode.FULL
 
     def __post_init__(self):
-        logger.warn("TODO post init optimizer for frozen keys")
+        # TODO: post init optimizer for frozen keys
+        pass
 
     def create(self):
         lr = self.lr.create()

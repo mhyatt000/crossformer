@@ -86,8 +86,8 @@ class Model(CN):
             read, horizon = self.readouts[k], self.heads[k].action_horizon
             assert read == horizon, f"Readout {k} doesn't match head {read} != {horizon}"
 
-        logger.warn("TODO: Model needs fix to ignore list and dict")
-        logger.warn("TODO: MANO does not have a tokenizer")
+        # TODO: Model needs fix to ignore list and dict
+        # TODO: MANO does not have a tokenizer
 
 
 class Update(Model):

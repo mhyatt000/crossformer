@@ -23,7 +23,7 @@ from typing import (
 )
 
 import flax
-from rich import print as pprint
+from rich import print
 from six import u
 import tyro
 
@@ -292,6 +292,7 @@ class Train(CN):
     eval: Eval = Eval().field()
     rollout: Rollout = Rollout().field()
 
+    verbosity: int = 1  # 0=silent, 1=essential, 2=debug
     log_level: Literal["debug", "info", "warning", "error"] = "warning"  # logging verbosity
     log_interval: int = 100
     eval_interval: int = 2000
@@ -299,38 +300,46 @@ class Train(CN):
     save_dir: str | Path = os.environ.get("BAFL_SAVE", Path().home())
     seed: int = 42
 
+    def vprint(self, *args, level: int = 1, **kwargs):
+        """Print only when verbosity >= level."""
+        if self.verbosity >= level:
+            print(*args, **kwargs)
+
     def set_log_level(self):
         logging.basicConfig(level=self.log_level.upper(), force=True)
+        if self.verbosity == 0:
+            logging.getLogger("jax").setLevel(logging.ERROR)
+            logging.getLogger("tensorflow").setLevel(logging.ERROR)
+            logging.getLogger("absl").setLevel(logging.ERROR)
         log.info(f"Logging level set to {self.log_level.upper()}")
 
     def __post_init__(self):
         self.set_log_level()
         if self.data.transform.traj.action_horizon != self.model.max_horizon():
-            log.warning(
-                "WARNING: action horizon mismatch."
+            log.debug(
+                "action horizon mismatch: "
                 f"data.transform.traj ({self.data.transform.traj.action_horizon}) "
-                f"model.max_horizon ({self.model.max_horizon()})."
+                f"vs model.max_horizon ({self.model.max_horizon()}), auto-correcting"
             )
             self.data.transform.traj.action_horizon = self.model.max_horizon()
 
         if self.data.transform.traj.max_action_dim != self.model.max_action_dim():
-            log.warning(
-                "WARNING: max action dim mismatch."
+            log.debug(
+                "max action dim mismatch: "
                 f"data.transform.traj ({self.data.transform.traj.max_action_dim}) "
-                f"model.max_action_dim ({self.model.max_action_dim()})."
+                f"vs model.max_action_dim ({self.model.max_action_dim()}), auto-correcting"
             )
             self.data.transform.traj.max_action_dim = ActionDim(self.model.max_action_dim())
 
         if self.optimizer.lr.decay_steps is None:
-            log.warning(f"WARNING: decay_steps is None, setting it to {self.steps}")
+            log.debug(f"decay_steps is None, setting to {self.steps}")
             self.optimizer.lr.decay_steps = self.steps
 
-        log.warn("TODO: fix grad_acc and steps")
-        log.warn("TODO: fix dataset")
-
-        log.info("SUGGESTION: propogate from the main cfg down to children")
-        log.warn("TODO: assert all keys that appear twice are the same")
-        log.warn("TODO: is update_config for model arch only?")
+        # TODO: fix grad_acc and steps
+        # TODO: fix dataset
+        # TODO: propogate from the main cfg down to children
+        # TODO: assert all keys that appear twice are the same
+        # TODO: is update_config for model arch only?
 
     def transform_schema(self) -> dict[str, Any]:
         """
@@ -418,7 +427,7 @@ class Sweep(Train):
 
 
 def main(cfg: TYP) -> None:  # experiment or sweep
-    pprint(cfg)
+    print(cfg)
     print()
 
 

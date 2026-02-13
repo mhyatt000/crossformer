@@ -68,4 +68,4 @@ class Transform(CN):
             self.keep_image_prob = keep[self.task_cond]
             logger.info("Post init override", keep_image_prob=self.keep_image_prob)
 
-        logger.warn("TODO: separate configs from tensorflow dependency")
+        # TODO: separate configs from tensorflow dependency

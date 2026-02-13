@@ -123,7 +123,7 @@ class CNMeta(type):
     not to be confused with omagaconf.ConfigNode
     """
 
-    logger.warn("TODO: CNMeta needs fix to ignore list and dict")
+    # TODO: CNMeta needs fix to ignore list and dict
 
     def __new__(cls, name, bases, class_dict):
         # auto wrap with default_factory

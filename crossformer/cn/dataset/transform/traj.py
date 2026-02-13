@@ -40,8 +40,9 @@ class TrajectoryTransform(CN):
     subsample_length: int = 100  # subsample length for episode -> trajectory
 
     def __post_init__(self):
-        logger.warn("TODO: ensure max dims are truly the max")
-        logger.warn("TODO: define goal relabeling strategies")
+        # TODO: ensure max dims are truly the max
+        # TODO: define goal relabeling strategies
+        pass
 
     def create(self, with_head_to_dataset=True):
         d = self.asdict()
