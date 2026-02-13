@@ -20,23 +20,21 @@ def fnmatch_filter(template, xs):
     return [x for x in xs if fnmatch(x, template)]
 
 
-@deprecate("Use jax.tree.map directly instead.", strict=False)
+@deprecate("Use jax.tree.map directly instead.", strict=True)
 def tree_map(fn: Callable, tree: dict) -> dict:
     """Maps a function over a nested dictionary."""
+    import jax
+
     is_leaf = lambda x: not isinstance(x, dict)
     return jax.tree.map(fn, tree, is_leaf=is_leaf)
 
 
+@deprecate("Use crossformer.utils.tree.merge instead.", strict=False)
 def tree_merge(*trees: dict) -> dict:
     """Merges a list of nested dictionaries, with later dictionaries overriding earlier ones."""
-    merged = {}
-    for tree in trees:
-        for k, v in tree.items():
-            if isinstance(v, dict):
-                merged[k] = tree_merge(merged.get(k, {}), v)
-            else:
-                merged[k] = v
-    return merged
+    from crossformer.utils.tree import merge
+
+    return merge(*trees)
 
 
 class NormalizationType(str, Enum):

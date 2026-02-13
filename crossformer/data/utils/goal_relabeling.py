@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import tensorflow as tf
 
-from crossformer.data.utils.data_utils import tree_merge
+from crossformer.utils.tree import merge as tree_merge
 
 
 def uniform(traj: dict, max_goal_distance: int | None = None) -> dict:

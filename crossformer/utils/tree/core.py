@@ -15,9 +15,29 @@ def unflat(tree):
     return ftu.unflatten_dict({tuple(k.split(".")): v for k, v in tree.items()})
 
 
-def merge(lhs, rhs):
-    lhs, rhs = flat(lhs), flat(rhs)
-    out = lhs | rhs
+def merge(*trees):
+    out = {}
+    for tree in trees:
+        f = flat(tree)
+
+        # last-wins across scalar↔subtree conflicts
+        # - new key "x" wipes old "x.*"
+        # - new keys "x.*" wipe old "x"
+        for k in list(f.keys()):
+            prefix = k + "."
+
+            # case 1: new scalar/subtree root wipes old subtree
+            out = {kk: vv for kk, vv in out.items() if not kk.startswith(prefix)}
+
+            # case 2: new subtree wipes old scalar at any ancestor
+            # e.g. k="x.y" -> remove "x"
+            parts = k.split(".")
+            for i in range(1, len(parts)):
+                anc = ".".join(parts[:i])
+                out.pop(anc, None)
+
+        out |= f
+
     return unflat(out)
 
 

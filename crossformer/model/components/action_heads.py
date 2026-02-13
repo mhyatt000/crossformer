@@ -20,8 +20,6 @@ from crossformer.model.components.diffusion import (
 from crossformer.model.components.transformer import MAPHead
 from crossformer.utils.mytyping import PRNGKey
 
-from .adj.cart import get_fwd_kin_fn, get_jac_fn
-
 
 class ActionHead(ABC):
     """Action prediction modules that take in the transformer token outputs and predict actions.
@@ -522,7 +520,6 @@ class FlowMatchingActionHead(ContinuousActionHead):
     ) -> jax.Array:
         embeddings = self._embed(transformer_outputs, train=train)
         print("embeddings", embeddings.shape)
-        print("\n" * 10)
 
         if (time is None or a_t is None) and not self.is_initializing():
             raise ValueError("Must provide time and current action when calling flow head")
@@ -712,6 +709,9 @@ class AdjFlowHead(FlowMatchingActionHead):
 
     def setup(self):
         super().setup()
+        from .adj.cart import get_fwd_kin_fn, get_jac_fn, make_robot
+
+        robot = make_robot()
         self.adjustor = partial(
             _cart_flow_adjustor,
             fk=get_fwd_kin_fn(robot, pad_gripper=True),

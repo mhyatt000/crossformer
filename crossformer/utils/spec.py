@@ -69,7 +69,7 @@ def diff(a: Spec, b: Spec, simple=True):
 
 
 def ezdiff(a: dict[str, Any], b: dict[str, Any], simple=True):
-    from crossformer.data.grain.utils import flat
+    from crossformer.utils.tree import flat
 
     a, b = spec(flat(a), simple=simple), spec(flat(b), simple=simple)
     from rich.pretty import pprint
