@@ -12,10 +12,11 @@ import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from ml_collections import ConfigDict
 import optax
-from rich.pretty import pprint
+from rich import print
 import tensorflow as tf
 import tqdm
 import tyro
+import wandb
 
 from crossformer import cn
 from crossformer.data.oxe.oxe_standardization_transforms import (
@@ -35,7 +36,6 @@ from crossformer.utils.train_utils import (
     Timer,
     TrainState,
 )
-import wandb
 
 # from absl import logging
 log = logging.getLogger(__name__)
@@ -60,7 +60,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     # prevent tensorflow from using GPU memory since it's only used for data loading
     tf.config.set_visible_devices([], "GPU")
 
-    pprint(cfg)
+    print(cfg)
     initialize_compilation_cache()
     # compilation_cache.set_cache_dir(str(Path().home() / '.cache' / "jax_compilation_cache"))
     devices = jax.devices()
@@ -118,7 +118,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         flat_config = cfg.model.delete(flat_config)
 
         config = ConfigDict(flax.traverse_util.unflatten_dict(flat_config))
-        pprint(cfg.model.create())
+        print(cfg.model.create())
         config.update(cfg.model.create())
         config = config.to_dict()
         check_config_diff(config, pretrained_model.config)
@@ -165,7 +165,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
 
     log.warning("TODO shard with mp")
     example_batch = next(dsit)
-    pprint(spec(example_batch))
+    print(spec(example_batch))
 
     callbacks = Box(inspect=InspectCallback(log_every=100))
     _ = callbacks.inspect(example_batch)
@@ -176,7 +176,8 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
 
     rng = jax.random.PRNGKey(cfg.seed)
     rng, init_rng = jax.random.split(rng)
-    pprint(config)
+    print(config)
+    quit()
     model = CrossFormerModel.from_config(
         config,
         example_batch,
@@ -376,7 +377,6 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
 
         with timer("dataset"):
             batch = next(dsit)
-            quit()
 
         with timer("train"):
             train_state, update_info = train_step(train_state, batch)

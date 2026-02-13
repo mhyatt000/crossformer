@@ -205,12 +205,14 @@ class ModelFactory(CN):
         flattened = list(flattened.keys())
         return flattened
 
-    def delete(self, flat):
+    def delete(self, flat, verbose=False) -> dict[str, Any]:
         """delete keys from flax config tree based on flat spec"""
         """
         Delete keys from the model config based on the flattened list
         :param flat: list of keys to delete
         """
+
+        _print = print if verbose else lambda *args, **kwargs: None
 
         def inside(a: list[str], b: list[str]):
             """see if a is inside b"""
@@ -226,7 +228,7 @@ class ModelFactory(CN):
             if any(inside(m, c) for m in mykeys):
                 continue
             if any(inside(d, c) for d in deletespec):
-                print(f"del: {'.'.join(c)}")
+                _print(f"del: {'.'.join(c)}")
                 del flat[c]
 
         return flat
