@@ -13,6 +13,8 @@ from crossformer.model.components.action_heads import (
 )
 from crossformer.model.components.base import TokenGroup
 
+pytestmark = pytest.mark.nn
+
 
 @pytest.fixture
 def transformer_outputs():

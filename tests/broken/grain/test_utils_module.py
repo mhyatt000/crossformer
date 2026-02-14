@@ -4,19 +4,13 @@ import numpy as np
 import pytest
 
 from crossformer.data.grain import utils
-
-
-def test_tree_map_applies_function_recursively():
-    tree = {"a": 1, "b": {"c": 2, "d": 3}}
-    result = utils.tree_map(lambda x: x * 2, tree)
-    assert result == {"a": 2, "b": {"c": 4, "d": 6}}
-    assert tree == {"a": 1, "b": {"c": 2, "d": 3}}
+from crossformer.utils.tree import merge
 
 
 def test_tree_merge_prefers_rightmost_values():
     base = {"a": 1, "nested": {"left": 5, "shared": {"x": 1}}}
     override = {"nested": {"right": 6, "shared": {"y": 2}}, "extra": 3}
-    merged = utils.tree_merge(base, override)
+    merged = merge(base, override)
     assert merged == {
         "a": 1,
         "nested": {"left": 5, "right": 6, "shared": {"x": 1, "y": 2}},

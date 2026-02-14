@@ -56,15 +56,16 @@ class TestGrainPipeline:
             name="test_dataset",
             source=lambda: trajectories,
             standardize_fn=ModuleSpec.create(_standardize),
-            image_obs_keys={"main": "img1"},
-            depth_obs_keys={},
-            proprio_obs_keys={
-                "cartesian": "state_cartesian",
-                "joints": "state_joints",
-                "gripper": "state_gripper",
-            },
-            proprio_obs_dims={"cartesian": 6, "joints": 7, "gripper": 1},
-            language_key="language_instruction",
+            keys=builders.Keys(
+                image={"main": "img1"},
+                depth={},
+                proprio={
+                    "cartesian": "state_cartesian",
+                    "joints": "state_joints",
+                    "gripper": "state_gripper",
+                },
+                lang="language_instruction",
+            ),
             statistics_save_dir=str(tmp_path / "stats"),
         )
 
@@ -100,11 +101,12 @@ class TestGrainPipeline:
             name="stats_test",
             source=lambda: trajectories,
             standardize_fn=ModuleSpec.create(_standardize),
-            image_obs_keys={"main": "img1"},
-            depth_obs_keys={},
-            proprio_obs_keys={"cartesian": "state_cartesian"},
-            proprio_obs_dims={"cartesian": 6},
-            language_key="language_instruction",
+            keys=builders.Keys(
+                image={"main": "img1"},
+                depth={},
+                proprio={"cartesian": "state_cartesian"},
+                lang="language_instruction",
+            ),
             statistics_save_dir=str(tmp_path / "stats"),
         )
 

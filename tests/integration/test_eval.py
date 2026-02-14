@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from .conftest import requires_gpu
@@ -44,13 +45,13 @@ class TestEval:
         for key in m1:
             if isinstance(m1[key], dict):
                 for metric_name in m1[key]:
-                    jnp.testing.assert_allclose(
+                    np.testing.assert_allclose(
                         m1[key][metric_name],
                         m2[key][metric_name],
                         atol=1e-6,
                     )
             else:
-                jnp.testing.assert_allclose(m1[key], m2[key], atol=1e-6)
+                np.testing.assert_allclose(m1[key], m2[key], atol=1e-6)
 
     def test_eval_metrics_structure_multihead(self, multihead_config, example_batch_multihead):
         """Eval metrics should reflect all heads."""
@@ -68,7 +69,7 @@ class TestEval:
         batch = jax.tree.map(jnp.asarray, example_batch)
 
         config = tiny_config.copy()
-        config["optimizer"] = {"learning_rate": 1e-2, "weight_decay": 0.0}
+        config["optimizer"] = {"learning_rate": 1e-4, "weight_decay": 0.0}
         state = init_train_state(jax.random.PRNGKey(0), batch, config)
 
         # Initial eval loss

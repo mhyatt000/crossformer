@@ -45,6 +45,7 @@ def init_train_state(
     )
 
     optimizer_cfg = config.get("optimizer", {})
+    optimizer_cfg.setdefault("learning_rate", 1e-4)
     if optimizer_kwargs:
         optimizer_cfg = {**optimizer_cfg, **optimizer_kwargs}
 

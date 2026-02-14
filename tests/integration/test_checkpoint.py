@@ -16,20 +16,17 @@ from .helpers import (
 )
 
 
-def _save_checkpoint(state, path: Path) -> None:
+def _save_checkpoint(state, path: Path, step: int = 0) -> None:
     """Save checkpoint to disk using model.save_pretrained()."""
     path.mkdir(parents=True, exist_ok=True)
-    state.model.save_pretrained(str(path))
+    state.model.save_pretrained(step=step, checkpoint_path=str(path))
 
 
-def _load_checkpoint_model(path: Path, example_batch, text_processor=None):
+def _load_checkpoint_model(path: Path):
     """Load model from checkpoint."""
     from crossformer.model.crossformer_model import CrossFormerModel
 
-    return CrossFormerModel.load_pretrained(
-        str(path),
-        text_processor=text_processor,
-    )
+    return CrossFormerModel.load_pretrained(str(path))
 
 
 @requires_gpu
@@ -46,7 +43,7 @@ class TestCheckpoint:
         _save_checkpoint(state, ckpt_dir)
 
         # Load model
-        loaded_model = _load_checkpoint_model(ckpt_dir, batch)
+        loaded_model = _load_checkpoint_model(ckpt_dir)
 
         # Compare outputs
         bound_orig = state.model.module.bind({"params": state.model.params})
@@ -85,7 +82,7 @@ class TestCheckpoint:
         assert state_2.step == 2
 
         # Load and verify step count
-        loaded_model = _load_checkpoint_model(ckpt_dir, batch)
+        loaded_model = _load_checkpoint_model(ckpt_dir)
         # Step count should be in the config or we reconstruct it
         # For now, just verify that the loaded params match
         bound_orig_2 = state_2.model.module.bind({"params": state_2.model.params})
@@ -113,7 +110,7 @@ class TestCheckpoint:
         _save_checkpoint(state, ckpt_dir)
 
         # Load and verify all heads are present
-        loaded_model = _load_checkpoint_model(ckpt_dir, batch)
+        loaded_model = _load_checkpoint_model(ckpt_dir)
 
         # Verify all heads present in loaded model
         for head_name in ["single", "bimanual", "mano"]:
@@ -128,8 +125,8 @@ class TestCheckpoint:
         _save_checkpoint(state, ckpt_dir)
 
         # Load twice
-        loaded_1 = _load_checkpoint_model(ckpt_dir, batch)
-        loaded_2 = _load_checkpoint_model(ckpt_dir, batch)
+        loaded_1 = _load_checkpoint_model(ckpt_dir)
+        loaded_2 = _load_checkpoint_model(ckpt_dir)
 
         # Compare params
         params_1_leaves = jax.tree.leaves(loaded_1.params)
