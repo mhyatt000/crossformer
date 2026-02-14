@@ -14,6 +14,7 @@ import jax
 import numpy as np
 from tqdm import tqdm
 
+from crossformer.utils import databrief
 from crossformer.utils.jax_utils import cpu
 from crossformer.utils.mytyping import Data
 
@@ -60,7 +61,7 @@ class OnlineStats:
         }
 
 
-@dataclass
+@databrief
 class ArrayStatistics:
     mean: jax.Array
     std: jax.Array

@@ -15,7 +15,6 @@ from grain.experimental import ThreadPrefetchIterDataset
 import jax
 import jax.numpy as jnp
 import numpy as np
-from rich import print
 
 from crossformer import cn
 from crossformer.cn.dataset.mix import Arec, MultiDataSource
@@ -117,12 +116,12 @@ def make_source_by_mix(
 ) -> tuple[grain.Dataset, builders.GrainDatasetConfig, transforms.TransformConfig]:
     # TODO reduce config scope by only passing cfg.data ?
 
-    grain.config.update("py_debug_mode", True)
+    grain.config.update("py_debug_mode", log.isEnabledFor(logging.DEBUG))
 
     def exists(x: dict[Any] | None):
         return x is not None
 
-    print(mix.source, len(mix.source))
+    log.debug("mix source: %s (%d)", mix.name, len(mix.source))
 
     epinfo = EpisodeInfo(mix.source, mix)
 
@@ -167,7 +166,7 @@ def make_source_by_mix(
     dsit = iter(ds)
     example = next(dsit)
 
-    print(spec(example))
+    # log.debug("example spec: %s", spec(example))
 
     mappings = _infer_observation_mappings(example)
     assert mappings, "Trajectory missing observation key"
@@ -284,7 +283,7 @@ class GrainDataFactory:
 
     def pad_and_mix(self, dsets: list[GrainDataLoader]) -> GrainDataLoader:
         """pad datasets to same keys and mix them by weight"""
-        print("n dsets", len(dsets))
+        log.debug("mixing %d datasets", len(dsets))
 
         samples = [next(iter(ds)) for ds in dsets]
         a = samples[0]
@@ -307,7 +306,7 @@ class GrainDataFactory:
             a = samples[0]
             for b in samples[1:]:
                 ezdiff(a, b, simple=False)
-            print(spec(a))
+            # print(spec(a))
 
         ds = grain.MapDataset.mix(dsets, weights=[1.0] * len(dsets))
         return ds
@@ -318,11 +317,11 @@ class GrainDataFactory:
         shard_fn: Callable | None = None,
         train: bool = True,
     ) -> GrainDataLoader:
-        print(cfg.data.mix.value)
+        log.debug("data mix: %s", cfg.data.mix.value)
         mix = cfg.data.mix.value.flatten()
-        print(mix)
+        log.debug("flattened mix: %s", mix)
         mix = [Arec.from_name(m[0]) for m in mix]  # m[1] is weights
-        print(mix)
+        log.debug("arec sources: %s", mix)
 
         sources = [make_source_by_mix(m, cfg) for m in mix]
 
@@ -351,7 +350,7 @@ class GrainDataFactory:
         ds = ds.mp_prefetch(grain.MultiprocessingOptions(num_workers=8, per_worker_buffer_size=10))
 
         batch = next(iter(ds))
-        print(spec(batch))
+        log.debug("batch spec: %s", spec(batch))
 
         # then frame lvl transforms in jax
 
@@ -373,5 +372,5 @@ class GrainDataFactory:
 
         log.info("returning final dataset")
 
-        print("Dataset created... please be very patient while threads start up")
+        log.info("dataset created, waiting for prefetch threads to start")
         return GrainDataLoader(dataset=ds, statistics=self.stats, config=dconfig)

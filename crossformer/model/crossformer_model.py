@@ -16,7 +16,6 @@ import numpy as np
 from orbax import checkpoint as ocp
 import orbax.checkpoint
 from rich import print
-from rich.pretty import pprint
 import tensorflow as tf
 
 from crossformer.data.utils.data_utils import NormalizationType
@@ -438,7 +437,8 @@ class CrossFormerModel:
         example_batch = multihost_utils.process_allgather(example_batch)
         example_batch = jax.tree.map(lambda x: x[0][:1], example_batch)
 
-        pprint(spec(example_batch))
+        if verbose:
+            print(spec(example_batch))
 
         init_args = (
             example_batch["observation"],

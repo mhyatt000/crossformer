@@ -509,7 +509,7 @@ def get_chunked_act(ds, a, o, chunk_fn):
 
 
 def make_data_source(cfg: cn.Train) -> grain.MapDataset:
-    grain.config.update("py_debug_mode", True)
+    grain.config.update("py_debug_mode", log.isEnabledFor(logging.DEBUG))
 
     mix = cfg.data.mix.value
     print(mix, mix.name)
@@ -564,7 +564,7 @@ def make_data_source(cfg: cn.Train) -> grain.MapDataset:
     dsit = iter(ds)
     example = next(dsit)
 
-    print(spec(example))
+    # print(spec(example))
 
     mappings = _infer_observation_mappings(example)
     assert mappings, "Trajectory missing observation key"

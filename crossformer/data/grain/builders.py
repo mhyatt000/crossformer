@@ -128,8 +128,6 @@ def _restructure_trajectory(
             'single': np.concatenate([proprio["joints"], proprio["gripper"]], axis=-1),
             'position': proprio["position"],
             }
-    print(spec(step))
-    quit()
     """
 
     task = {}
