@@ -20,7 +20,6 @@ from crossformer import cn
 from crossformer.cn.dataset.mix import Arec, MultiDataSource
 from crossformer.data.grain import builders, transforms
 from crossformer.data.grain.datasets import (
-    _postprocess_episode,
     EpisodeInfo,
     unpack_record,
 )
@@ -125,17 +124,6 @@ def make_source_by_mix(
 
     epinfo = EpisodeInfo(mix.source, mix)
 
-    def pack_fn(xs):
-        xs = [unpack_record(x) for x in xs]
-        xs = _postprocess_episode(xs, steps=False)
-        return xs  # batch_fn(xs)
-
-    def sanity_check(traj: dict[jax.Array]) -> dict:
-        eid = traj["episode_id"][0]
-        same = jnp.all(traj["episode_id"] == eid)
-        assert same, f"Episode ID mismatch in episode {eid}"
-        return traj
-
     def maybe_init_lang(x: dict):
         if "language_instruction" not in x:
             x["language_instruction"] = ""
@@ -159,9 +147,7 @@ def make_source_by_mix(
             )
         )
         .map(drop_str)  # TODO refactor to drop_type(typ=str)
-        # .map(sanity_check)
     )
-    # ds = cache.CacheByKeyMapDataset(ds)
 
     dsit = iter(ds)
     example = next(dsit)
@@ -374,3 +360,8 @@ class GrainDataFactory:
 
         log.info("dataset created, waiting for prefetch threads to start")
         return GrainDataLoader(dataset=ds, statistics=self.stats, config=dconfig)
+
+
+if __name__ == "__main__":
+    f = GrainDataFactory()
+    f.make()

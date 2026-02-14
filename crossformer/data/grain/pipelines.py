@@ -559,7 +559,6 @@ def make_data_source(cfg: cn.Train) -> grain.MapDataset:
         .map(drop_str)
         # .map(sanity_check)
     )
-    # ds = cache.CacheByKeyMapDataset(ds)
 
     dsit = iter(ds)
     example = next(dsit)
@@ -784,7 +783,6 @@ def make_single_dataset(
         # pprint(spec(next(iter(ds))))
 
         # ds = flatmap.PrivilegedFlatMapMapDataset(ds, transform=flatmap.PackByEpisode(key="info.id.episode_id", use_np=True))
-        # ds = cache.CacheByKeyMapDataset(ds)
         ds = ds.seed(42).shuffle()  # shuffle before iter
 
         ds = ds.repeat() if train else ds  # repeat before iter ... repeat after shuffle
