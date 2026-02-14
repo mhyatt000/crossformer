@@ -20,7 +20,7 @@ import tensorflow as tf
 
 from crossformer.data.utils.data_utils import NormalizationType
 from crossformer.data.utils.text_processing import TextProcessor
-from crossformer.model.components.action_heads import ActionHead
+from crossformer.model.components.heads import ActionHead
 from crossformer.model.crossformer_module import CrossFormerModule
 from crossformer.utils.mytyping import Config, Data, Params, PRNGKey, Sequence
 from crossformer.utils.spec import ModuleSpec, spec
