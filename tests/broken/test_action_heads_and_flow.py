@@ -34,8 +34,8 @@ if not hasattr(jax.nn, "normalize"):
 
     jax.nn.normalize = _normalize
 
-from crossformer.model.components.action_heads import ContinuousActionHead, DiffusionActionHead, FlowMatchingActionHead
 from crossformer.model.components.base import TokenGroup
+from crossformer.model.components.heads import ContinuousActionHead, DiffusionActionHead, FlowMatchingActionHead
 
 
 def make_transformer_outputs(
