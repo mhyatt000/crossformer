@@ -12,11 +12,11 @@ import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from ml_collections import ConfigDict
 import optax
-from rich import print
+
+# from crossformer.utils import nowarn
 import tensorflow as tf
 import tqdm
 import tyro
-import wandb
 
 from crossformer import cn
 from crossformer.data.oxe.oxe_standardization_transforms import (
@@ -36,36 +36,36 @@ from crossformer.utils.train_utils import (
     Timer,
     TrainState,
 )
+import wandb
 
-# from absl import logging
 log = logging.getLogger(__name__)
 
+"""
+# jax_smi line 10, in inner
+# posix.rename(f'{dir_prefix}/memory.prof.new', f'{dir_prefix}/memory.prof')  # atomic
+# FileNotFoundError: [Errno 2] No such file or directory: '/dev/shm/memory.prof.new' -> '/dev/shm/memory.prof'
 try:
     from jax_smi import initialise_tracking  # type: ignore
 
     initialise_tracking()
 except ImportError:
     pass
-
-
-def process_batch(batch, text_processor=None):
-    batch = process_text(batch, text_processor)
-    del batch["dataset_name"]
-    return batch
+"""
 
 
 def main(cfg: cn.Train) -> None:  # experiment or sweep
-    # make sure each process loads different data
+    #
+    # Setup
+    #
+
     tf.random.set_seed(cfg.seed + jax.process_index())
-    # prevent tensorflow from using GPU memory since it's only used for data loading
     tf.config.set_visible_devices([], "GPU")
 
-    print(cfg)
+    cfg.vprint(cfg, level=2)
     initialize_compilation_cache()
-    # compilation_cache.set_cache_dir(str(Path().home() / '.cache' / "jax_compilation_cache"))
     devices = jax.devices()
 
-    logging.info(
+    log.info(
         f"""
         CrossFormer Finetuning Script
         ======================
@@ -88,14 +88,8 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     msg = f"Batch size ({cfg.data.gbs}) must be divisible by the number of devices ({len(devices)})"
     assert cfg.data.gbs % len(devices) == 0, msg
 
-    # do we want?
-    # jax.config.update("jax_default_device", jax.devices("cpu")[0])
-
-    # create a 1D mesh with a single axis named "batch"
     mesh = Mesh(jax.devices(), axis_names="batch")
-    # Our batches will be data-parallel sharded -- each device will get a slice of the batch
     dp_sharding = NamedSharding(mesh, PartitionSpec("batch"))
-    # Our model will be replicated across devices (we are only doing data parallelism, not model parallelism)
     replicated_sharding = NamedSharding(mesh, PartitionSpec())
 
     @deprecate("let grain do it", strict=False)
@@ -103,6 +97,9 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         return multihost_utils.host_local_array_to_global_array(batch, mesh, PartitionSpec("batch"))
 
     run = cfg.wandb.initialize(cfg)
+
+    cfg.vprint("== setup complete ==")
+    # quit()  # DEVSTOP: setup
 
     #
     # Load Pretrained model + optionally modify config
@@ -115,20 +112,21 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         )
         flat_config = flax.traverse_util.flatten_dict(pretrained_model.config, keep_empty_nodes=True)
 
-        flat_config = cfg.model.delete(flat_config)
+        flat_config = cfg.model.delete(flat_config, verbose=cfg.verbosity >= 2)
 
         config = ConfigDict(flax.traverse_util.unflatten_dict(flat_config))
-        print(cfg.model.create())
+        cfg.vprint(cfg.model.create(), level=2)
         config.update(cfg.model.create())
         config = config.to_dict()
         check_config_diff(config, pretrained_model.config)
+
+    cfg.vprint("== pretrained model loaded ==")
+    # quit()  # DEVSTOP: pretrained model
 
     #
     # Setup Data Loader
     #
 
-    # default text processor is UniversalSentenceEncoder from hub
-    # from crossformer.data.utils.text_processing import UniversalSentenceEncoder
     if cfg.model.debug:  # only for debugging when model is not needed
         config = {"text_processor": None}
     text_processor = None if config["text_processor"] is None else ModuleSpec.instantiate(config["text_processor"])()
@@ -139,25 +137,14 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         return batch
 
     #
-    # load datasets
+    # Load datasets
     #
 
     if cfg.data.loader.use_grain:
         from crossformer.data.grain.loader import GrainDataFactory
 
         dataset = GrainDataFactory().make(cfg, shard_fn=shard, train=True)
-
-        # _ds, dataset_config, tfconfig = pipelines.make_data_source(cfg)
-        # dataset: pipelines.GrainDataset = pipelines.make_single_dataset(
-        # dataset_config,
-        # train=True,
-        # tfconfig=tfconfig,
-        # shuffle_buffer_size=1,
-        # seed=cfg.seed,
-        # shard_fn=shard,
-        # )
-        dsit = iter(dataset.dataset)  # already been sharded
-        # dsit = map(shard, dsit)
+        dsit = iter(dataset.dataset)
     else:
         dataset = cfg.data.create(OXE_STANDARDIZATION_TRANSFORMS, train=True)
         dsit = dataset.iterator(prefetch=cfg.data.loader.prefetch)
@@ -165,32 +152,37 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
 
     log.warning("TODO shard with mp")
     example_batch = next(dsit)
-    print(spec(example_batch))
+    cfg.vprint(spec(example_batch), level=2)
 
     callbacks = Box(inspect=InspectCallback(log_every=100))
     _ = callbacks.inspect(example_batch)
 
+    cfg.vprint("== data loaded ==")
+    # quit()  # DEVSTOP: data loading
+
     #
-    # Load Pretrained Model
+    # Init Model from Config
     #
 
     rng = jax.random.PRNGKey(cfg.seed)
     rng, init_rng = jax.random.split(rng)
-    print(config)
-    quit()
+    cfg.vprint(config, level=2)
     model = CrossFormerModel.from_config(
         config,
         example_batch,
         text_processor=text_processor,
         rng=init_rng,
         dataset_statistics=dataset.dataset_statistics,
-        verbose=True,
+        verbose=cfg.verbosity >= 2,
     )
 
     if cfg.pretrained_path is not None:
         merged_params = merge_params(model.params, pretrained_model.params)
         model = model.replace(params=merged_params)
         del pretrained_model
+
+    cfg.vprint("== model initialized ==")
+    # quit()  # DEVSTOP: model init
 
     #
     # Setup Optimizer and Train State
@@ -215,26 +207,23 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
             cfg.name,
         )
         wandb.config.update({"save_dir": save_dir}, allow_val_change=True)
-        logging.info(f"Saving to {save_dir}")
+        log.info(f"Saving to {save_dir}")
         save_callback = SaveCallback(save_dir)
 
-        # Add window_size to top of config, to make eval easier
         new_config = ConfigDict(model.config)
         new_config["window_size"] = example_batch["observation"]["timestep_pad_mask"].shape[1]
         model = model.replace(config=new_config)
 
-        logging.warning("WARNING: not saving config to disk")
-        # Save finetuning config since it's not saved by SaveCallback, i.e. as part of model.save_pretrained()
-        # with tf.io.gfile.GFile(
-        # tf.io.gfile.join(save_dir, "finetune_config.json"), "w"
-        # ) as config_file:
-        # config_file.write(cfg.serialize())
+        log.warning("not saving config to disk")
     else:
         save_dir = None
         save_callback = SaveCallback(None)
-        logging.warning("save_dir not passed in, not saving checkpoints")
+        log.warning("save_dir not passed in, not saving checkpoints")
 
     wandb.config.update({"example_batch_spec": spec(example_batch)}, allow_val_change=True)
+
+    cfg.vprint("== optimizer + state ready ==")
+    # quit()  # DEVSTOP: optimizer
 
     #
     # Define loss, train_step, and eval_step
@@ -249,35 +238,41 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
             train=train,
         )
 
+        cfg.vprint("-> patch")
+        # quick patch
+        unsqueeze = lambda x: jnp.expand_dims(x, axis=1)
+        batch["action"] = jax.tree.map(unsqueeze, batch["action"])
+        # fix k3ds
+        from einops import rearrange
+
+        batch["action"]["k3ds"] = rearrange(batch["action"]["k3ds"], "b w h x y -> b w h (x y)")
+        squeeze = lambda x: jnp.squeeze(x, axis=-1)
+        batch["embodiment"] = jax.tree.map(squeeze, batch["embodiment"])
+        # end patch
+        cfg.vprint("-> end patch")
+
         action_loss, action_metrics = 0, {}
         for head_name, head in bound_module.heads.items():
-            print(head)
-            if head_name == "single_arm":
-                head_loss, head_metrics = head.loss(embeddings=transformer_embeddings, batch=batch, train=True)
-            else:
-                head_loss, head_metrics = head.loss(
-                    transformer_embeddings,  # action head knows to pull out the "action" readout_key
-                    batch["action"][head_name],
-                    batch["observation"]["timestep_pad_mask"],
-                    action_pad_mask=jnp.ones_like(batch["action"][head_name], dtype=jnp.bool_),
-                    action_head_mask=batch["embodiment"][head_name],
-                    # batch["action_pad_mask"],
-                    # action_head_mask=batch["action_head_masks"][head_name],
-                    # action padding will not be used since its only one key per head now.
-                    # action head mask is embodiment mask 1,0 if head is on
-                    train=train,
-                )
+            cfg.vprint(f"[DEBUG] Processing head: {head_name}")
+            # if head_name == "single_arm":
+            # head_loss, head_metrics = head.loss(embeddings=transformer_embeddings, batch=batch, train=True)
+            # else:
+            head_loss, head_metrics = head.loss(
+                transformer_embeddings,
+                batch["action"][head_name],
+                batch["observation"]["timestep_pad_mask"],
+                action_pad_mask=jnp.ones_like(batch["action"][head_name], dtype=jnp.bool_),
+                action_head_mask=batch["embodiment"][head_name],
+                train=train,
+            )
 
-            # weight loss by number of samples from each head
-            head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(batch["action"])
+            # head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(batch["action"])
+            head_sample_fraction = batch["embodiment"][head_name].mean()
             action_loss += head_loss * head_sample_fraction * head.loss_weight
             action_metrics[head_name] = head_metrics
         action_metrics["total_loss"] = action_loss
 
         return action_loss, action_metrics
-
-    # Data parallelism
-    # Model is replicated across devices, data is split across devices
 
     @partial(
         jax.jit,
@@ -300,17 +295,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         new_state = state.apply_gradients(grads=grads, rng=rng)
         return new_state, info
 
-    # @partial(  # cant pass kwargs to jitted function
-    # jax.jit,
-    # in_shardings=[replicated_sharding, dp_sharding],
-    # )
     def val_fn(params, batch, rng, train=False):
-        #
-        # TODO fix to become part of loss_fn
-        # if not train then get mano deltas else none
-        #
-
-        # loss calculations
         bound_module = model.module.bind({"params": params}, rngs={"dropout": rng})
         transformer_embeddings = bound_module.crossformer_transformer(
             batch["observation"],
@@ -322,7 +307,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         action_loss, action_metrics = 0, {}
         for head_name, head in bound_module.heads.items():
             head_loss, head_metrics = head.loss(
-                transformer_embeddings,  # action head knows to pull out the "action" readout_key
+                transformer_embeddings,
                 batch["action"],
                 batch["observation"]["timestep_pad_mask"],
                 batch["action_pad_mask"],
@@ -330,12 +315,10 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
                 train=train,
             )
 
-            # weight loss by number of samples from each head
             head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(batch["action"])
             action_loss += head_loss * head_sample_fraction * head.loss_weight
             action_metrics[head_name] = head_metrics
 
-        # eval metrics
         if "mano" in cfg.model.heads:
             mano_head = bound_module.heads["mano"]
             deltas = mano_head.predict_action(
@@ -350,26 +333,13 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     # Build validation callback
     #
 
-    # identical dataset kwargs for eval
-
-    log.warning("TODO: val_callback disabled for now")
-    """
-    dks, _ = cfg.data.kwargs_list(oxe_fns=OXE_STANDARDIZATION_TRANSFORMS)
-    val_callback = VisCallback(
-        loss_fn=val_fn,  # loss_fn,
-        process_batch_fn=lambda batch: shard(process_batch(batch, None)),
-        text_processor=text_processor,
-        val_dataset_kwargs_list=dks,
-        dataset_kwargs=cfg.data.kwargs(),
-        stats=dataset.dataset_statistics,
-        val_shuffle_buffer_size=1_000,
-        num_val_batches=8,
-    )
-    """
+    log.info("val_callback disabled for now")
 
     #
     # Train loop
     #
+    cfg.vprint("== starting training ==")
+    # quit() # DEVSTOP: before training loop
 
     timer = Timer()
     for i in tqdm.tqdm(range(cfg.steps), total=cfg.steps, dynamic_ncols=True):
@@ -381,7 +351,6 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         with timer("train"):
             train_state, update_info = train_step(train_state, batch)
 
-        # maybe_inspect: dict[str, Any] = callbacks.inspect.every(batch=batch, step=i)
         maybe_inspect: dict[str, Any] = {}
 
         timer.tock("total")
@@ -396,22 +365,12 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
                 },
                 step=i,
             )
-            # pprint(update_info)
 
-        if (i) % cfg.eval_interval == 0:  # eval on i=0 for comparison
-            logging.info("Evaluating...")
-
-            # with timer("val"):
-            # val_metrics = val_callback(train_state, i + 1)
-            # cfg.wandb.log(val_metrics, step=i)
-
-            # if cfg.rollout.use:
-            # with timer("rollout"):
-            # evals = eval_callback(i)
-            # cfg.wandb.log({"eval": evals}, step=i)
+        if (i) % cfg.eval_interval == 0:
+            log.info("Evaluating...")
 
         if (i + 1) % cfg.save_interval == 0 and save_dir is not None:
-            logging.info("Saving checkpoint...")
+            log.info("Saving checkpoint...")
             save_callback(train_state, i + 1)
 
 
