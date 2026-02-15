@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(crossformer/**)",
+      "Write(crossformer/**)",
+      "Edit(crossformer/**)",
+      "Bash(source:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(find:*)",
+      "mcp__context7__resolve-library-id",
+      "Bash(uv run:*)",
+      "Bash(uv:*)",
+      "Bash(git config:*)",
+      "Bash(git log:*)",
+      "Bash(gh:*)",
+      "Search(pattern: '*', path: '~/repo/crossformer')",
+      "Search(pattern: '*', path: '.')"
+    ]
+  }
+}
