@@ -4,14 +4,14 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from crossformer.model.components.action_heads import (
+from crossformer.model.components.base import TokenGroup
+from crossformer.model.components.heads import (
     continuous_loss,
     ContinuousActionHead,
     DiffusionActionHead,
     L1ActionHead,
     MSEActionHead,
 )
-from crossformer.model.components.base import TokenGroup
 
 pytestmark = pytest.mark.nn
 
