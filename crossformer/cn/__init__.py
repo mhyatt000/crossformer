@@ -36,7 +36,7 @@ from crossformer.cn.optim import Optimizer
 from crossformer.cn.rollout import Rollout
 from crossformer.cn.wab import Wandb
 from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
-from crossformer.model.components.action_heads import (
+from crossformer.model.components.heads import (
     ActionHead,
     AdjFlowHead,
     DiffusionActionHead,
@@ -302,6 +302,9 @@ class Train(CN):
 
     def vprint(self, *args, level: int = 1, **kwargs):
         """Print only when verbosity >= level."""
+        if isinstance(args[0], str):
+            a = f"[bold green]{args[0]}[/bold green]"
+            args: tuple = (a, *args[1:])
         if self.verbosity >= level:
             print(*args, **kwargs)
 
