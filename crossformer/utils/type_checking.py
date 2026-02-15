@@ -58,6 +58,7 @@ class ShapeError(ValueError):
 Batched = Stacked["batch"]
 Windowed = Stacked["win"]
 Chunked = Stacked["chunk"]
+BWC = Stacked["batch win horizon"]
 
 # basic types
 Image: TypeAlias = jt.Float[jt.Array, "H W C=3"]
@@ -66,6 +67,9 @@ Observation: TypeAlias = Image | Proprio
 
 # only Actions are chunked
 Action: TypeAlias = jt.Float[jt.Array, "act"]
+
+Scalar: TypeAlias = jt.Bool[jt.Array, ""]
+One: TypeAlias = jt.Shaped[jt.Array, "1"]
 
 Mask: TypeAlias = jt.Bool[jt.Array, "1"]
 
