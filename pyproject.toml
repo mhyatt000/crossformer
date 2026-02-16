@@ -78,6 +78,7 @@ dependencies = [
 dev = [
     "coverage>=7.10.6",
     "hypothesis>=6.139.2",
+    "lark>=1.3.1",
     "pre-commit==3.3.3",
     "pytest>=8.4.2",
     "pytest-cov>=7.0.0",
@@ -88,7 +89,7 @@ webpolicy = { git = "https://github.com/mhyatt000/webpolicy" }
 pyroki = { git = "https://github.com/chungmin99/pyroki", rev = "2272d0ab8bf74026a2c8530b6b6174f3b19dcb97" }
 dlimp = { git = "https://github.com/kvablack/dlimp.git", rev = "main" }
 xgym = { git = "https://github.com/mhyatt000/xgym" }
-xclients = { git = "https://github.com/mhyatt000/xclients" }
+xclients = { git = "https://github.com/mhyatt000/xclients" , rev = '638c1db'}
 jaxtyping = { git = "https://github.com/patrick-kidger/jaxtyping" }
 
 [tool.pyright]

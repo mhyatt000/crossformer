@@ -591,6 +591,7 @@ dependencies = [
 dev = [
     { name = "coverage" },
     { name = "hypothesis" },
+    { name = "lark" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -649,7 +650,7 @@ requires-dist = [
     { name = "tyro", specifier = ">=0.9.1" },
     { name = "wandb", specifier = ">=0.12.14" },
     { name = "webpolicy", git = "https://github.com/mhyatt000/webpolicy" },
-    { name = "xclients", git = "https://github.com/mhyatt000/xclients" },
+    { name = "xclients", git = "https://github.com/mhyatt000/xclients?rev=638c1db" },
     { name = "xgym", git = "https://github.com/mhyatt000/xgym" },
 ]
 
@@ -657,6 +658,7 @@ requires-dist = [
 dev = [
     { name = "coverage", specifier = ">=7.10.6" },
     { name = "hypothesis", specifier = ">=6.139.2" },
+    { name = "lark", specifier = ">=1.3.1" },
     { name = "pre-commit", specifier = "==3.3.3" },
     { name = "pytest", specifier = ">=8.4.2" },
     { name = "pytest-cov", specifier = ">=7.0.0" },
@@ -1698,6 +1700,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/33/01/a8ea7c5ea32a9b45ceeaee051a04c8ed4320f5add3c51bfa20879b765b70/kiwisolver-1.4.9-pp311-pypy311_pp73-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:85b5352f94e490c028926ea567fc569c52ec79ce131dadb968d3853e809518c2", size = 80281, upload-time = "2025-08-10T21:27:45.369Z" },
     { url = "https://files.pythonhosted.org/packages/da/e3/dbd2ecdce306f1d07a1aaf324817ee993aab7aee9db47ceac757deabafbe/kiwisolver-1.4.9-pp311-pypy311_pp73-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:464415881e4801295659462c49461a24fb107c140de781d55518c4b80cb6790f", size = 78009, upload-time = "2025-08-10T21:27:46.376Z" },
     { url = "https://files.pythonhosted.org/packages/da/e9/0d4add7873a73e462aeb45c036a2dead2562b825aa46ba326727b3f31016/kiwisolver-1.4.9-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:fb940820c63a9590d31d88b815e7a3aa5915cad3ce735ab45f0c730b39547de1", size = 73929, upload-time = "2025-08-10T21:27:48.236Z" },
+]
+
+[[package]]
+name = "lark"
+version = "1.3.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/da/34/28fff3ab31ccff1fd4f6c7c7b0ceb2b6968d8ea4950663eadcb5720591a0/lark-1.3.1.tar.gz", hash = "sha256:b426a7a6d6d53189d318f2b6236ab5d6429eaf09259f1ca33eb716eed10d2905", size = 382732, upload-time = "2025-10-27T18:25:56.653Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/82/3d/14ce75ef66813643812f3093ab17e46d3a206942ce7376d31ec2d36229e7/lark-1.3.1-py3-none-any.whl", hash = "sha256:c629b661023a014c37da873b4ff58a817398d12635d3bbb2c5a03be7fe5d1e12", size = 113151, upload-time = "2025-10-27T18:25:54.882Z" },
 ]
 
 [[package]]
@@ -5450,7 +5461,7 @@ source = { git = "https://github.com/xArm-Developer/xArm-Python-SDK#0caf29e6b5c3
 [[package]]
 name = "xclients"
 version = "0.1.0"
-source = { git = "https://github.com/mhyatt000/xclients#2a40c32ce69f9b7d62d6b97d6ab36fb71bd96f32" }
+source = { git = "https://github.com/mhyatt000/xclients?rev=638c1db#638c1db6e97a77b4edf1acca15162d7606cde3ec" }
 dependencies = [
     { name = "av" },
     { name = "einops" },
