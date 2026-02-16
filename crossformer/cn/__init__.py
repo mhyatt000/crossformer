@@ -35,7 +35,8 @@ from crossformer.cn.eval import Eval
 from crossformer.cn.optim import Optimizer
 from crossformer.cn.rollout import Rollout
 from crossformer.cn.wab import Wandb
-from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
+from crossformer.data.oxe.oxe_dataset_configs import ActionDim
+from crossformer.data.oxe.oxe_dataset_mixes import HEAD_TO_DATASET
 from crossformer.model.components.heads import (
     ActionHead,
     AdjFlowHead,

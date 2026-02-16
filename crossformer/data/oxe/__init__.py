@@ -11,9 +11,6 @@ from crossformer.data.oxe.oxe_dataset_configs import (
     ProprioDim,
 )
 from crossformer.data.oxe.oxe_dataset_mixes import HEAD_TO_DATASET, OXE_NAMED_MIXES
-from crossformer.data.oxe.oxe_standardization_transforms import (
-    OXE_STANDARDIZATION_TRANSFORMS,
-)
 from crossformer.data.utils.data_utils import NormalizationType
 from crossformer.utils.spec import ModuleSpec
 
@@ -100,6 +97,8 @@ def make_oxe_dataset_kwargs(
     del dataset_kwargs["proprio_encoding"]
     del dataset_kwargs["action_encoding"]
 
+    from crossformer.data.oxe.oxe_standardization_transforms import OXE_STANDARDIZATION_TRANSFORMS
+
     dataset_kwargs["standardize_fn"] = ModuleSpec.create(OXE_STANDARDIZATION_TRANSFORMS[name])
 
     if force_recompute_dataset_statistics:
@@ -167,3 +166,11 @@ def make_oxe_dataset_kwargs_and_weights(
             logging.warning(f"Skipping {name} due to error: {e}")
 
     return data_kwargs_list, weights
+
+
+def __getattr__(name):
+    if name == "OXE_STANDARDIZATION_TRANSFORMS":
+        from crossformer.data.oxe.oxe_standardization_transforms import OXE_STANDARDIZATION_TRANSFORMS
+
+        return OXE_STANDARDIZATION_TRANSFORMS
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

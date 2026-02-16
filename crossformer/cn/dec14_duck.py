@@ -5,8 +5,8 @@ import os
 from ml_collections import ConfigDict
 from ml_collections.config_dict import FieldReference, placeholder
 
-from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
-from crossformer.data.oxe.oxe_dataset_mixes import OXE_NAMED_MIXES
+from crossformer.data.oxe.oxe_dataset_configs import ActionDim
+from crossformer.data.oxe.oxe_dataset_mixes import HEAD_TO_DATASET, OXE_NAMED_MIXES
 from crossformer.model.components.action_heads import DiffusionActionHead, L1ActionHead
 from crossformer.model.components.tokenizers import ImageTokenizer, LowdimObsTokenizer
 from crossformer.model.components.vit_encoders import ResNet26FILM

@@ -6,7 +6,8 @@ import logging
 from typing import Any
 
 from crossformer.cn.base import CN, default
-from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
+from crossformer.data.oxe.oxe_dataset_configs import ActionDim
+from crossformer.data.oxe.oxe_dataset_mixes import HEAD_TO_DATASET
 
 logger = logging.getLogger(__name__)
 

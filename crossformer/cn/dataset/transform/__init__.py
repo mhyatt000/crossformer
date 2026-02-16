@@ -19,7 +19,8 @@ from typing import (
 )
 
 from crossformer.cn.base import CN, default
-from crossformer.data.oxe import ActionDim, HEAD_TO_DATASET
+from crossformer.data.oxe.oxe_dataset_configs import ActionDim
+from crossformer.data.oxe.oxe_dataset_mixes import HEAD_TO_DATASET
 
 from .frame import FrameTransform
 from .traj import TrajectoryTransform
