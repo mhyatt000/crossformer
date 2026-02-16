@@ -16,7 +16,6 @@ import numpy as np
 from orbax import checkpoint as ocp
 import orbax.checkpoint
 from rich import print
-import tensorflow as tf
 
 from crossformer.data.utils.data_utils import NormalizationType
 from crossformer.data.utils.text_processing import TextProcessor
@@ -242,17 +241,19 @@ class CrossFormerModel:
             checkpoint_path (str): A path to either a directory of checkpoints or a single checkpoint.
             step (int, optional): If multiple checkpoints are present, which one to load. Defaults to the latest.
         """
+        import os
+
         if checkpoint_path.startswith("hf://"):
             if step:
                 raise ValueError("You can't set config['pretrained_step'] when loading from HuggingFace.")
             checkpoint_path = _download_from_huggingface(checkpoint_path.removeprefix("hf://"))
 
         # load config
-        with tf.io.gfile.GFile(tf.io.gfile.join(checkpoint_path, "config.json"), "r") as f:
+        with open(os.path.join(checkpoint_path, "config.json"), "r") as f:
             config = json.load(f)
 
         # load example batch
-        with tf.io.gfile.GFile(tf.io.gfile.join(checkpoint_path, "example_batch.msgpack"), "rb") as f:
+        with open(os.path.join(checkpoint_path, "example_batch.msgpack"), "rb") as f:
             example_batch = flax.serialization.msgpack_restore(f.read())
 
         logging.debug(
@@ -265,7 +266,7 @@ class CrossFormerModel:
         )
 
         # load dataset statistics
-        with tf.io.gfile.GFile(tf.io.gfile.join(checkpoint_path, "dataset_statistics.json"), "r") as f:
+        with open(os.path.join(checkpoint_path, "dataset_statistics.json"), "r") as f:
             dataset_statistics = json.load(f)
             dataset_statistics = jax.tree.map(np.array, dataset_statistics, is_leaf=lambda x: not isinstance(x, dict))
 
@@ -389,23 +390,25 @@ class CrossFormerModel:
             {"save_args": orbax_utils.save_args_from_target(self.params)},
         )
 
+        import os
+
         if jax.process_index() == 0:
             # save config
-            config_path = tf.io.gfile.join(checkpoint_path, "config.json")
-            if not tf.io.gfile.exists(config_path):
-                with tf.io.gfile.GFile(config_path, "w") as f:
+            config_path = os.path.join(checkpoint_path, "config.json")
+            if not os.path.exists(config_path):
+                with open(config_path, "w") as f:
                     json.dump(self.config, f)
 
             # save example batch
-            example_batch_path = tf.io.gfile.join(checkpoint_path, "example_batch.msgpack")
-            if not tf.io.gfile.exists(example_batch_path):
-                with tf.io.gfile.GFile(example_batch_path, "wb") as f:
+            example_batch_path = os.path.join(checkpoint_path, "example_batch.msgpack")
+            if not os.path.exists(example_batch_path):
+                with open(example_batch_path, "wb") as f:
                     f.write(flax.serialization.msgpack_serialize(self.example_batch))
 
             # save dataset statistics
-            dataset_statistics_path = tf.io.gfile.join(checkpoint_path, "dataset_statistics.json")
-            if not tf.io.gfile.exists(dataset_statistics_path):
-                with tf.io.gfile.GFile(dataset_statistics_path, "w") as f:
+            dataset_statistics_path = os.path.join(checkpoint_path, "dataset_statistics.json")
+            if not os.path.exists(dataset_statistics_path):
+                with open(dataset_statistics_path, "w") as f:
                     json.dump(
                         jax.tree.map(lambda x: x.tolist(), self.dataset_statistics),
                         f,
