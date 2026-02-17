@@ -23,9 +23,9 @@ from crossformer.data.grain.datasets import (
 from crossformer.data.grain.map import flatmap
 from crossformer.data.grain.util.mano import acroll_stacked
 from crossformer.data.grain.util.remap import rekey
-from crossformer.data.grain.utils import unflat
 from crossformer.utils.io.memmap import read
 from crossformer.utils.spec import spec
+from crossformer.utils.tree import unflat
 
 
 def rekey_match(tree: dict, match, src, tgt) -> dict:
