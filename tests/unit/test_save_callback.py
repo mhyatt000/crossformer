@@ -187,3 +187,60 @@ class TestSaveExtra:
 
         cb.save_extra(_minimal_state())  # second call must not overwrite
         assert json.loads(config_path.read_text()) == {"v": 99}
+
+
+# ---------------------------------------------------------------------------
+# load()
+# ---------------------------------------------------------------------------
+
+
+class TestLoad:
+    def test_returns_train_state(self, tmp_path, new_api):
+        cb = SaveCallback(save_dir=tmp_path, new_api=new_api)
+        state = _minimal_state()
+        cb(state, step=0)
+        cb.wait()
+        loaded = cb.load(state, step=0)
+        assert type(loaded) is type(state)
+
+    def test_params_round_trip(self, tmp_path, new_api):
+        import numpy as np
+
+        cb = SaveCallback(save_dir=tmp_path, new_api=new_api)
+        state = _minimal_state()
+        cb(state, step=0)
+        cb.wait()
+        loaded = cb.load(state, step=0)
+        jax.tree.map(np.testing.assert_array_equal, state.model.params, loaded.model.params)
+
+    def test_default_step_loads_latest(self, tmp_path, new_api):
+        import numpy as np
+
+        cb = SaveCallback(save_dir=tmp_path, new_api=new_api)
+        state = _minimal_state()
+        ones = state.replace(model=state.model.replace(params=jax.tree.map(jnp.ones_like, state.model.params)))
+        cb(state, step=0)
+        cb(ones, step=1)
+        cb.wait()
+        loaded = cb.load(state)  # no step → latest (1)
+        jax.tree.map(np.testing.assert_array_equal, ones.model.params, loaded.model.params)
+
+    def test_specific_step_loaded(self, tmp_path, new_api):
+        import numpy as np
+
+        cb = SaveCallback(save_dir=tmp_path, new_api=new_api)
+        state = _minimal_state()
+        zeros = state.replace(model=state.model.replace(params=jax.tree.map(jnp.zeros_like, state.model.params)))
+        ones = state.replace(model=state.model.replace(params=jax.tree.map(jnp.ones_like, state.model.params)))
+        cb(zeros, step=0)
+        cb(ones, step=1)
+        cb.wait()
+        loaded0 = cb.load(state, step=0)
+        jax.tree.map(np.testing.assert_array_equal, zeros.model.params, loaded0.model.params)
+        loaded1 = cb.load(state, step=1)
+        jax.tree.map(np.testing.assert_array_equal, ones.model.params, loaded1.model.params)
+
+    def test_none_save_dir_raises(self):
+        cb = SaveCallback(save_dir=None)
+        with pytest.raises(ValueError, match="save_dir is None"):
+            cb.load(_minimal_state())

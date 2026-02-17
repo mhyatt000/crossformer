@@ -79,6 +79,35 @@ class SaveCallback:
         self.params_mngr.wait_until_finished()
         self.state_mngr.wait_until_finished()
 
+    def load(self, target: TrainState, step: int | None = None) -> TrainState:
+        """Restore model params from a params checkpoint into ``target``.
+
+        Args:
+            target: TrainState whose structure is used as the restore template.
+                All non-params fields (optimizer state, rng, etc.) are kept from
+                ``target``; only ``model.params`` is replaced with checkpoint values.
+            step: Checkpoint step to load. Defaults to ``params_mngr.latest_step()``.
+
+        Returns:
+            A new TrainState identical to ``target`` except with loaded params.
+        """
+        if self.save_dir is None:
+            raise ValueError("save_dir is None — nothing to load")
+        step = step if step is not None else self.params_mngr.latest_step()
+        if step is None:
+            raise ValueError("No checkpoint found in params directory")
+
+        if self.new_api:
+            abstract = jax.tree.map(
+                lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype),
+                target.model.params,
+            )
+            params = self.params_mngr.restore(step, args=ocp.args.StandardRestore(abstract))
+        else:
+            params = self.params_mngr.restore(step, items=target.model.params)
+
+        return target.replace(model=target.model.replace(params=params))
+
     def save_extra(self, train_state: TrainState):
         if jax.process_index() != 0:
             return
