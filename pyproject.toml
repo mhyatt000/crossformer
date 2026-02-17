@@ -7,8 +7,12 @@ module-root = ""
 
 [tool.uv]
 override-dependencies = [
-    "tensorflow>=2.15.0",
+    # "tensorflow>=2.15.0",
+    "tensorflow<=2.18.0",
     "typeguard>=4.0.0", # compatibility with tensorflow-addons
+    "numpy", # compatibility with tf
+    "jax[cuda12]>=0.4.0", # compatibility with tf
+
 ]
 # reinstall-package = ["crossformer"] # ensure package is reinstalled in editable mode
 
@@ -26,8 +30,6 @@ dependencies = [
     "flax>=0.7.5",
     "gym>=0.26",
     "imageio>=2.31.1",
-    "jax[cuda12]==0.5.3",
-    "jaxlib==0.5.3",
     "ml_collections>=0.1.0",
     "ml_dtypes>=0.2.0",
     "moviepy>=1.0.3",
@@ -42,7 +44,7 @@ dependencies = [
     "tqdm",
     "transformers==4.43.1",
     "tensorflow_datasets==4.9.2",
-    "tensorflow_graphics==2021.12.3",
+    "tensorflow_graphics",
     "tensorflow_hub>=0.14.0",
     "tensorflow_probability==0.23.0",
     "tensorstore>=0.1.60",
@@ -51,7 +53,6 @@ dependencies = [
     "opencv-python-headless>=4.11.0.86",
     "msgpack>=1.1.1",
     "webpolicy",
-    "dlimp",
     "python-box>=7.3.2",
     "augmax>=0.4.1",
     "jax-smi>=1.0.4",
@@ -66,12 +67,16 @@ dependencies = [
     "grain-nightly>=0.2.14.dev20251027",
     "tfds-nightly>=4.9.9.dev202510250044",
     "xclients",
+    "dlimp",
     "xgym",
     "jaxtyping>=0.3.4",
     "typeguard>=4.4.4",
     "pyright>=1.1.408",
     "beartype>=0.22.9",
     "structlog>=25.5.0",
+    "tensorflow<=2.18.0",
+    "jax[cuda12]>=0.5.3",
+    "jaxlib>=0.5.3",
 ]
 
 [dependency-groups]
