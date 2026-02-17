@@ -244,3 +244,132 @@ class TestLoad:
         cb = SaveCallback(save_dir=None)
         with pytest.raises(ValueError, match="save_dir is None"):
             cb.load(_minimal_state())
+
+
+# ---------------------------------------------------------------------------
+# Sharding helpers & fixture
+# ---------------------------------------------------------------------------
+
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
+import numpy as np
+
+
+@pytest.fixture
+def mesh2():
+    """2-device mesh; skips the test if fewer than 2 GPUs are visible."""
+    devs = jax.devices()
+    if len(devs) < 2:
+        pytest.skip("requires 2+ GPUs")
+    return Mesh(devs, ("model",))
+
+
+def _state_with_sharding(sharding=None) -> TrainState:
+    """Minimal TrainState with params placed on *sharding* (or unsharded if None)."""
+    nn_model = _SimpleModel(features=4)
+    params = nn_model.init(jax.random.PRNGKey(0), jnp.ones((1, 8)))["params"]
+    if sharding is not None:
+        params = jax.device_put(params, sharding)
+    model = _MinimalModel(
+        params=params,
+        config={"type": "test"},
+        example_batch={},
+        dataset_statistics={},
+    )
+    return TrainState.create(rng=jax.random.PRNGKey(0), model=model, tx=optax.sgd(0.01))
+
+
+def _assert_params_equal(a, b):
+    jax.tree.map(np.testing.assert_array_equal, a, b)
+
+
+# ---------------------------------------------------------------------------
+# Sharded round-trips and cross-topology loads
+# ---------------------------------------------------------------------------
+
+
+class TestShardedLoad:
+    """Cover every save-sharding x load-sharding combination.
+
+    "1 GPU"  == SingleDeviceSharding on devices[0]
+    "2 GPU replicated" == NamedSharding(mesh2, P())       -- both devices hold full copy
+    "2 GPU sharded"    == NamedSharding(mesh2, P('model'))-- data split across devices
+    """
+
+    # --- same-topology round-trips ---
+
+    def test_replicated_round_trip(self, tmp_path, new_api, mesh2):
+        rep = NamedSharding(mesh2, P())
+        state = _state_with_sharding(rep)
+        cb = SaveCallback(save_dir=tmp_path, new_api=new_api)
+        cb(state, step=0)
+        cb.wait()
+        _assert_params_equal(state.model.params, cb.load(state, step=0).model.params)
+
+    def test_sharded_round_trip(self, tmp_path, new_api, mesh2):
+        shard = NamedSharding(mesh2, P("model"))
+        state = _state_with_sharding(shard)
+        cb = SaveCallback(save_dir=tmp_path, new_api=new_api)
+        cb(state, step=0)
+        cb.wait()
+        _assert_params_equal(state.model.params, cb.load(state, step=0).model.params)
+
+    # --- cross-topology: 1 GPU → 2 GPU ---
+
+    def test_save_single_load_replicated(self, tmp_path, new_api, mesh2):
+        """Save on 1 GPU, load replicated onto 2 GPUs."""
+        s_single = _state_with_sharding(jax.devices()[0])
+        s_rep = _state_with_sharding(NamedSharding(mesh2, P()))
+        cb = SaveCallback(save_dir=tmp_path, new_api=new_api)
+        cb(s_single, step=0)
+        cb.wait()
+        _assert_params_equal(s_single.model.params, cb.load(s_rep, step=0).model.params)
+
+    def test_save_single_load_sharded(self, tmp_path, new_api, mesh2):
+        """Save on 1 GPU, load data-parallel sharded onto 2 GPUs."""
+        s_single = _state_with_sharding(jax.devices()[0])
+        s_shard = _state_with_sharding(NamedSharding(mesh2, P("model")))
+        cb = SaveCallback(save_dir=tmp_path, new_api=new_api)
+        cb(s_single, step=0)
+        cb.wait()
+        _assert_params_equal(s_single.model.params, cb.load(s_shard, step=0).model.params)
+
+    # --- cross-topology: 2 GPU → 1 GPU ---
+
+    def test_save_sharded_load_single(self, tmp_path, new_api, mesh2):
+        """Save sharded on 2 GPUs, load onto 1 GPU."""
+        s_shard = _state_with_sharding(NamedSharding(mesh2, P("model")))
+        s_single = _state_with_sharding(jax.devices()[0])
+        cb = SaveCallback(save_dir=tmp_path, new_api=new_api)
+        cb(s_shard, step=0)
+        cb.wait()
+        _assert_params_equal(s_shard.model.params, cb.load(s_single, step=0).model.params)
+
+    def test_save_replicated_load_single(self, tmp_path, new_api, mesh2):
+        """Save replicated on 2 GPUs, load onto 1 GPU."""
+        s_rep = _state_with_sharding(NamedSharding(mesh2, P()))
+        s_single = _state_with_sharding(jax.devices()[0])
+        cb = SaveCallback(save_dir=tmp_path, new_api=new_api)
+        cb(s_rep, step=0)
+        cb.wait()
+        _assert_params_equal(s_rep.model.params, cb.load(s_single, step=0).model.params)
+
+    # --- cross-topology: 2 GPU sharding change ---
+
+    def test_save_replicated_load_sharded(self, tmp_path, new_api, mesh2):
+        """Save replicated, load data-parallel (different 2-GPU layout)."""
+        s_rep = _state_with_sharding(NamedSharding(mesh2, P()))
+        s_shard = _state_with_sharding(NamedSharding(mesh2, P("model")))
+        cb = SaveCallback(save_dir=tmp_path, new_api=new_api)
+        cb(s_rep, step=0)
+        cb.wait()
+        _assert_params_equal(s_rep.model.params, cb.load(s_shard, step=0).model.params)
+
+    def test_save_sharded_load_replicated(self, tmp_path, new_api, mesh2):
+        """Save data-parallel, load replicated (different 2-GPU layout)."""
+        s_shard = _state_with_sharding(NamedSharding(mesh2, P("model")))
+        s_rep = _state_with_sharding(NamedSharding(mesh2, P()))
+        cb = SaveCallback(save_dir=tmp_path, new_api=new_api)
+        cb(s_shard, step=0)
+        cb.wait()
+        _assert_params_equal(s_shard.model.params, cb.load(s_rep, step=0).model.params)

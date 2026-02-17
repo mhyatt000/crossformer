@@ -98,12 +98,16 @@ class SaveCallback:
             raise ValueError("No checkpoint found in params directory")
 
         if self.new_api:
+            # Include sharding so orbax places restored arrays on the right devices.
+            # This makes cross-topology loads (e.g. save 1-GPU → load 2-GPU) work
+            # without any extra steps from the caller.
             abstract = jax.tree.map(
-                lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype),
+                lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=x.sharding),
                 target.model.params,
             )
             params = self.params_mngr.restore(step, args=ocp.args.StandardRestore(abstract))
         else:
+            # PyTreeCheckpointer uses items= as a sharding template.
             params = self.params_mngr.restore(step, items=target.model.params)
 
         return target.replace(model=target.model.replace(params=params))
