@@ -50,6 +50,12 @@ def _minimal_state() -> TrainState:
     return TrainState.create(rng=jax.random.PRNGKey(0), model=model, tx=tx)
 
 
+# Both API modes are exercised via this fixture.
+@pytest.fixture(params=[False, True], ids=["old_api", "new_api"])
+def new_api(request):
+    return request.param
+
+
 # ---------------------------------------------------------------------------
 # None save_dir — everything should be a no-op
 # ---------------------------------------------------------------------------
@@ -77,23 +83,23 @@ class TestNoneSaveDir:
 
 
 class TestDirCreation:
-    def test_creates_state_and_params_dirs(self, tmp_path):
-        SaveCallback(save_dir=tmp_path)
+    def test_creates_state_and_params_dirs(self, tmp_path, new_api):
+        SaveCallback(save_dir=tmp_path, new_api=new_api)
         assert (tmp_path / "state").is_dir()
         assert (tmp_path / "params").is_dir()
 
-    def test_resolves_path(self, tmp_path):
-        cb = SaveCallback(save_dir=str(tmp_path))
+    def test_resolves_path(self, tmp_path, new_api):
+        cb = SaveCallback(save_dir=str(tmp_path), new_api=new_api)
         assert isinstance(cb.save_dir, Path)
         assert cb.save_dir == tmp_path.resolve()
 
-    def test_idempotent_when_dirs_exist(self, tmp_path):
+    def test_idempotent_when_dirs_exist(self, tmp_path, new_api):
         (tmp_path / "state").mkdir()
         (tmp_path / "params").mkdir()
-        SaveCallback(save_dir=tmp_path)  # must not raise
+        SaveCallback(save_dir=tmp_path, new_api=new_api)  # must not raise
 
-    def test_sets_ckpt_and_params_paths(self, tmp_path):
-        cb = SaveCallback(save_dir=tmp_path)
+    def test_sets_ckpt_and_params_paths(self, tmp_path, new_api):
+        cb = SaveCallback(save_dir=tmp_path, new_api=new_api)
         assert cb.ckpt_path == tmp_path / "state"
         assert cb.params_path == tmp_path / "params"
 
@@ -104,30 +110,30 @@ class TestDirCreation:
 
 
 class TestCall:
-    def test_params_checkpoint_written(self, tmp_path):
-        cb = SaveCallback(save_dir=tmp_path)
+    def test_params_checkpoint_written(self, tmp_path, new_api):
+        cb = SaveCallback(save_dir=tmp_path, new_api=new_api)
         cb(_minimal_state(), step=0)
         cb.wait()
         assert cb.params_mngr.latest_step() == 0
 
-    def test_state_checkpoint_written(self, tmp_path):
-        cb = SaveCallback(save_dir=tmp_path)
+    def test_state_checkpoint_written(self, tmp_path, new_api):
+        cb = SaveCallback(save_dir=tmp_path, new_api=new_api)
         cb(_minimal_state(), step=0)
         cb.wait()
         assert cb.state_mngr.latest_step() == 0
 
-    def test_params_all_steps_retained(self, tmp_path):
+    def test_params_all_steps_retained(self, tmp_path, new_api):
         """params_mngr has max_to_keep=None — all steps survive."""
-        cb = SaveCallback(save_dir=tmp_path)
+        cb = SaveCallback(save_dir=tmp_path, new_api=new_api)
         state = _minimal_state()
         cb(state, step=0)
         cb(state, step=1)
         cb.wait()
         assert set(cb.params_mngr.all_steps()) == {0, 1}
 
-    def test_state_max_to_keep_one(self, tmp_path):
+    def test_state_max_to_keep_one(self, tmp_path, new_api):
         """state_mngr has max_to_keep=1 — only latest step survives."""
-        cb = SaveCallback(save_dir=tmp_path)
+        cb = SaveCallback(save_dir=tmp_path, new_api=new_api)
         state = _minimal_state()
         cb(state, step=0)
         cb(state, step=1)
@@ -142,16 +148,15 @@ class TestCall:
 
 
 class TestWait:
-    def test_wait_flushes_async_writes(self, tmp_path):
-        cb = SaveCallback(save_dir=tmp_path)
+    def test_wait_flushes_async_writes(self, tmp_path, new_api):
+        cb = SaveCallback(save_dir=tmp_path, new_api=new_api)
         cb(_minimal_state(), step=0)
         cb.wait()
-        print(list(Path(tmp_path / "params").rglob("*")))
         assert cb.params_mngr.latest_step() == 0
 
 
 # ---------------------------------------------------------------------------
-# save_extra
+# save_extra  (API-agnostic — only writes plain files)
 # ---------------------------------------------------------------------------
 
 

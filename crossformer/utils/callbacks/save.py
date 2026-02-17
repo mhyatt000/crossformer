@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import logging
 from pathlib import Path
@@ -12,11 +12,29 @@ import orbax.checkpoint as ocp
 from crossformer.utils.train_utils import TrainState
 
 
+def _make_manager(path: Path, max_to_keep: int | None, new_api: bool) -> ocp.CheckpointManager:
+    options = ocp.CheckpointManagerOptions(
+        max_to_keep=max_to_keep,
+        enable_async_checkpointing=True,
+        enable_background_delete=True,
+    )
+    if new_api:
+        return ocp.CheckpointManager(path, options=options)
+    return ocp.CheckpointManager(path, ocp.PyTreeCheckpointer(), options=options)
+
+
 @dataclass
 class SaveCallback:
-    """Callback that saves checkpoints under ``save_dir``."""
+    """Callback that saves checkpoints under ``save_dir``.
+
+    Args:
+        save_dir: Root directory for checkpoints. ``None`` disables all saving.
+        new_api: Use the new orbax API (no deprecation warnings). Defaults to
+            ``False`` to preserve compatibility with existing checkpoints.
+    """
 
     save_dir: Path | str | None
+    new_api: bool = field(default=False)
 
     def __post_init__(self):
         if self.save_dir is None:
@@ -33,42 +51,26 @@ class SaveCallback:
         self.params_path = self.save_dir / "params"
 
         # Keep only the latest full TrainState
-        self.state_mngr = ocp.CheckpointManager(
-            self.ckpt_path,
-            ocp.StandardCheckpointer(),
-            options=ocp.CheckpointManagerOptions(
-                max_to_keep=1,
-                enable_async_checkpointing=True,
-                enable_background_delete=True,
-            ),
-        )
-
+        self.state_mngr = _make_manager(self.ckpt_path, max_to_keep=1, new_api=self.new_api)
         # Keep all params-only checkpoints
-        self.params_mngr = ocp.CheckpointManager(
-            self.save_dir / "params",
-            ocp.StandardCheckpointer(),
-            options=ocp.CheckpointManagerOptions(
-                max_to_keep=None,
-                enable_async_checkpointing=True,
-                enable_background_delete=True,
-            ),
-        )
+        self.params_mngr = _make_manager(self.params_path, max_to_keep=None, new_api=self.new_api)
 
     def __call__(self, train_state: TrainState, step: int):
         if self.save_dir is None:
             return
 
-        self.params_mngr.save(
-            step,
-            args=ocp.args.StandardSave(item=train_state.model.params),
-        )
+        if self.new_api:
+            self.params_mngr.save(step, args=ocp.args.StandardSave(item=train_state.model.params))
+        else:
+            self.params_mngr.save(step, train_state.model.params)
+
         self.save_extra(train_state)
 
         if self.state_mngr.should_save(step):
-            self.state_mngr.save(
-                step,
-                args=ocp.args.StandardSave(item=train_state),
-            )
+            if self.new_api:
+                self.state_mngr.save(step, args=ocp.args.StandardSave(item=train_state))
+            else:
+                self.state_mngr.save(step, train_state)
 
     def wait(self):
         """Wait until all async checkpointing is done."""
