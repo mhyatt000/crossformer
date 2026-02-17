@@ -3,6 +3,25 @@ from __future__ import annotations
 import pytest
 
 
+def test_third_party_tf():
+    pass
+
+
+@pytest.mark.skip
+def test_third_party_xgym():
+    pass
+
+
+@pytest.mark.skip
+def test_third_party_xclients():
+    pass
+
+
+@pytest.mark.skip
+def test_third_party_dlimp():
+    pass
+
+
 def test_import_top_level():
     """Test that top-level crossformer package imports without error."""
     import crossformer
