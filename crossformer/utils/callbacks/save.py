@@ -117,17 +117,18 @@ class SaveCallback:
             return
         model = train_state.model
 
-        config_path = self.ckpt_path / "config.json"
+        # Write alongside params so CrossFormerModel.load_pretrained(params_path) works
+        config_path = self.params_path / "config.json"
         if not config_path.exists():
             with config_path.open("w") as f:
                 json.dump(model.config, f)
 
-        example_batch_path = self.ckpt_path / "example_batch.msgpack"
+        example_batch_path = self.params_path / "example_batch.msgpack"
         if not example_batch_path.exists():
             with example_batch_path.open("wb") as f:
                 f.write(flax.serialization.msgpack_serialize(model.example_batch))
 
-        dataset_statistics_path = self.ckpt_path / "dataset_statistics.json"
+        dataset_statistics_path = self.params_path / "dataset_statistics.json"
         if not dataset_statistics_path.exists():
             with dataset_statistics_path.open("w") as f:
                 json.dump(

@@ -104,7 +104,7 @@ exclude = ["**/build","**/.venv","**/data"]
 
 [tool.pytest.ini_options]
 addopts = "-q --maxfail=1 --disable-warnings -vvrs"
-testpaths = ["tests/unit"]
+testpaths = ["tests/unit", 'tests/integration']
 norecursedirs = ["tests", "broken", "wip"]
 markers = [
     "integration: end-to-end tests requiring GPU",
@@ -112,6 +112,7 @@ markers = [
     "multinode: multi-node tests run via scripts",
     # ===
     "nn = Requires neural network",
+    "slow = annoyingly slow (1min+)",
 ]
 
 [tool.coverage.run]

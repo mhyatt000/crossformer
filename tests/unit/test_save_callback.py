@@ -164,25 +164,25 @@ class TestSaveExtra:
     def test_writes_config_json(self, tmp_path):
         cb = SaveCallback(save_dir=tmp_path)
         cb.save_extra(_minimal_state())
-        config_path = tmp_path / "state" / "config.json"
+        config_path = tmp_path / "params" / "config.json"
         assert config_path.exists()
         assert json.loads(config_path.read_text()) == {"type": "test"}
 
     def test_writes_example_batch_msgpack(self, tmp_path):
         cb = SaveCallback(save_dir=tmp_path)
         cb.save_extra(_minimal_state())
-        assert (tmp_path / "state" / "example_batch.msgpack").exists()
+        assert (tmp_path / "params" / "example_batch.msgpack").exists()
 
     def test_writes_dataset_statistics_json(self, tmp_path):
         cb = SaveCallback(save_dir=tmp_path)
         cb.save_extra(_minimal_state())
-        assert (tmp_path / "state" / "dataset_statistics.json").exists()
+        assert (tmp_path / "params" / "dataset_statistics.json").exists()
 
     def test_does_not_overwrite_existing_config(self, tmp_path):
         cb = SaveCallback(save_dir=tmp_path)
         cb.save_extra(_minimal_state())
 
-        config_path = tmp_path / "state" / "config.json"
+        config_path = tmp_path / "params" / "config.json"
         config_path.write_text('{"v": 99}')
 
         cb.save_extra(_minimal_state())  # second call must not overwrite
