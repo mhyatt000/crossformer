@@ -59,12 +59,16 @@ class SaveCallback:
         if self.save_dir is None:
             return
 
+        self.save(train_state, step)
+        self.save_extra(train_state)
+
+    def save(self, train_state: TrainState, step: int):
+        """Save a checkpoint of the given TrainState at the given step."""
+
         if self.new_api:
             self.params_mngr.save(step, args=ocp.args.StandardSave(item=train_state.model.params))
         else:
             self.params_mngr.save(step, train_state.model.params)
-
-        self.save_extra(train_state)
 
         if self.state_mngr.should_save(step):
             if self.new_api:

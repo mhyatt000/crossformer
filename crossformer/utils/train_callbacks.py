@@ -15,14 +15,10 @@ import tqdm
 from crossformer.data.dataset import make_single_dataset
 from crossformer.data.oxe import HEAD_TO_DATASET
 from crossformer.data.utils.text_processing import TextProcessor
+from crossformer.utils.callbacks.base import Callback
 from crossformer.utils.mytyping import Any, Data, Sequence
 from crossformer.utils.train_utils import TrainState
 import wandb
-
-
-class Callback:
-    def __call__(self, train_state: TrainState, step: int):
-        raise NotImplementedError
 
 
 def create_validation_dataset(
