@@ -12,6 +12,7 @@ load-single = { cmd = "uv run scripts/debug/data_grain.py --data.mix xgym_sweep_
 load = { cmd = "uv run scripts/debug/data_grain.py --data.mix xgym_sweep" , depends-on = ["nolimit"] }
 setup = { cmd = "uvx pre-commit install && uvx pre-commit autoupdate" }
 cov = { cmd = "uv run pytest -vv -s --cov --cov-report=term-missing" }
+finetune = { cmd = "uv run scripts/finetune.py" , depends-on = ["nolimit"] }
 
 [tasks.test-v]
 cmd = 'uv run pytest -vvrs'
