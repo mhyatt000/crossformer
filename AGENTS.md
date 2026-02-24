@@ -1,6 +1,5 @@
 # Agent Context
 
-Refer to the `docs/opencode/` directory for additional agent-specific documentation and context.
 Refer to `docs/` for repo specific context
 If looking undirected for fixes to make, start with `roadmap/*` for info. remove items from the
 roadmap once completed.
