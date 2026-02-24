@@ -34,7 +34,7 @@ class SaveCallback:
     """
 
     save_dir: Path | str | None
-    new_api: bool = field(default=False)
+    new_api: bool = field(default=True)
 
     def __post_init__(self):
         if self.save_dir is None:
