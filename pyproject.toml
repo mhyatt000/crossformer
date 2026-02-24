@@ -76,6 +76,7 @@ dependencies = [
     "tensorflow<=2.18.0",
     "jax[cuda12]>=0.5.3",
     "jaxlib>=0.5.3",
+    "dm-pix>=0.4.4",
 ]
 
 [dependency-groups]

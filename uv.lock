@@ -541,6 +541,7 @@ dependencies = [
     { name = "chex" },
     { name = "distrax" },
     { name = "dlimp" },
+    { name = "dm-pix" },
     { name = "einops" },
     { name = "flax" },
     { name = "grain-nightly" },
@@ -608,6 +609,7 @@ requires-dist = [
     { name = "chex", specifier = ">=0.1.85" },
     { name = "distrax", specifier = "==0.1.5" },
     { name = "dlimp", git = "https://github.com/kvablack/dlimp.git?rev=main" },
+    { name = "dm-pix", specifier = ">=0.4.4" },
     { name = "einops", specifier = ">=0.6.1" },
     { name = "flax", specifier = ">=0.7.5" },
     { name = "grain-nightly", specifier = ">=0.2.14.dev20251027" },
@@ -718,6 +720,18 @@ source = { git = "https://github.com/kvablack/dlimp.git?rev=main#5edaa4691567873
 dependencies = [
     { name = "tensorflow" },
     { name = "tensorflow-datasets" },
+]
+
+[[package]]
+name = "dm-pix"
+version = "0.4.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "chex" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f0/8b/7d8d4b4646be35aa5a218335f9c0c1c7e3461e3fd997ecd10c03b3d5f27f/dm_pix-0.4.4.tar.gz", hash = "sha256:6139e3154feac8109dbc0859380f8e3a9f9465d3006a7b8c347e70ed875de1f7", size = 48566, upload-time = "2025-02-17T11:34:24.369Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/01/8e/c3b962cc1f350fdb77531715362da2a915cd688a49b8c22959b43988d117/dm_pix-0.4.4-py3-none-any.whl", hash = "sha256:afd492b9d27a77a55522ce504f5360e2efde1bd9b70fd43b3f9a42219c1c4f23", size = 56747, upload-time = "2025-02-17T11:34:23.143Z" },
 ]
 
 [[package]]
