@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import gc
 import logging
 from pathlib import Path
-import resource
 from typing import Literal
 
 import grain
@@ -48,13 +47,6 @@ def main(cfg: Config) -> None:
     # @deprecate('let grain do it', strict=False)
     def do_shard(batch):
         return multihost_utils.host_local_array_to_global_array(batch, mesh, PartitionSpec("batch"))
-
-    def _apply_fd_limit(limit: int) -> tuple[int, int]:
-        old_soft, old_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-        resource.setrlimit(resource.RLIMIT_NOFILE, (min(limit, old_hard), old_hard))
-        return old_soft, old_hard
-
-    _apply_fd_limit(4096)
 
     if True:
         dataset = GrainDataFactory().make(cfg, shard_fn=do_shard, train=True)
