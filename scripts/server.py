@@ -8,28 +8,22 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from rich.pretty import pprint
-import tensorflow as tf
 import tyro
-from webpolicy.deploy.base_policy import BasePolicy
-from webpolicy.deploy.server import WebsocketPolicyServer as Server
+from webpolicy.base_policy import BasePolicy
+from webpolicy.server import Server
 
-from crossformer.cn.base import CN, default
 from crossformer.model.crossformer_model import CrossFormerModel
-from crossformer.utils import spec
-
-tf.config.set_visible_devices([], "GPU")
+from crossformer.utils.spec import spec
 
 
 def resize(img, size=(224, 224)):
-    if stack := len(img.shape) == 5:  # flatten unflatten
-        n, m, h, w, c = img.shape
-        img = img.reshape(n * m, h, w, c)
-
-    img = tf.image.resize(img, size=size, method="lanczos3", antialias=True)
-    img = tf.cast(tf.clip_by_value(tf.round(img), 0, 255), tf.uint8).numpy()
-    if stack:
-        img = img.reshape(n, m, h, w, c)
-    return img
+    x = jnp.asarray(img)
+    *lead, h, w, c = x.shape
+    x = x.reshape((-1, h, w, c)) if lead else x[None]
+    x = jax.image.resize(x, (x.shape[0], size[0], size[1], c), method="lanczos3", antialias=True)
+    x = jnp.clip(jnp.rint(x), 0, 255).astype(jnp.uint8)
+    x = x.reshape((*lead, size[0], size[1], c)) if lead else x[0]
+    return np.asarray(x)
 
 
 def stack_and_pad(history: deque, num_obs: int):
@@ -49,33 +43,20 @@ def stack_and_pad(history: deque, num_obs: int):
 
 @dataclass
 class PolicyConfig:
-    path: str | None = None
-    task: str | None = None  # task to perform
-    step: int | None = None  # step to load
+    path: str
+    task: str  # task to perform
+    step: int | None = None  # step to load... defaults to latest if None
 
     def verify(self):
-        # assert self.models, "Please provide a model"
-        assert self.task, "Please provide a task"
         assert self.path and Path(self.path).resolve().expanduser().exists(), f"Model path {self.path} does not exist"
-
-    """
-    # path to BAFL_SAVE or weights dir
-    weights: str | Path = os.environ.get("BAFL_SAVE", ".")
-
-    def __post_init__(self):
-        if self.models and isinstance(self.models, str):
-            self.models = [m.split(":") for m in self.models.split(",")]
-
-        self.weights = Path(self.weights).expanduser()
-        self.models = [(n, str(self.weights / id), s) for n, id, s in self.models]
-    """
+        assert self.task in TASKS, f"Unknown task '{self.task}'. Choose from: {sorted(TASKS)}"
 
 
 @dataclass
-class ServerConfig(CN):
+class ServerConfig:
     """Server configuration"""
 
-    policy: PolicyConfig = default(PolicyConfig())
+    policy: PolicyConfig
     host: str = "0.0.0.0"  # host to run on
     port: int = 8001  # port to run on
 
@@ -101,6 +82,23 @@ TASKS = {
 }
 
 
+class Ensembler:
+    def __init__(self, exp_weight: float, pred_horizon: int):
+        self.exp_weight = exp_weight
+        self.history = deque(maxlen=pred_horizon)
+
+    def reset(self):
+        self.history.clear()
+
+    def __call__(self, actions: np.ndarray) -> np.ndarray:
+        self.history.append(actions)
+        n = len(self.history)
+        curr = np.stack([pred[i] for i, pred in zip(range(n - 1, -1, -1), self.history)])
+        weights = np.exp(-self.exp_weight * np.arange(n))
+        weights = weights / weights.sum()
+        return np.sum(weights[:, None] * curr, axis=0)
+
+
 class Policy(BasePolicy):
     def __init__(self, cfg: PolicyConfig):
         self.cfg = cfg
@@ -109,6 +107,7 @@ class Policy(BasePolicy):
         self.head_name = "single_arm"
         self.pred_horizon = 4
         self.exp_weight = 0
+        self.emsembler = Ensembler(self.exp_weight, self.pred_horizon)
         self.horizon = 1  # 5
         self.task = None
         self.rng = jax.random.PRNGKey(0)
@@ -117,18 +116,18 @@ class Policy(BasePolicy):
         self.text = TASKS[cfg.task]["text"]
 
         self.reset_history()
-        self.reset({"text": self.text})  # trigger compilation
 
+    def warmup(self):
+        self.reset({"text": self.text})  # trigger compilation
         for _ in range(self.horizon):
             pprint(spec(self.model.example_batch))
             print(self.infer(self.model.example_batch))
-
         self.reset_history()
 
     def reset_history(self):
         self.history = deque(maxlen=self.horizon)
         self.num_obs = 0
-        self.act_history = deque(maxlen=self.pred_horizon)
+        self.emsembler.reset()
 
     def reset(self, payload: dict):
         name = payload.get("model", "crossformer")
@@ -147,16 +146,9 @@ class Policy(BasePolicy):
 
         return {"reset": True}
 
-    def infer(self, payload: dict):
-        if payload.get("reset", False):
-            return self.reset(payload)
-
-        name = payload.get("model", "crossformer")
-
+    def preprocess(self, obs: dict):
         norm_stats = self.model.dataset_statistics[self.dataset_name]
-        unnorm_stats = self.model.dataset_statistics[self.dataset_name]
-
-        obs = payload["observation"]
+        obs = dict(obs)
         obs["timestep_pad_mask"] = self.model.example_batch["observation"]["timestep_pad_mask"]  # dummy
         for key in obs:
             if "image" in key:
@@ -165,6 +157,16 @@ class Policy(BasePolicy):
             # normalize proprioception expect for bimanual proprioception
             if "proprio" in key and key != "proprio_bimanual":
                 obs[key] = (obs[key] - norm_stats[key]["mean"]) / (norm_stats[key]["std"])
+        return obs
+
+    def infer(self, payload: dict):
+        if payload.get("reset", False):
+            return self.reset(payload)
+
+        name = payload.get("model", "crossformer")
+
+        norm_stats = self.model.dataset_statistics[self.dataset_name]
+        obs = self.preprocess(payload["observation"])
 
         self.history.append(obs)
         self.num_obs += 1
@@ -175,7 +177,7 @@ class Policy(BasePolicy):
         actions = self.model.sample_actions(
             observations=obs,
             tasks=self.task,
-            unnormalization_statistics=unnorm_stats["action"],
+            unnormalization_statistics=norm_stats["action"],
             head_name=self.head_name,
             rng=key,
         )
@@ -186,26 +188,7 @@ class Policy(BasePolicy):
         pprint(spec({"action": actions}))
         pprint(actions)
 
-        # whether to temporally ensemble the action predictions or return the full chunk
-        if not payload.get("ensemble", True):
-            return {"action": actions}
-
-        self.act_history.append(actions[: self.pred_horizon])
-        num_actions = len(self.act_history)
-        print(f"num_actions: {num_actions}")
-
-        # select the predicted action for the current step from the history of action chunk predictions
-        curr_act_preds = np.stack(
-            [pred_actions[i] for (i, pred_actions) in zip(range(num_actions - 1, -1, -1), self.act_history)]
-        )
-
-        # more recent predictions get exponentially *less* weight than older predictions
-        weights = np.exp(-self.exp_weight * np.arange(num_actions))
-        weights = weights / weights.sum()
-        # compute the weighted average across all predictions for this timestep
-        action = np.sum(weights[:, None] * curr_act_preds, axis=0)
-
-        return {"action": action}
+        return {"actions": self.emsembler(actions[: self.pred_horizon])}
 
 
 def main(cfg: ServerConfig):
@@ -213,6 +196,7 @@ def main(cfg: ServerConfig):
     cfg.policy.verify()
 
     policy = Policy(cfg.policy)
+    policy.warmup()
     server = Server(
         policy,
         host=cfg.host,
