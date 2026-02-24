@@ -338,12 +338,12 @@ class GrainDataFactory:
             ds.map(add_mask)
             .map(lambda x: jax.tree.map(lambda y: np.array(y), x))  # to numpy
             .to_iter_dataset(
-                grain.ReadOptions(num_threads=32)
+                grain.ReadOptions(num_threads=8)
             )  # iter before batch so that procs do batching and doesnt impede read threads
         )
 
         ds = ds.batch(cfg.data.loader.batch_size, drop_remainder=True)  # , batch_fn=batch_fn)
-        ds = ds.mp_prefetch(grain.MultiprocessingOptions(num_workers=8, per_worker_buffer_size=10))
+        ds = ds.mp_prefetch(grain.MultiprocessingOptions(num_workers=8, per_worker_buffer_size=8))
 
         batch = next(iter(ds))
         log.debug("batch spec: %s", spec(batch))
