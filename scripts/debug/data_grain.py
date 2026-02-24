@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import gc
 import logging
 from pathlib import Path
+import resource
 from typing import Literal
 
 import grain
@@ -47,6 +49,13 @@ def main(cfg: Config) -> None:
     def do_shard(batch):
         return multihost_utils.host_local_array_to_global_array(batch, mesh, PartitionSpec("batch"))
 
+    def _apply_fd_limit(limit: int) -> tuple[int, int]:
+        old_soft, old_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (min(limit, old_hard), old_hard))
+        return old_soft, old_hard
+
+    _apply_fd_limit(4096)
+
     if True:
         dataset = GrainDataFactory().make(cfg, shard_fn=do_shard, train=True)
 
@@ -86,13 +95,16 @@ def main(cfg: Config) -> None:
         print("exiting")
         quit()
 
-    dsit = iter(dataset.dataset)
-    for i in tqdm(range(int(1e4)), miniters=100, mininterval=0.1):
+    for i in tqdm(range(int(1e4)), miniters=5, mininterval=0.1):
         x = next(dsit)
         if i % 1000 == 0:
             print(spec(x))
 
+    del x
+    del batch
+    del dsit
     del dataset  # threads arent daemon
+    gc.collect()
 
 
 if __name__ == "__main__":
