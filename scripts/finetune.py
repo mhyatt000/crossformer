@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from box import Box
+from einops import rearrange
 import flax
 import jax
 from jax.experimental import multihost_utils
@@ -39,18 +40,6 @@ from crossformer.utils.train_utils import (
 import wandb
 
 log = logging.getLogger(__name__)
-
-"""
-# jax_smi line 10, in inner
-# posix.rename(f'{dir_prefix}/memory.prof.new', f'{dir_prefix}/memory.prof')  # atomic
-# FileNotFoundError: [Errno 2] No such file or directory: '/dev/shm/memory.prof.new' -> '/dev/shm/memory.prof'
-try:
-    from jax_smi import initialise_tracking  # type: ignore
-
-    initialise_tracking()
-except ImportError:
-    pass
-"""
 
 
 def main(cfg: cn.Train) -> None:  # experiment or sweep
@@ -141,9 +130,10 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     #
 
     if cfg.data.loader.use_grain:
-        from crossformer.data.grain.loader import GrainDataFactory
+        from crossformer.data.grain.loader import _apply_fd_limit, GrainDataFactory
 
         dataset = GrainDataFactory().make(cfg, shard_fn=shard, train=True)
+        _apply_fd_limit(512**2)
         dsit = iter(dataset.dataset)
     else:
         dataset = cfg.data.create(OXE_STANDARDIZATION_TRANSFORMS, train=True)
@@ -243,7 +233,6 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         unsqueeze = lambda x: jnp.expand_dims(x, axis=1)
         batch["action"] = jax.tree.map(unsqueeze, batch["action"])
         # fix k3ds
-        from einops import rearrange
 
         batch["action"]["k3ds"] = rearrange(batch["action"]["k3ds"], "b w h x y -> b w h (x y)")
         squeeze = lambda x: jnp.squeeze(x, axis=-1)
@@ -370,8 +359,9 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
             log.info("Evaluating...")
 
         if (i + 1) % cfg.save_interval == 0 and save_dir is not None:
-            log.info("Saving checkpoint...")
-            save_callback(train_state, i + 1)
+            cfg.vprint("Saving checkpoint...")
+            with timer("ckpt"):
+                save_callback(train_state, i + 1)
 
 
 if __name__ == "__main__":

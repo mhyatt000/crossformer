@@ -547,7 +547,6 @@ dependencies = [
     { name = "gym" },
     { name = "imageio" },
     { name = "jax", extra = ["cuda12"] },
-    { name = "jax-smi" },
     { name = "jaxlib" },
     { name = "jaxlie" },
     { name = "jaxtyping" },
@@ -615,7 +614,6 @@ requires-dist = [
     { name = "gym", specifier = ">=0.26" },
     { name = "imageio", specifier = ">=2.31.1" },
     { name = "jax", extras = ["cuda12"], specifier = ">=0.5.3" },
-    { name = "jax-smi", specifier = ">=1.0.4" },
     { name = "jaxlib", specifier = ">=0.5.3" },
     { name = "jaxlie", specifier = ">=1.5.0" },
     { name = "jaxtyping", git = "https://github.com/patrick-kidger/jaxtyping" },
@@ -857,18 +855,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a7/23/ce7a1126827cedeb958fc043d61745754464eb56c5937c35bbf2b8e26f34/filelock-3.20.1.tar.gz", hash = "sha256:b8360948b351b80f420878d8516519a2204b07aefcdcfd24912a5d33127f188c", size = 19476, upload-time = "2025-12-15T23:54:28.027Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e3/7f/a1a97644e39e7316d850784c642093c99df1290a460df4ede27659056834/filelock-3.20.1-py3-none-any.whl", hash = "sha256:15d9e9a67306188a44baa72f569d2bfd803076269365fdea0934385da4dc361a", size = 16666, upload-time = "2025-12-15T23:54:26.874Z" },
-]
-
-[[package]]
-name = "fire"
-version = "0.7.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "termcolor" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/c0/00/f8d10588d2019d6d6452653def1ee807353b21983db48550318424b5ff18/fire-0.7.1.tar.gz", hash = "sha256:3b208f05c736de98fb343310d090dcc4d8c78b2a89ea4f32b837c586270a9cbf", size = 88720, upload-time = "2025-08-16T20:20:24.175Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/e5/4c/93d0f85318da65923e4b91c1c2ff03d8a458cbefebe3bc612a6693c7906d/fire-0.7.1-py3-none-any.whl", hash = "sha256:e43fd8a5033a9001e7e2973bab96070694b9f12f2e0ecf96d4683971b5ab1882", size = 115945, upload-time = "2025-08-16T20:20:22.87Z" },
 ]
 
 [[package]]
@@ -1468,19 +1454,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/d2/e5/392d200fcafa220a4582e147f48c414484ad3f2beb26631cd5a003850bdf/jax_dataclasses-1.6.2.tar.gz", hash = "sha256:a4a983395c4e7e4e1894f858ccea2d1bd90231184df3cfd231c62b4e9d1dfc49", size = 18595, upload-time = "2025-04-25T03:28:29.928Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4d/40/36322e9ba8466c1708cfe274917f447447edbcd8bc498ab97e1bfa80d3fe/jax_dataclasses-1.6.2-py3-none-any.whl", hash = "sha256:9a9261bf2c8ddae8751b63d672fb31924b769529b6e65ab0b75e028db8634dd4", size = 14657, upload-time = "2025-04-25T03:28:29.018Z" },
-]
-
-[[package]]
-name = "jax-smi"
-version = "1.0.4"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "fire" },
-    { name = "jax", extra = ["cuda12"] },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/66/ed/8e6fe7488e7118e4108fd577162ce54132924399af60a42080a296ab51b4/jax_smi-1.0.4.tar.gz", hash = "sha256:f0bfc1b5bd9b90a6f2a638d934c4076b12bba0b94998894c7eb07058a68d5472", size = 3806, upload-time = "2024-07-16T18:54:17.135Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/51/f4/1b51781413cab18213f88692be2ddc3c2422ff9e319264db8ef8da945875/jax_smi-1.0.4-py3-none-any.whl", hash = "sha256:4c55e7ccd638bd884b1920370eaffe6cb8841b18cec36236a3e87a6eabc6fc06", size = 4466, upload-time = "2024-07-16T18:54:15.736Z" },
 ]
 
 [[package]]
