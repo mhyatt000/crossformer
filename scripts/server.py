@@ -7,13 +7,14 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
-from rich.pretty import pprint
+from rich import print
 import tyro
 from webpolicy.base_policy import BasePolicy
 from webpolicy.server import Server
 
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.utils.spec import spec
+from crossformer.utils.tree.core import drop_fn
 
 
 def resize(img, size=(224, 224)):
@@ -46,6 +47,10 @@ class PolicyConfig:
     path: str
     task: str  # task to perform
     step: int | None = None  # step to load... defaults to latest if None
+
+    chunk: int = 20  # action chunk size
+    exp: float = 0.99  # exponential weighting for ensembler, higher means more weight on recent predictions
+    warmup: bool = True  # whether to run a warmup phase to trigger compilation and stabilize predictions
 
     def verify(self):
         assert self.path and Path(self.path).resolve().expanduser().exists(), f"Model path {self.path} does not exist"
@@ -105,23 +110,26 @@ class Policy(BasePolicy):
 
         self.model: CrossFormerModel = CrossFormerModel.load_pretrained(cfg.path, step=cfg.step)
         self.head_name = "single_arm"
-        self.pred_horizon = 4
-        self.exp_weight = 0
-        self.emsembler = Ensembler(self.exp_weight, self.pred_horizon)
+
+        self.emsembler = Ensembler(self.cfg.exp, self.cfg.chunk)
         self.horizon = 1  # 5
         self.task = None
         self.rng = jax.random.PRNGKey(0)
 
         self.dataset_name = TASKS[cfg.task]["dataset_name"]
         self.text = TASKS[cfg.task]["text"]
+        self.text = None
 
         self.reset_history()
+        if self.cfg.warmup:
+            self.warmup()
 
     def warmup(self):
-        self.reset({"text": self.text})  # trigger compilation
+        # self.reset({"text": self.text})  # trigger compilation
+        self.reset(self.model.example_batch)  # trigger compilation
         for _ in range(self.horizon):
-            pprint(spec(self.model.example_batch))
-            print(self.infer(self.model.example_batch))
+            print(spec(self.model.example_batch))
+            print(self.step(self.model.example_batch))
         self.reset_history()
 
     def reset_history(self):
@@ -147,7 +155,8 @@ class Policy(BasePolicy):
         return {"reset": True}
 
     def preprocess(self, obs: dict):
-        norm_stats = self.model.dataset_statistics[self.dataset_name]
+        norm_stats = self.model.dataset_statistics[self.dataset_name]["proprio"]
+        print(norm_stats.keys())
         obs = dict(obs)
         obs["timestep_pad_mask"] = self.model.example_batch["observation"]["timestep_pad_mask"]  # dummy
         for key in obs:
@@ -156,47 +165,61 @@ class Policy(BasePolicy):
             # NOTE... single proprio might fail if not processed accordingly
             # normalize proprioception expect for bimanual proprioception
             if "proprio" in key and key != "proprio_bimanual":
-                obs[key] = (obs[key] - norm_stats[key]["mean"]) / (norm_stats[key]["std"])
+                k = key.replace("proprio_", "")  # TODO @agent fix for clarity, this is a bit hacky
+                n = norm_stats.get(k)
+                if not n:
+                    print(f"Warning: no normalization stats for {key}, skipping normalization")
+                    continue
+                obs[key] = (obs[key] - n["mean"]) / (n["std"])
         return obs
 
-    def infer(self, payload: dict):
+    def step(self, payload: dict):
         if payload.get("reset", False):
             return self.reset(payload)
 
         name = payload.get("model", "crossformer")
 
-        norm_stats = self.model.dataset_statistics[self.dataset_name]
+        unnorm_stats = self.model.dataset_statistics[self.dataset_name]["action"]
         obs = self.preprocess(payload["observation"])
 
         self.history.append(obs)
         self.num_obs += 1
         obs = stack_and_pad(self.history, self.num_obs) if self.horizon > 1 else obs
-        obs = jax.tree_map(lambda x: jax.device_put(jnp.asarray(x)), obs)
+        obs = jax.tree.map(lambda x: jax.device_put(jnp.asarray(x)), obs)
 
+        tspec = lambda a: jax.tree_map(lambda x: type(x), a)
+        unnorm_stats = drop_fn(unnorm_stats, lambda x: x.dtype == "O")
+        unnorm_stats = jax.tree.map(lambda x: jnp.array(x), unnorm_stats)
+        print(tspec(self.task))
+        self.task = jnp.zeros((1, 512))
+        # print(tspec(obs))
+        # quit()
+
+        jax.config.update("jax_disable_jit", True)
         self.rng, key = jax.random.split(self.rng)
+        # sample = pack_np2jax(self.model.sample_actions)
         actions = self.model.sample_actions(
             observations=obs,
             tasks=self.task,
-            unnormalization_statistics=norm_stats["action"],
+            # unnormalization_statistics=unnorm_stats,
             head_name=self.head_name,
             rng=key,
         )
-        pprint(actions.shape)
+        print(actions.shape)
         actions = actions[0, -1]  # one batch, last window
 
         actions = np.array(actions)
-        pprint(spec({"action": actions}))
-        pprint(actions)
+        print(spec({"action": actions}))
+        print(actions)
 
-        return {"actions": self.emsembler(actions[: self.pred_horizon])}
+        return {"actions": self.emsembler(actions[: self.cfg.chunk])}
 
 
 def main(cfg: ServerConfig):
-    pprint(cfg)
+    print(cfg)
     cfg.policy.verify()
 
     policy = Policy(cfg.policy)
-    policy.warmup()
     server = Server(
         policy,
         host=cfg.host,
