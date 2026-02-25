@@ -17,7 +17,7 @@ from crossformer.utils.spec import spec
 from crossformer.utils.tree.core import drop_fn
 
 
-def resize(img, size=(224, 224)):
+def resize(img, size):
     x = jnp.asarray(img)
     *lead, h, w, c = x.shape
     x = x.reshape((-1, h, w, c)) if lead else x[None]
@@ -53,7 +53,12 @@ class PolicyConfig:
     warmup: bool = True  # whether to run a warmup phase to trigger compilation and stabilize predictions
 
     def verify(self):
-        assert self.path and Path(self.path).resolve().expanduser().exists(), f"Model path {self.path} does not exist"
+        path = Path(self.path).expanduser().resolve()
+        assert self.path and path.exists(), f"Model path {self.path} does not exist"
+        cfg = path / "config.json"
+        if not cfg.exists():
+            entries = sorted(p.name for p in path.iterdir()) if path.is_dir() else []
+            raise FileNotFoundError(f"Expected checkpoint config at {cfg}")
         assert self.task in TASKS, f"Unknown task '{self.task}'. Choose from: {sorted(TASKS)}"
 
 
@@ -109,7 +114,8 @@ class Policy(BasePolicy):
         self.cfg = cfg
 
         self.model: CrossFormerModel = CrossFormerModel.load_pretrained(cfg.path, step=cfg.step)
-        self.head_name = "single_arm"
+        heads = tuple(self.model.module.heads.keys())
+        self.head_name = "single" if "single" in heads else next(iter(heads))
 
         self.emsembler = Ensembler(self.cfg.exp, self.cfg.chunk)
         self.horizon = 1  # 5
@@ -119,14 +125,19 @@ class Policy(BasePolicy):
         self.dataset_name = TASKS[cfg.task]["dataset_name"]
         self.text = TASKS[cfg.task]["text"]
         self.text = None
+        self.img_hw = {
+            k: tuple(v.shape[-3:-1])
+            for k, v in self.model.example_batch["observation"].items()
+            if k.startswith("image_")
+        }
+        print(f"[debug] expected image sizes from checkpoint: {self.img_hw}")
 
         self.reset_history()
         if self.cfg.warmup:
             self.warmup()
 
     def warmup(self):
-        # self.reset({"text": self.text})  # trigger compilation
-        self.reset(self.model.example_batch)  # trigger compilation
+        self.task = self.model.example_batch["task"]
         for _ in range(self.horizon):
             print(spec(self.model.example_batch))
             print(self.step(self.model.example_batch))
@@ -140,7 +151,8 @@ class Policy(BasePolicy):
     def reset(self, payload: dict):
         name = payload.get("model", "crossformer")
         if "goal" in payload:
-            goal_img = resize(payload["goal"]["image_primary"])
+            goal_size = self.img_hw.get("image_primary", (224, 224))
+            goal_img = resize(payload["goal"]["image_primary"], goal_size)
             goal = {"image_primary": goal_img[None]}
             self.task = self.model.create_tasks(goals=goal)
         elif "text" in payload:
@@ -156,12 +168,17 @@ class Policy(BasePolicy):
 
     def preprocess(self, obs: dict):
         norm_stats = self.model.dataset_statistics[self.dataset_name]["proprio"]
-        print(norm_stats.keys())
         obs = dict(obs)
         obs["timestep_pad_mask"] = self.model.example_batch["observation"]["timestep_pad_mask"]  # dummy
+
         for key in obs:
             if "image" in key:
-                obs[key] = resize(obs[key])
+                got_hw = tuple(obs[key].shape[-3:-1])
+                expect_hw = self.img_hw.get(key)
+                print(f"[debug] preprocess {key}: got={got_hw} expected={expect_hw}")
+                if expect_hw and got_hw != expect_hw:
+                    obs[key] = resize(obs[key], expect_hw)
+                    print(f"[debug] resized {key}: now={obs[key].shape[-3:-1]}")
             # NOTE... single proprio might fail if not processed accordingly
             # normalize proprioception expect for bimanual proprioception
             if "proprio" in key and key != "proprio_bimanual":
@@ -190,18 +207,14 @@ class Policy(BasePolicy):
         tspec = lambda a: jax.tree_map(lambda x: type(x), a)
         unnorm_stats = drop_fn(unnorm_stats, lambda x: x.dtype == "O")
         unnorm_stats = jax.tree.map(lambda x: jnp.array(x), unnorm_stats)
-        print(tspec(self.task))
-        self.task = jnp.zeros((1, 512))
-        # print(tspec(obs))
-        # quit()
+        print(spec(unnorm_stats))
 
         jax.config.update("jax_disable_jit", True)
         self.rng, key = jax.random.split(self.rng)
-        # sample = pack_np2jax(self.model.sample_actions)
         actions = self.model.sample_actions(
             observations=obs,
             tasks=self.task,
-            # unnormalization_statistics=unnorm_stats,
+            unnormalization_statistics=unnorm_stats[self.head_name],
             head_name=self.head_name,
             rng=key,
         )
@@ -227,7 +240,7 @@ def main(cfg: ServerConfig):
         metadata=None,
     )
     print("serving on", cfg.host, cfg.port)
-    server.serve_forever()
+    server.serve()
 
 
 if __name__ == "__main__":
