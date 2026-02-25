@@ -3,6 +3,8 @@ from __future__ import annotations
 from functools import partial
 import json
 import logging
+import os
+from pathlib import Path
 from typing import Any
 
 import flax
@@ -13,7 +15,6 @@ from jax.experimental import multihost_utils
 import jax.numpy as jnp
 from jax.typing import ArrayLike
 import numpy as np
-from orbax import checkpoint as ocp
 import orbax.checkpoint
 from rich import print
 
@@ -230,18 +231,13 @@ class CrossFormerModel:
         return action
 
     @classmethod
-    def load_pretrained(
-        cls,
-        checkpoint_path: str,
-        step: int | None = None,
-    ) -> CrossFormerModel:
+    def load_pretrained(cls, checkpoint_path: str, step: int | None = None) -> CrossFormerModel:
         """Loads a model from a checkpoint that was saved via `save_pretrained`.
 
         Args:
             checkpoint_path (str): A path to either a directory of checkpoints or a single checkpoint.
             step (int, optional): If multiple checkpoints are present, which one to load. Defaults to the latest.
         """
-        import os
 
         if checkpoint_path.startswith("hf://"):
             if step:
@@ -256,14 +252,9 @@ class CrossFormerModel:
         with open(os.path.join(checkpoint_path, "example_batch.msgpack"), "rb") as f:
             example_batch = flax.serialization.msgpack_restore(f.read())
 
-        logging.debug(
-            "Model was trained with observations: %s",
-            flax.core.pretty_repr(jax.tree.map(jnp.shape, example_batch["observation"])),
-        )
-        logging.debug(
-            "Model was trained with tasks: %s",
-            flax.core.pretty_repr(jax.tree.map(jnp.shape, example_batch["task"])),
-        )
+        reprspec = lambda x: flax.core.pretty_repr(spec(x))
+        logging.debug("Model was trained with observations: %s", reprspec(example_batch["observation"]))
+        logging.debug("Model was trained with tasks: %s", reprspec(example_batch["task"]))
 
         # load dataset statistics
         with open(os.path.join(checkpoint_path, "dataset_statistics.json"), "r") as f:
@@ -281,66 +272,22 @@ class CrossFormerModel:
         )
         params_shape = jax.eval_shape(partial(module.init, train=False), jax.random.PRNGKey(0), *init_args)["params"]
 
-        """ original
-        # restore params, checking to make sure the shape matches
-        checkpointer = orbax.checkpoint.CheckpointManager(
-        checkpoint_path, orbax.checkpoint.PyTreeCheckpointer()
-        step = step if step is not None else checkpointer.latest_step()
-
-        import os
-        import orbax.checkpoint as ocp
-        if True:
-            try:
-                os.remove(f"{checkpoint_path}/{step}/default/_sharding")
-            except:
-                pass
-
-            manager = ocp.CheckpointManager(checkpoint_path, ocp.PyTreeCheckpointer())
-
-            structure = manager.item_metadata(step)
-            params = manager.restore(
-                step,
-                restore_kwargs={
-                    "restore_args": jax.tree.map(
-                        lambda _: ocp.RestoreArgs(restore_type=np.ndarray), structure
-                    )
-                },
-            )
-
-        else:
-            params = checkpointer.restore(step, params_shape)
-        """
-
-        # use new orbax API for flexible restore
-        # beware rough edges
-
-        target = jax.tree.map(jnp.zeros_like, params_shape)
+        target_params = jax.tree.map(jnp.zeros_like, params_shape)
         sharding = jax.sharding.NamedSharding(
             jax.sharding.Mesh(jax.devices(), ("model",)),
-            jax.sharding.PartitionSpec(
-                None,
-            ),
+            jax.sharding.PartitionSpec(None),
         )
-        doshard = lambda x: jax.device_put(x, sharding)
-        spec = lambda x: (x.shape, x.dtype)
-        target = jax.tree.map(doshard, target)
-        abstract = jax.tree.map(ocp.utils.to_shape_dtype_struct, target)
+        target_params = jax.tree.map(lambda x: jax.device_put(x, sharding), target_params)
 
-        manager = ocp.CheckpointManager(checkpoint_path, ocp.StandardCheckpointer())
-        # structure = manager.item_metadata(step)
-        # target = jax.tree.map(lambda x: np.zeros(x.shape), structure)
-        params = manager.restore(step, args=ocp.args.StandardRestore(abstract))
+        from crossformer.utils.callbacks.save import SaveCallback
 
-        """ this is original from crossformer... has problem with 4gpu->2gpu server
-        original=False
-        if original:
-            # restore params, checking to make sure the shape matches
-            checkpointer = orbax.checkpoint.CheckpointManager(
-                checkpoint_path, orbax.checkpoint.PyTreeCheckpointer()
-            )
-            step = step if step is not None else checkpointer.latest_step()
-            params = checkpointer.restore(step, params_shape)
-        """
+        # SaveCallback expects the experiment root; load_pretrained gets the params dir.
+        save_dir = Path(checkpoint_path).expanduser().resolve().parent
+
+        try:
+            params = SaveCallback(save_dir=save_dir, new_api=True).load_params(target_params, step=step)
+        except Exception:
+            params = SaveCallback(save_dir=save_dir, new_api=False).load_params(target_params, step=step)
 
         config["text_processor"] = None
         if config["text_processor"] is not None:
@@ -389,8 +336,6 @@ class CrossFormerModel:
             self.params,
             {"save_args": orbax_utils.save_args_from_target(self.params)},
         )
-
-        import os
 
         if jax.process_index() == 0:
             # save config

@@ -9,6 +9,7 @@ import flax
 import jax
 import orbax.checkpoint as ocp
 
+from crossformer.utils.mytyping import Params
 from crossformer.utils.train_utils import TrainState
 
 
@@ -83,18 +84,8 @@ class SaveCallback:
         self.params_mngr.wait_until_finished()
         self.state_mngr.wait_until_finished()
 
-    def load(self, target: TrainState, step: int | None = None) -> TrainState:
-        """Restore model params from a params checkpoint into ``target``.
-
-        Args:
-            target: TrainState whose structure is used as the restore template.
-                All non-params fields (optimizer state, rng, etc.) are kept from
-                ``target``; only ``model.params`` is replaced with checkpoint values.
-            step: Checkpoint step to load. Defaults to ``params_mngr.latest_step()``.
-
-        Returns:
-            A new TrainState identical to ``target`` except with loaded params.
-        """
+    def load_params(self, target_params: Params, step: int | None = None) -> Params:
+        """Restore params from a params checkpoint using ``target_params`` as template."""
         if self.save_dir is None:
             raise ValueError("save_dir is None — nothing to load")
         step = step if step is not None else self.params_mngr.latest_step()
@@ -107,13 +98,26 @@ class SaveCallback:
             # without any extra steps from the caller.
             abstract = jax.tree.map(
                 lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=x.sharding),
-                target.model.params,
+                target_params,
             )
-            params = self.params_mngr.restore(step, args=ocp.args.StandardRestore(abstract))
-        else:
-            # PyTreeCheckpointer uses items= as a sharding template.
-            params = self.params_mngr.restore(step, items=target.model.params)
+            return self.params_mngr.restore(step, args=ocp.args.StandardRestore(abstract))
 
+        # PyTreeCheckpointer uses items= as a sharding template.
+        return self.params_mngr.restore(step, items=target_params)
+
+    def load(self, target: TrainState, step: int | None = None) -> TrainState:
+        """Restore model params from a params checkpoint into ``target``.
+
+        Args:
+            target: TrainState whose structure is used as the restore template.
+                All non-params fields (optimizer state, rng, etc.) are kept from
+                ``target``; only ``model.params`` is replaced with checkpoint values.
+            step: Checkpoint step to load. Defaults to ``params_mngr.latest_step()``.
+
+        Returns:
+            A new TrainState identical to ``target`` except with loaded params.
+        """
+        params = self.load_params(target.model.params, step=step)
         return target.replace(model=target.model.replace(params=params))
 
     def save_extra(self, train_state: TrainState):
