@@ -27,7 +27,7 @@ from crossformer.utils.callbacks.inspect import InspectCallback
 from crossformer.utils.deco import deprecate
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec, spec
-from crossformer.utils.train_callbacks import SaveCallback
+from crossformer.utils.callbacks import SaveCallback
 from crossformer.utils.train_utils import (
     check_config_diff,
     create_optimizer,
