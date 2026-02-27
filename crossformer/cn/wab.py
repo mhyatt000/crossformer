@@ -2,29 +2,29 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import datetime as dt
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import TypeAlias
 
 from flax.traverse_util import flatten_dict
-import wandb
 
 import crossformer
 from crossformer.cn.base import CN
+import wandb
 
 StrPath: TypeAlias = str | Path
 
 
-class WandbMode(Enum):
+class WandbMode(StrEnum):
     ONLINE = "online"
     OFFLINE = "offline"
     DISABLED = "disabled"
 
 
-@dataclass()
+@dataclass
 class Wandb(CN):
     project: str = "bafl"
-    group: str = "ssl-luc"
+    group: str = "luc-ssl"
     entity: str | None = None
 
     # id of run to resume... optionally use f'{id}?_step={step}'
@@ -44,8 +44,9 @@ class Wandb(CN):
         m = WandbMode.DISABLED if not use else WandbMode.ONLINE
         return m.value
 
-    def log(self, info, step):
-        wandb.log(flatten_dict(info, sep="/"), step=step)
+    def log(self, info: dict, step: int | None = None, sep="/"):
+        kwargs = {"step": step} if step is not None else {}
+        wandb.log(flatten_dict(info, sep=sep), **kwargs)
 
     def initialize(self, cfg, name=None):
         # name = format_name_with_config( FLAGS.name, cfg.asdict())

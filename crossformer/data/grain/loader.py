@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import fnmatch
 from functools import partial
 import logging
+import resource
 from typing import Any
 
 import cv2
@@ -250,6 +251,12 @@ def make_single_dataset(
         return ds, stats
 
 
+def _apply_fd_limit(limit: int) -> tuple[int, int]:
+    old_soft, old_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (min(limit, old_hard), old_hard))
+    return old_soft, old_hard
+
+
 @dataclass
 class GrainDataFactory:
     """in charge of making GrainDataLoader"""
@@ -303,6 +310,9 @@ class GrainDataFactory:
         shard_fn: Callable | None = None,
         train: bool = True,
     ) -> GrainDataLoader:
+        lim = _apply_fd_limit(4096)
+        log.info("applied fd limit: %s", lim)
+
         log.debug("data mix: %s", cfg.data.mix.value)
         mix = cfg.data.mix.value.flatten()
         log.debug("flattened mix: %s", mix)
@@ -328,12 +338,12 @@ class GrainDataFactory:
             ds.map(add_mask)
             .map(lambda x: jax.tree.map(lambda y: np.array(y), x))  # to numpy
             .to_iter_dataset(
-                grain.ReadOptions(num_threads=32)
+                grain.ReadOptions(num_threads=8)
             )  # iter before batch so that procs do batching and doesnt impede read threads
         )
 
         ds = ds.batch(cfg.data.loader.batch_size, drop_remainder=True)  # , batch_fn=batch_fn)
-        ds = ds.mp_prefetch(grain.MultiprocessingOptions(num_workers=8, per_worker_buffer_size=10))
+        ds = ds.mp_prefetch(grain.MultiprocessingOptions(num_workers=8, per_worker_buffer_size=8))
 
         batch = next(iter(ds))
         log.debug("batch spec: %s", spec(batch))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import gc
 import logging
 from pathlib import Path
 from typing import Literal
@@ -86,13 +87,16 @@ def main(cfg: Config) -> None:
         print("exiting")
         quit()
 
-    dsit = iter(dataset.dataset)
-    for i in tqdm(range(int(1e4)), miniters=100, mininterval=0.1):
+    for i in tqdm(range(int(1e4)), miniters=5, mininterval=0.1):
         x = next(dsit)
         if i % 1000 == 0:
             print(spec(x))
 
+    del x
+    del batch
+    del dsit
     del dataset  # threads arent daemon
+    gc.collect()
 
 
 if __name__ == "__main__":

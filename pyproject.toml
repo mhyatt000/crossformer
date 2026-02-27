@@ -55,7 +55,6 @@ dependencies = [
     "webpolicy",
     "python-box>=7.3.2",
     "augmax>=0.4.1",
-    "jax-smi>=1.0.4",
     "more-itertools>=10.8.0",
     "torch2jax>=0.1.0",
     "pyroki",
@@ -77,6 +76,7 @@ dependencies = [
     "tensorflow<=2.18.0",
     "jax[cuda12]>=0.5.3",
     "jaxlib>=0.5.3",
+    "dm-pix>=0.4.4",
 ]
 
 [dependency-groups]
