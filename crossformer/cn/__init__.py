@@ -298,6 +298,8 @@ class Train(CN):
     log_interval: int = 100
     eval_interval: int = 2000
     save_interval: int = 2000
+    # Change depending on runtime impact
+    vis_interval: int = 500
     save_dir: str | Path = os.environ.get("BAFL_SAVE", Path().home())
     seed: int = 42
 
