@@ -77,6 +77,7 @@ dependencies = [
     "jax[cuda12]>=0.5.3",
     "jaxlib>=0.5.3",
     "dm-pix>=0.4.4",
+    "rerun-sdk>=0.27.3",
 ]
 
 [dependency-groups]
