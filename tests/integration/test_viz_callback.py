@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import matplotlib
+
+matplotlib.use("Agg")
 from pathlib import Path
 
 import imageio
@@ -12,17 +15,24 @@ from crossformer.utils.callbacks.flow_viz import (
     load_camera_extrinsics,
 )
 
-# Load first pass of dataset
-shards = sorted(Path("~/.cache/arrayrecords/sweep_mano/0.0.2/to_step").expanduser().glob("*.arrayrecord"))
+shards = sorted(Path("~/data/arrayrecords/sweep_mano/0.0.2/to_step").expanduser().glob("*.arrayrecord"))
 records = _DecodedArrayRecord(shards)
 
+START = 40  # change this to pick frames where hand is visiblek
 B, ft = 4, 6
-rng = np.random.default_rng(0)
+N = B + ft  # need enough steps to build ft-length trajectories per batch item
 
-# Grab B steps, stack k3ds as fake joints_ft and repeat ft times with small noise
-steps = [records[i] for i in range(B)]
-k3ds = np.stack([s["observation"]["proprio"]["k3ds"][:, :3] for s in steps])
-joints_ft = k3ds[:, None, :, :] + rng.standard_normal((B, ft, 21, 3)).astype(np.float32) * 0.01
+# Same data as test_keyframe.py: real images from "low" camera + actual k3ds
+steps = [records[START + i] for i in range(N)]
+k3ds = np.stack([s["observation"]["proprio"]["k3ds"][:, :3] for s in steps])  # (N, 21, 3)
+imgs = np.stack([s["observation"]["image"]["low"] for s in steps])  # (N, H, W, 3)
+
+print(f"image shape: {imgs.shape[1:]}")  # H, W, C
+print(f"k3ds range: {k3ds.min():.3f} to {k3ds.max():.3f}")
+
+# joints_ft[i] = actual consecutive steps i..i+ft (real future trajectory)
+joints_ft = np.stack([k3ds[i : i + ft] for i in range(B)])  # (B, ft, 21, 3)
+batch_imgs = imgs[:B]  # (B, H, W, 3)
 
 R, t = load_camera_extrinsics("low")
 K = _DEFAULT_K
@@ -30,7 +40,7 @@ K = _DEFAULT_K
 
 def dummy_iter():
     while True:
-        yield {}
+        yield {"observation": {"image_primary": batch_imgs}}
 
 
 def dummy_eval_step(state, batch):
@@ -44,6 +54,11 @@ cb.num_val_batches = 1
 cb.camera_intrinsics = K
 cb.camera_R = R
 cb.camera_t = t
+cb.use_rerun = True
+cb.rerun_spawn = False
+cb.rerun_path = "/data/home/nhogg/flow_viz.rrd"
+cb.ros_to_opencv = True  # k3ds are in ROS frame; extrinsics assume OpenCV world convention
+cb._rerun_initialized = False
 cb.val_iterators = {"sweep_mano": dummy_iter()}
 cb.eval_step = dummy_eval_step
 

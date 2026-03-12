@@ -16,12 +16,18 @@ _DEFAULT_K = np.array(
 
 _INTRINSICS_DIR = "~/intrinsics/cam"
 
+# ROS REP-103 (X=fwd, Y=left, Z=up) → OpenCV (X=right, Y=down, Z=fwd)
+_R_ROS2CV = np.array(
+    [[0, -1, 0], [0, 0, -1], [1, 0, 0]],
+    dtype=np.float32,
+)
+
 
 def load_camera_extrinsics(view: str, base_dir: str = _INTRINSICS_DIR) -> tuple[np.ndarray, np.ndarray]:
     """Load R, t from HT.npz for a given camera view (low/over/side)."""
     import os
-
-    path = os.path.expanduser(f"{base_dir}/{view}/HT.npz")
+    path = f"/data/bela/extr/cam/{view}/HT.npz"
+    #path = os.path.expanduser(f"{base_dir}/{view}/HT.npz")
     HT = np.load(path)["HT"]  # (4,4)
     return HT[:3, :3].astype(np.float32), HT[:3, 3].astype(np.float32)
 
@@ -55,8 +61,13 @@ def _get_extrinsics(batch: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray] |
 
 
 def world_to_uv(X_world: np.ndarray, R: np.ndarray, t: np.ndarray, K: np.ndarray, eps: float = 1e-8) -> np.ndarray:
-    """X_world: (...,3) → uv: (...,2)"""
+    """X_world: (...,3) → uv: (...,2)
+
+    Negates Y in camera space to correct for k3ds being derived from a
+    vertically-mirrored image.
+    """
     X_cam = (X_world @ R.T) + t
+    X_cam = X_cam * np.array([1, -1, 1], dtype=np.float32)  # fix vertical mirror
     z = np.maximum(X_cam[..., 2], eps)
     u = K[0, 0] * (X_cam[..., 0] / z) + K[0, 2]
     v = K[1, 1] * (X_cam[..., 1] / z) + K[1, 2]
@@ -128,11 +139,89 @@ def _frames_to_video(frames_rgb: list[np.ndarray]) -> np.ndarray:
     return np.stack(frames_rgb).transpose(0, 3, 1, 2)  # (T,C,H,W)
 
 
+def _log_rerun(
+    entity: str,
+    joints_ft0: np.ndarray,
+    R: np.ndarray,
+    t: np.ndarray,
+    K: np.ndarray,
+    step: int,
+    image: np.ndarray | None = None,
+    ros_to_opencv: bool = False,
+) -> None:
+    """Log joints in world space and camera pose to rerun for visual validation.
+
+    Joints are logged in world space; the camera frustum is placed using the
+    inverse of (R, t) so you can visually check alignment against the image.
+
+    Transform chain: robot/ROS frame --(ros_to_opencv)--> OpenCV world --(R,t)--> camera.
+    Set ros_to_opencv=True when k3ds are in ROS frame (X=fwd, Y=left, Z=up)
+    and the camera extrinsics assume OpenCV world convention (X=right, Y=down, Z=fwd).
+
+    Args:
+        entity: rerun entity prefix (e.g. "sweep_mano/text_conditioned")
+        joints_ft0: (ft, J, 3) joints in robot/world space
+        R: (3,3) world-to-camera rotation
+        t: (3,) world-to-camera translation
+        K: (3,3) camera intrinsics
+        step: training step for timeline
+        image: optional (H,W,3) uint8 image to log under the camera
+        ros_to_opencv: convert joints from ROS frame to OpenCV world frame
+            before applying extrinsics (needed when k3ds are in robot/ROS frame)
+    """
+    import rerun as rr
+
+    rr.set_time_sequence("train_step", step)
+
+    H = image.shape[0] if image is not None else int(K[1, 2] * 2)
+    W = image.shape[1] if image is not None else int(K[0, 2] * 2)
+    K_scaled = K.copy()
+    K_scaled[0] *= W / (K[0, 2] * 2)
+    K_scaled[1] *= H / (K[1, 2] * 2)
+
+    # World frame is OpenCV convention (after optional ros_to_opencv conversion)
+    rr.log(f"{entity}/world", rr.ViewCoordinates.RDF, static=True)
+
+    # Place camera in world using inverse extrinsics
+    cam_pos = (-R.T @ t).tolist()
+    rr.log(
+        f"{entity}/world/cam",
+        rr.Transform3D(translation=cam_pos, mat3x3=R.T.tolist()),
+        static=True,
+    )
+    rr.log(f"{entity}/world/cam", rr.Pinhole(image_from_camera=K_scaled, width=W, height=H), static=True)
+
+    if image is not None:
+        rr.log(f"{entity}/world/cam/image", rr.Image(image))
+
+    for k in range(joints_ft0.shape[0]):
+        rr.set_time_sequence("ft", k)
+        joints = joints_ft0[k]  # (J, 3) robot/world frame
+        if ros_to_opencv:
+            joints = joints @ _R_ROS2CV.T
+        # k3ds were derived from a vertically-mirrored image, so Y in camera space is negated
+        joints_cam = (joints @ R.T) + t
+        joints_cam = joints_cam * np.array([1, -1, 1], dtype=np.float32)
+        joints_world = (joints_cam - t) @ R
+        rr.log(f"{entity}/world/joints_3d", rr.Points3D(joints_world))
+
+
+def _draw_uv_on_image(image: np.ndarray, uv: np.ndarray, radius: int = 5) -> np.ndarray:
+    """Draw UV joint circles onto a copy of image. uv: (J, 2) in pixel coords."""
+    import cv2
+
+    out = image.copy()
+    for u, v in uv.astype(int):
+        cv2.circle(out, (u, v), radius, (255, 0, 0), -1)
+    return out
+
+
 @dataclass
 class FlowVisCallback(ValidationCallback):
     """Projects joints_ft (B, ft, J, 3) to UV and logs wandb.Video per refinement step.
 
     Set camera_view to auto-load extrinsics from ~/intrinsics/cam/{view}/HT.npz.
+    Set use_rerun=True to also log to a rerun viewer for projection debugging.
     """
 
     fps: int = 10
@@ -141,14 +230,32 @@ class FlowVisCallback(ValidationCallback):
     camera_intrinsics: np.ndarray = field(default_factory=lambda: _DEFAULT_K.copy())
     camera_R: np.ndarray = field(default_factory=lambda: np.eye(3, dtype=np.float32))
     camera_t: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float32))
+    use_rerun: bool = False
+    rerun_spawn: bool = True  # spawn a viewer process; set False to only save to rerun_path
+    rerun_path: str | None = None  # save to .rrd file when set
+    ros_to_opencv: bool = False  # rotate joints from ROS frame to OpenCV before projecting
 
     def __post_init__(self):
         super().__post_init__()
         self.camera_R, self.camera_t = load_camera_extrinsics(self.camera_view)
+        self._rerun_initialized = False
+
+    def _init_rerun(self) -> None:
+        if self._rerun_initialized:
+            return
+        import rerun as rr
+
+        rr.init("flow_viz", spawn=self.rerun_spawn)
+        if self.rerun_path:
+            rr.save(self.rerun_path)
+        self._rerun_initialized = True
 
     def __call__(self, train_state, step: int) -> dict[str, Any]:
         if jax.process_index() != 0:
             return {}
+
+        if self.use_rerun:
+            self._init_rerun()
 
         out: dict[str, Any] = {}
         for ds_name, val_data_iter in self.val_iterators.items():
@@ -161,8 +268,10 @@ class FlowVisCallback(ValidationCallback):
                 metric_by_mode = self.eval_step(train_state, batch)
 
                 K = _get_intrinsics(batch, self.camera_intrinsics)
-                extr = load_camera_extrinsics(batch)
+                extr = _get_extrinsics(batch)
                 R, t = extr if extr is not None else (self.camera_R, self.camera_t)
+
+                imgs = np.asarray(jax.device_get(batch.get("observation", {}).get("image_primary", np.array([]))))
 
                 for mode, metric in metric_by_mode.items():
                     vis = metric.get("vis")
@@ -183,6 +292,19 @@ class FlowVisCallback(ValidationCallback):
                         ]
                         uv_videos.append(wandb.Video(_frames_to_video(uv_frames), fps=self.fps))
                         joints_videos.append(wandb.Video(_make_3d_video(joints_ft0, f"{pfx} joints"), fps=self.fps))
+
+                        if self.use_rerun:
+                            img0 = imgs[0] if imgs.ndim == 4 else None
+                            _log_rerun(
+                                entity=pfx,
+                                joints_ft0=joints_ft0,
+                                R=R,
+                                t=t,
+                                K=K,
+                                step=step,
+                                image=img0,
+                                ros_to_opencv=self.ros_to_opencv,
+                            )
 
                     xyz_ft = vis.get("xyz_ft")
                     if xyz_ft is not None:
