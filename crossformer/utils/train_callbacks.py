@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import tqdm
+import wandb
 
 # from xgym.rlds.util import apply_persp, perspective_projection
 # from xgym.viz.mano import overlay_palm
@@ -19,7 +20,6 @@ from crossformer.utils.callbacks.base import Callback
 from crossformer.utils.callbacks.save import SaveCallback  # noqa
 from crossformer.utils.mytyping import Any, Data, Sequence
 from crossformer.utils.train_utils import TrainState
-import wandb
 
 
 def create_validation_dataset(

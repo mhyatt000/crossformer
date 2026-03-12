@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import numpy as np
+import wandb
 
 from crossformer.utils.callbacks.flow_viz import _DEFAULT_K, FlowVisCallback, load_camera_extrinsics
-import wandb
 
 wandb.init(mode="disabled")
 

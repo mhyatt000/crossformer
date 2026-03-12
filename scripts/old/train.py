@@ -11,6 +11,7 @@ import os
 import os.path as osp
 
 from absl import app, flags, logging
+from crossformer.utils.typing import Data
 from flax.traverse_util import flatten_dict
 import jax
 from jax.experimental import multihost_utils
@@ -37,7 +38,6 @@ from crossformer.utils.train_utils import (
     Timer,
     TrainState,
 )
-from crossformer.utils.typing import Data
 
 FLAGS = flags.FLAGS
 

@@ -4,9 +4,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, UTC
 
 import tyro
+import wandb
 
 from crossformer.cn.wab import Wandb
-import wandb
 
 
 @dataclass

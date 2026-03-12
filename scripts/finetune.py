@@ -18,17 +18,18 @@ import optax
 import tensorflow as tf
 import tqdm
 import tyro
+import wandb
 
 from crossformer import cn
 from crossformer.data.oxe.oxe_standardization_transforms import (
     OXE_STANDARDIZATION_TRANSFORMS,
 )
 from crossformer.model.crossformer_model import CrossFormerModel
+from crossformer.utils.callbacks import SaveCallback
 from crossformer.utils.callbacks.inspect import InspectCallback
 from crossformer.utils.deco import deprecate
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec, spec
-from crossformer.utils.callbacks import SaveCallback
 from crossformer.utils.train_utils import (
     check_config_diff,
     create_optimizer,
@@ -37,7 +38,6 @@ from crossformer.utils.train_utils import (
     Timer,
     TrainState,
 )
-import wandb
 
 log = logging.getLogger(__name__)
 

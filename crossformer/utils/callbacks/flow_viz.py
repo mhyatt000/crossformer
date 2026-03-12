@@ -5,9 +5,9 @@ from typing import Any, Mapping
 
 import jax
 import numpy as np
+import wandb
 
 from crossformer.utils.train_callbacks import ValidationCallback
-import wandb
 
 _DEFAULT_K = np.array(
     [[515.0, 0.0, 320.0], [0.0, 515.0, 240.0], [0.0, 0.0, 1.0]],
@@ -25,7 +25,6 @@ _R_ROS2CV = np.array(
 
 def load_camera_extrinsics(view: str, base_dir: str = _INTRINSICS_DIR) -> tuple[np.ndarray, np.ndarray]:
     """Load R, t from HT.npz for a given camera view (low/over/side)."""
-    import os
     path = f"/data/bela/extr/cam/{view}/HT.npz"
     #path = os.path.expanduser(f"{base_dir}/{view}/HT.npz")
     HT = np.load(path)["HT"]  # (4,4)
