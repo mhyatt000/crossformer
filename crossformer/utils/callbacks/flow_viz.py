@@ -24,11 +24,15 @@ _R_ROS2CV = np.array(
 
 
 def load_camera_extrinsics(view: str, base_dir: str = _INTRINSICS_DIR) -> tuple[np.ndarray, np.ndarray]:
-    """Load R, t from HT.npz for a given camera view (low/over/side)."""
+    """Load world-to-camera (R_w2c, t_w2c) for a given camera view (low/over/side).
+
+    HT.npz stores the world-to-camera transform directly.
+    """
     path = f"/data/bela/extr/cam/{view}/HT.npz"
-    #path = os.path.expanduser(f"{base_dir}/{view}/HT.npz")
-    HT = np.load(path)["HT"]  # (4,4)
-    return HT[:3, :3].astype(np.float32), HT[:3, 3].astype(np.float32)
+    HT = np.load(path)["HT"]  # (4,4) world-to-camera
+    R_w2c = HT[:3, :3].astype(np.float32)
+    t_w2c = HT[:3, 3].astype(np.float32)
+    return R_w2c, t_w2c
 
 
 def _get_intrinsics(batch: Mapping[str, Any], fallback: np.ndarray) -> np.ndarray:
@@ -59,14 +63,22 @@ def _get_extrinsics(batch: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray] |
     return None
 
 
-def world_to_uv(X_world: np.ndarray, R: np.ndarray, t: np.ndarray, K: np.ndarray, eps: float = 1e-8) -> np.ndarray:
+def world_to_uv(
+    X_world: np.ndarray,
+    R: np.ndarray,
+    t: np.ndarray,
+    K: np.ndarray,
+    ros_to_opencv: bool = False,
+    eps: float = 1e-8,
+) -> np.ndarray:
     """X_world: (...,3) → uv: (...,2)
 
-    Negates Y in camera space to correct for k3ds being derived from a
-    vertically-mirrored image.
+    R, t must be world-to-camera (as returned by load_camera_extrinsics).
+    Transform chain: robot/ROS world --(ros_to_opencv)--> OpenCV world --(R,t)--> camera --(K)--> uv.
     """
+    if ros_to_opencv:
+        X_world = X_world @ _R_ROS2CV.T
     X_cam = (X_world @ R.T) + t
-    X_cam = X_cam * np.array([1, -1, 1], dtype=np.float32)  # fix vertical mirror
     z = np.maximum(X_cam[..., 2], eps)
     u = K[0, 0] * (X_cam[..., 0] / z) + K[0, 2]
     v = K[1, 1] * (X_cam[..., 1] / z) + K[1, 2]
@@ -198,11 +210,8 @@ def _log_rerun(
         joints = joints_ft0[k]  # (J, 3) robot/world frame
         if ros_to_opencv:
             joints = joints @ _R_ROS2CV.T
-        # k3ds were derived from a vertically-mirrored image, so Y in camera space is negated
-        joints_cam = (joints @ R.T) + t
-        joints_cam = joints_cam * np.array([1, -1, 1], dtype=np.float32)
-        joints_world = (joints_cam - t) @ R
-        rr.log(f"{entity}/world/joints_3d", rr.Points3D(joints_world))
+        # log in world space; camera pose above handles the view alignment
+        rr.log(f"{entity}/world/joints_3d", rr.Points3D(joints))
 
 
 def _draw_uv_on_image(image: np.ndarray, uv: np.ndarray, radius: int = 5) -> np.ndarray:
@@ -284,7 +293,7 @@ class FlowVisCallback(ValidationCallback):
                         joints_ft0 = joints_ft[0]  # (ft, J, 3)
                         uv_frames = [
                             _mpl_scatter_frame_uv(
-                                world_to_uv(joints_ft0[k], R=R, t=t, K=K),
+                                world_to_uv(joints_ft0[k], R=R, t=t, K=K, ros_to_opencv=self.ros_to_opencv),
                                 title=f"{pfx} uv ft={k}",
                             )
                             for k in range(joints_ft0.shape[0])
