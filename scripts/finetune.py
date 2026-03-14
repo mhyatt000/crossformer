@@ -26,6 +26,11 @@ from crossformer.data.oxe.oxe_standardization_transforms import (
 )
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.utils.callbacks import SaveCallback
+from crossformer.utils.callbacks.flow_viz import (
+    _DEFAULT_K,
+    FlowVisCallback,
+    load_camera_extrinsics,
+)
 from crossformer.utils.callbacks.inspect import InspectCallback
 from crossformer.utils.deco import deprecate
 from crossformer.utils.jax_utils import initialize_compilation_cache
@@ -322,7 +327,46 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     # Build validation callback
     #
 
-    log.info("val_callback disabled for now")
+    def _flow_viz_iter():
+        while True:
+            yield next(dsit)
+
+    def flow_eval_step(state: TrainState, batch):
+        rng_eval = jax.random.fold_in(state.rng, int(state.step))
+        _, metrics = val_fn(state.model.params, batch, rng_eval, train=False)
+        vis = metrics.get("vis", {})
+        if not isinstance(vis, dict):
+            vis = {}
+        if "q_flow_steps" not in vis and "deltas" in vis:
+            vis["q_flow_steps"] = vis["deltas"]
+        return {"text_conditioned": {"vis": vis}}
+
+    flow_viz_callback = object.__new__(FlowVisCallback)
+    flow_viz_callback.fps = 8
+    flow_viz_callback.max_videos = 2
+    flow_viz_callback.num_val_batches = 1
+    flow_viz_callback.camera_view = "low"
+    flow_viz_callback.camera_intrinsics = _DEFAULT_K.copy()
+    flow_viz_callback.camera_R, flow_viz_callback.camera_t = load_camera_extrinsics("low")
+    flow_viz_callback.ros_to_opencv = True
+    flow_viz_callback.enable_denoise_plots = False
+    flow_viz_callback.enable_xyz_image_flow = False
+    flow_viz_callback.enable_joint_xyz_pca_flow = False
+    flow_viz_callback.enable_part_a = True
+    flow_viz_callback.enable_part_b = True
+    flow_viz_callback.enable_part_c = True
+    flow_viz_callback.robot_pad_gripper = True
+    flow_viz_callback.flow_overlay_ft_index = 0
+    flow_viz_callback.flow_q_keys = ("q_flow_steps", "joint_flow_steps", "deltas")
+    flow_viz_callback.flow_xyz_keys = ("fk_xyz_flow_steps", "xyz_flow_steps", "joints_flow_steps")
+    flow_viz_callback.compute_fk_from_q_steps = True
+    flow_viz_callback.q_pca_dims = 7
+    flow_viz_callback._fk_fn = None
+    flow_viz_callback._robot = None
+    flow_viz_callback.val_iterators = {"train_stream": _flow_viz_iter()}
+    flow_viz_callback.eval_step = flow_eval_step
+
+    log.info("flow_viz callback enabled")
 
     #
     # Train loop
@@ -357,6 +401,10 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
 
         if (i) % cfg.eval_interval == 0:
             log.info("Evaluating...")
+            with timer("val"):
+                flow_vis_metrics = flow_viz_callback(train_state, i + 1)
+                if flow_vis_metrics:
+                    cfg.wandb.log(flow_vis_metrics, step=i)
 
         if (i + 1) % cfg.save_interval == 0 and save_dir is not None:
             cfg.vprint("Saving checkpoint...")

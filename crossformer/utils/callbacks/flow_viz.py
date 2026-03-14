@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Mapping
+import tempfile
 import warnings
 
 import jax
@@ -23,12 +25,16 @@ _R_ROS2CV = np.array(
     dtype=np.float32,
 )
 
+# ---- new module wiring (mode 2, URDF robot renderer) ----
+from scripts.flow_viz.flow_viz_overlay import render_xyz_overlay_video
+from scripts.flow_viz.flow_viz_pca import _plot_two_panel_video, _ensure_snd
+from scripts.flow_viz.flow_viz_robot import make_robot_from_urdf, render_robot_q_flow_video
+from xgym import calibrate
+from xgym.calibrate.urdf.robot import urdf
+
 
 def load_camera_extrinsics(view: str, base_dir: str = _INTRINSICS_DIR) -> tuple[np.ndarray, np.ndarray]:
-    """Load world-to-camera (R_w2c, t_w2c) for a given camera view (low/over/side).
-
-    HT.npz stores the world-to-camera transform directly.
-    """
+    """Load world-to-camera (R_w2c, t_w2c) for a given camera view (low/over/side)."""
     path = f"/home/nh/crossformer_data/extr/cam/{view}/HT.npz"
     HT = np.load(path)["HT"]  # (4,4) world-to-camera
     R_w2c = HT[:3, :3].astype(np.float32)
@@ -72,11 +78,7 @@ def world_to_uv(
     ros_to_opencv: bool = False,
     eps: float = 1e-8,
 ) -> np.ndarray:
-    """X_world: (...,3) → uv: (...,2)
-
-    R, t must be world-to-camera (as returned by load_camera_extrinsics).
-    Transform chain: robot/ROS world --(ros_to_opencv)--> OpenCV world --(R,t)--> camera --(K)--> uv.
-    """
+    """X_world: (...,3) → uv: (...,2)"""
     if ros_to_opencv:
         X_world = X_world @ _R_ROS2CV.T
     X_cam = (X_world @ R.T) + t
@@ -88,7 +90,6 @@ def world_to_uv(
 
 def _mpl_scatter_frame_uv(uv: np.ndarray, title: str) -> np.ndarray:
     import io
-
     import matplotlib.pyplot as plt
     from PIL import Image
 
@@ -111,9 +112,7 @@ def _mpl_scatter3d_frame(
     title: str,
     lims: tuple[np.ndarray, np.ndarray],
 ) -> np.ndarray:
-    """xyz: (N,3); lims: (lo (3,), hi (3,)) fixed across frames for stable animation."""
     import io
-
     import matplotlib.pyplot as plt
     from PIL import Image
 
@@ -142,7 +141,6 @@ def _mpl_scatter3d_denoise_frame(
     target_xyz: np.ndarray | None = None,
 ) -> np.ndarray:
     import io
-
     import matplotlib.pyplot as plt
     from PIL import Image
 
@@ -169,7 +167,6 @@ def _mpl_scatter3d_denoise_frame(
 
 
 def _make_3d_video(data_ft: np.ndarray, title_prefix: str) -> np.ndarray:
-    """data_ft: (ft, N, 3) → (T,C,H,W) video with fixed axis limits."""
     lo = data_ft.reshape(-1, 3).min(axis=0)
     hi = data_ft.reshape(-1, 3).max(axis=0)
     pad = np.maximum((hi - lo) * 0.1, 1e-3)
@@ -181,7 +178,6 @@ def _make_3d_video(data_ft: np.ndarray, title_prefix: str) -> np.ndarray:
 
 
 def _make_denoise_3d_video(pred_sftj3: np.ndarray, target_ftj3: np.ndarray | None, title_prefix: str) -> np.ndarray:
-    """pred_sftj3: (S, ft, J, 3) → (S,C,H,W) 3D point-cloud video across flow steps."""
     pred_snp3 = pred_sftj3.reshape(pred_sftj3.shape[0], -1, 3)
     target_np3 = None if target_ftj3 is None else target_ftj3.reshape(-1, 3)
 
@@ -218,12 +214,7 @@ def _first_vis_array(vis: Mapping[str, np.ndarray], keys: tuple[str, ...]) -> tu
 
 
 def _flow_steps_first_sample(pred_steps: np.ndarray) -> np.ndarray | None:
-    """Normalize flow-denoise trajectories to (S, ft, J, 3) for sample 0.
-
-    Supports common layouts:
-    - (B, S, ft, J, 3)
-    - (S, B, ft, J, 3)
-    """
+    """Normalize flow-denoise trajectories to (S, ft, J, 3) for sample 0."""
     if pred_steps.ndim != 5 or pred_steps.shape[-1] != 3:
         return None
     if pred_steps.shape[0] <= pred_steps.shape[1]:
@@ -251,7 +242,6 @@ def _compute_denoise_curves(pred_sftj3: np.ndarray, target_ftj3: np.ndarray | No
 
 def _mpl_denoise_curve_plot(curves: Mapping[str, np.ndarray], title: str) -> np.ndarray:
     import io
-
     import matplotlib.pyplot as plt
     from PIL import Image
 
@@ -282,14 +272,13 @@ def _show_image_opencv(window_name: str, image_rgb: np.ndarray, wait_ms: int) ->
         msg = str(exc)
         if "The function is not implemented" in msg or "cvShowImage" in msg:
             raise RuntimeError(
-                "OpenCV GUI display is unavailable in this environment (likely opencv-python-headless). "
-                "Disable popout (`show_denoise_plot_window=False`) or install GUI-enabled OpenCV."
+                "OpenCV GUI display is unavailable (likely opencv-python-headless). "
+                "Disable popout or install GUI-enabled OpenCV."
             ) from exc
         raise
 
 
 def _flow_steps_first_sample_any(steps: np.ndarray) -> np.ndarray | None:
-    """Normalize common (B,S,...) or (S,B,...) to sample-0 (S,...)."""
     if steps.ndim < 3:
         return None
     if steps.ndim == 3:
@@ -302,7 +291,6 @@ def _flow_steps_first_sample_any(steps: np.ndarray) -> np.ndarray | None:
 
 
 def _normalize_q_flow_steps(q_steps: np.ndarray) -> np.ndarray | None:
-    """Return q flow as (S, ft, D)."""
     q_sfd = _flow_steps_first_sample_any(q_steps)
     if q_sfd is None:
         return None
@@ -314,7 +302,6 @@ def _normalize_q_flow_steps(q_steps: np.ndarray) -> np.ndarray | None:
 
 
 def _normalize_xyz_flow_steps(x_steps: np.ndarray) -> np.ndarray | None:
-    """Return xyz flow as (S, ft, J, 3)."""
     x_s = _flow_steps_first_sample_any(x_steps)
     if x_s is None or x_s.shape[-1] != 3:
         return None
@@ -431,7 +418,6 @@ def _direction_cosine_mean(a: np.ndarray, b: np.ndarray) -> float:
 
 def _mpl_joint_xyz_pca_flow_plot(zq: np.ndarray, zx: np.ndarray, title: str, cos_mean: float) -> np.ndarray:
     import io
-
     import matplotlib.pyplot as plt
     from PIL import Image
 
@@ -463,106 +449,22 @@ def _mpl_joint_xyz_pca_flow_plot(zq: np.ndarray, zx: np.ndarray, title: str, cos
     return np.asarray(Image.open(buf).convert("RGB"))
 
 
-def _log_rerun(
-    entity: str,
-    joints_ft0: np.ndarray,
-    R: np.ndarray,
-    t: np.ndarray,
-    K: np.ndarray,
-    step: int,
-    image: np.ndarray | None = None,
-    ros_to_opencv: bool = False,
-) -> None:
-    """Log joints in world space and camera pose to rerun for visual validation.
-
-    Joints are logged in world space; the camera frustum is placed using the
-    inverse of (R, t) so you can visually check alignment against the image.
-
-    Transform chain: robot/ROS frame --(ros_to_opencv)--> OpenCV world --(R,t)--> camera.
-    Set ros_to_opencv=True when k3ds are in ROS frame (X=fwd, Y=left, Z=up)
-    and the camera extrinsics assume OpenCV world convention (X=right, Y=down, Z=fwd).
-
-    Args:
-        entity: rerun entity prefix (e.g. "sweep_mano/text_conditioned")
-        joints_ft0: (ft, J, 3) joints in robot/world space
-        R: (3,3) world-to-camera rotation
-        t: (3,) world-to-camera translation
-        K: (3,3) camera intrinsics
-        step: training step for timeline
-        image: optional (H,W,3) uint8 image to log under the camera
-        ros_to_opencv: convert joints from ROS frame to OpenCV world frame
-            before applying extrinsics (needed when k3ds are in robot/ROS frame)
-    """
-    import rerun as rr
-
-    rr.set_time_sequence("train_step", step)
-
-    H = image.shape[0] if image is not None else int(K[1, 2] * 2)
-    W = image.shape[1] if image is not None else int(K[0, 2] * 2)
-    K_scaled = K.copy()
-    K_scaled[0] *= W / (K[0, 2] * 2)
-    K_scaled[1] *= H / (K[1, 2] * 2)
-
-    # World frame is OpenCV convention (after optional ros_to_opencv conversion)
-    rr.log(f"{entity}/world", rr.ViewCoordinates.RDF, static=True)
-
-    # Place camera in world using inverse extrinsics
-    cam_pos = (-R.T @ t).tolist()
-    rr.log(
-        f"{entity}/world/cam",
-        rr.Transform3D(translation=cam_pos, mat3x3=R.T.tolist()),
-        static=True,
-    )
-    rr.log(f"{entity}/world/cam", rr.Pinhole(image_from_camera=K_scaled, width=W, height=H), static=True)
-
-    if image is not None:
-        rr.log(f"{entity}/world/cam/image", rr.Image(image))
-
-    for k in range(joints_ft0.shape[0]):
-        rr.set_time_sequence("ft", k)
-        joints = joints_ft0[k]  # (J, 3) robot/world frame
-        if ros_to_opencv:
-            joints = joints @ _R_ROS2CV.T
-        # log in world space; camera pose above handles the view alignment
-        rr.log(f"{entity}/world/joints_3d", rr.Points3D(joints))
-
-
-def _draw_uv_on_image(image: np.ndarray, uv: np.ndarray, radius: int = 5) -> np.ndarray:
-    """Draw UV joint circles onto a copy of image. uv: (J, 2) in pixel coords."""
-    import cv2
-
-    out = image.copy()
-    for u, v in uv.astype(int):
-        cv2.circle(out, (u, v), radius, (255, 0, 0), -1)
-    return out
-
-
 @dataclass
 class FlowVisCallback(ValidationCallback):
-    """Projects joints_ft (B, ft, J, 3) to UV and logs wandb.Video per refinement step.
-
-    Set camera_view to auto-load extrinsics from ~/intrinsics/cam/{view}/HT.npz.
-    Set use_rerun=True to also log to a rerun viewer for projection debugging.
-    """
+    """Original callback + A/B/C module wiring with W&B logging."""
 
     fps: int = 10
     max_videos: int = 8
-    camera_view: str = "low"  # one of: low, over, side
+    camera_view: str = "low"
     camera_intrinsics: np.ndarray = field(default_factory=lambda: _DEFAULT_K.copy())
     camera_R: np.ndarray = field(default_factory=lambda: np.eye(3, dtype=np.float32))
     camera_t: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float32))
-    use_rerun: bool = False
-    rerun_spawn: bool = True  # spawn a viewer process; set False to only save to rerun_path
-    rerun_path: str | None = None  # save to .rrd file when set
-    ros_to_opencv: bool = False  # rotate joints from ROS frame to OpenCV before projecting
+
+    ros_to_opencv: bool = False
+
+    # existing features
     enable_denoise_plots: bool = False
-    # Try these keys in order to find a full denoise trajectory tensor.
-    denoise_pred_keys: tuple[str, ...] = (
-        "joints_flow_steps",
-        "flow_joints_steps",
-        "denoise_joints_steps",
-    )
-    # Used for optional l2-to-target curve.
+    denoise_pred_keys: tuple[str, ...] = ("joints_flow_steps", "flow_joints_steps", "denoise_joints_steps")
     denoise_target_keys: tuple[str, ...] = ("joints_ft", "joints_target_ft")
     show_denoise_plot_window: bool = False
     denoise_plot_window_wait_ms: int = 1
@@ -574,11 +476,17 @@ class FlowVisCallback(ValidationCallback):
     compute_fk_from_q_steps: bool = False
     q_pca_dims: int = 7
 
+    # new explicit A/B/C toggles
+    enable_part_a: bool = True
+    enable_part_b: bool = True
+    enable_part_c: bool = True
+    robot_pad_gripper: bool = True
+
     def __post_init__(self):
         super().__post_init__()
         self.camera_R, self.camera_t = load_camera_extrinsics(self.camera_view)
-        self._rerun_initialized = False
         self._fk_fn = None
+        self._robot = None
 
     def _get_fk_fn(self):
         if self._fk_fn is not None:
@@ -589,24 +497,20 @@ class FlowVisCallback(ValidationCallback):
         self._fk_fn = get_fwd_kin_fn(robot, pad_gripper=True)
         return self._fk_fn
 
-    def _init_rerun(self) -> None:
-        if self._rerun_initialized:
-            return
-        import rerun as rr
-
-        rr.init("flow_viz", spawn=self.rerun_spawn)
-        if self.rerun_path:
-            rr.save(self.rerun_path)
-        self._rerun_initialized = True
+    def _get_robot(self):
+        if self._robot is None:
+            self._robot = make_robot_from_urdf(
+                urdf_path=urdf,
+                mesh_dir=calibrate.urdf.robot.DNAME / "assets",
+            )
+        return self._robot
 
     def __call__(self, train_state, step: int) -> dict[str, Any]:
         if jax.process_index() != 0:
             return {}
 
-        if self.use_rerun:
-            self._init_rerun()
-
         out: dict[str, Any] = {}
+
         for ds_name, val_data_iter in self.val_iterators.items():
             uv_videos: list[wandb.Video] = []
             joints_videos: list[wandb.Video] = []
@@ -617,6 +521,10 @@ class FlowVisCallback(ValidationCallback):
             joint_xyz_pca_plots: list[wandb.Image] = []
             denoise_last_l2_to_target: list[float] = []
             joint_xyz_direction_cos: list[float] = []
+
+            xyz_overlay_videos: list[wandb.Video] = []
+            joint_fk_pca_images: list[wandb.Image] = []
+            robot_flow_videos: list[wandb.Video] = []
 
             for _ in range(self.num_val_batches):
                 batch = next(val_data_iter)
@@ -637,6 +545,7 @@ class FlowVisCallback(ValidationCallback):
                     pred_sftj3: np.ndarray | None = None
                     target_ftj3: np.ndarray | None = None
 
+                    # ---------- original logging ----------
                     joints_ft = vis.get("joints_ft")
                     if joints_ft is not None:
                         joints_ft0 = joints_ft[0]  # (ft, J, 3)
@@ -650,24 +559,11 @@ class FlowVisCallback(ValidationCallback):
                         uv_videos.append(wandb.Video(_frames_to_video(uv_frames), fps=self.fps))
                         joints_videos.append(wandb.Video(_make_3d_video(joints_ft0, f"{pfx} joints"), fps=self.fps))
 
-                        if self.use_rerun:
-                            img0 = imgs[0] if imgs.ndim == 4 else None
-                            _log_rerun(
-                                entity=pfx,
-                                joints_ft0=joints_ft0,
-                                R=R,
-                                t=t,
-                                K=K,
-                                step=step,
-                                image=img0,
-                                ros_to_opencv=self.ros_to_opencv,
-                            )
-
                     xyz_ft = vis.get("xyz_ft")
                     if xyz_ft is not None:
-                        xyz_ft0 = xyz_ft[0]  # (ft, N, 3) or (ft, 3)
+                        xyz_ft0 = xyz_ft[0]
                         if xyz_ft0.ndim == 2:
-                            xyz_ft0 = xyz_ft0[:, None, :]  # (ft, 1, 3)
+                            xyz_ft0 = xyz_ft0[:, None, :]
                         xyz_videos.append(wandb.Video(_make_3d_video(xyz_ft0, f"{pfx} xyz"), fps=self.fps))
 
                     if self.enable_denoise_plots:
@@ -680,12 +576,7 @@ class FlowVisCallback(ValidationCallback):
                             if pred_sftj3 is not None:
                                 curves = _compute_denoise_curves(pred_sftj3, target_ftj3)
                                 plot_rgb = _mpl_denoise_curve_plot(curves, f"{pfx} denoise ({pred_key})")
-                                denoise_plots.append(
-                                    wandb.Image(
-                                        plot_rgb,
-                                        caption=f"{pfx} denoise",
-                                    )
-                                )
+                                denoise_plots.append(wandb.Image(plot_rgb, caption=f"{pfx} denoise"))
                                 denoise_points_videos.append(
                                     wandb.Video(
                                         _make_denoise_3d_video(
@@ -704,7 +595,7 @@ class FlowVisCallback(ValidationCallback):
                                             wait_ms=self.denoise_plot_window_wait_ms,
                                         )
                                     except RuntimeError as exc:
-                                        warnings.warn(f"{exc} Disabling denoise plot popout for this run.", stacklevel=2)
+                                        warnings.warn(f"{exc} Disabling denoise popout.", stacklevel=2)
                                         self.show_denoise_plot_window = False
                                 if "l2_to_target" in curves:
                                     denoise_last_l2_to_target.append(float(curves["l2_to_target"][-1]))
@@ -721,11 +612,7 @@ class FlowVisCallback(ValidationCallback):
                             elif imgs.ndim == 4:
                                 img_for_overlay = imgs[0]
                             else:
-                                img_for_overlay = np.full(
-                                    (int(K[1, 2] * 2), int(K[0, 2] * 2), 3),
-                                    255,
-                                    dtype=np.uint8,
-                                )
+                                img_for_overlay = np.full((int(K[1, 2] * 2), int(K[0, 2] * 2), 3), 255, dtype=np.uint8)
                             xyz_image_flow_videos.append(
                                 wandb.Video(
                                     _make_xyz_image_overlay_video(
@@ -759,11 +646,7 @@ class FlowVisCallback(ValidationCallback):
                             xyz_key = "fk(q_flow_steps)"
 
                         if q_sfd is not None and xyz_sftj3 is not None:
-                            ft_idx = min(
-                                self.flow_overlay_ft_index,
-                                q_sfd.shape[1] - 1,
-                                xyz_sftj3.shape[1] - 1,
-                            )
+                            ft_idx = min(self.flow_overlay_ft_index, q_sfd.shape[1] - 1, xyz_sftj3.shape[1] - 1)
                             q_sd = q_sfd[:, ft_idx, : self.q_pca_dims]
                             x_sd = xyz_sftj3[:, ft_idx].reshape(xyz_sftj3.shape[0], -1)
                             zq = _pca_2d(q_sd)
@@ -783,6 +666,101 @@ class FlowVisCallback(ValidationCallback):
                             if np.isfinite(cos_mean):
                                 joint_xyz_direction_cos.append(cos_mean)
 
+                    # ---------- NEW A/B/C logging ----------
+                    q_steps, _ = _first_vis_array(vis, self.flow_q_keys)
+                    q_sfd = _normalize_q_flow_steps(q_steps) if q_steps is not None else None
+
+                    xyz_steps, xyz_key = _first_vis_array(vis, self.flow_xyz_keys)
+                    xyz_sftj3 = _normalize_xyz_flow_steps(xyz_steps) if xyz_steps is not None else None
+
+                    if xyz_sftj3 is None and q_sfd is not None and self.compute_fk_from_q_steps:
+                        fk = self._get_fk_fn()
+                        q_for_fk = q_sfd[..., : self.q_pca_dims]
+                        xyz_sft3 = np.asarray(fk(q_for_fk))
+                        xyz_sftj3 = xyz_sft3[:, :, None, :]
+                        xyz_key = "fk(q_flow_steps)"
+
+                    # xyz overlay
+                    if self.enable_part_a and xyz_sftj3 is not None:
+                        if imgs.ndim == 5:
+                            img_for_overlay = imgs[0, min(self.flow_overlay_ft_index, imgs.shape[1] - 1)]
+                        elif imgs.ndim == 4:
+                            img_for_overlay = imgs[0]
+                        else:
+                            img_for_overlay = np.full((int(K[1, 2] * 2), int(K[0, 2] * 2), 3), 255, dtype=np.uint8)
+
+                        ft_idx = min(self.flow_overlay_ft_index, xyz_sftj3.shape[1] - 1)
+                        xyz_sj3 = xyz_sftj3[:, ft_idx]  # (S,J,3)
+
+                        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f_mp4, tempfile.NamedTemporaryFile(
+                            suffix=".png", delete=False
+                        ) as f_png:
+                            out_mp4 = Path(f_mp4.name)
+                            out_png = Path(f_png.name)
+                        try:
+                            render_xyz_overlay_video(
+                                image=img_for_overlay,
+                                xyz_steps=xyz_sj3,
+                                out_mp4=out_mp4,
+                                out_png=out_png,
+                                K=K,
+                                R=R,
+                                t=t,
+                                fps=self.fps,
+                            )
+                            xyz_overlay_videos.append(wandb.Video(str(out_mp4), fps=self.fps, format="mp4"))
+                        except Exception as exc:
+                            warnings.warn(f"[{pfx}] xyz overlay failed: {exc}", stacklevel=2)
+
+                    # joint_fk_pca
+                    if self.enable_part_b and q_sfd is not None and xyz_sftj3 is not None:
+                        ft_idx = min(self.flow_overlay_ft_index, q_sfd.shape[1] - 1, xyz_sftj3.shape[1] - 1)
+                        q_sd = q_sfd[:, ft_idx, : self.q_pca_dims]
+                        x_sd = xyz_sftj3[:, ft_idx].reshape(xyz_sftj3.shape[0], -1)
+
+                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f_png, tempfile.NamedTemporaryFile(
+                            suffix=".mp4", delete=False
+                        ) as f_mp4:
+                            out_png = Path(f_png.name)
+                            out_mp4 = Path(f_mp4.name)
+                        try:
+                            _plot_two_panel_video(
+                                q_flow=_ensure_snd(q_sd, "q_flow"),
+                                x_flow=_ensure_snd(x_sd, "x_flow"),
+                                out_png=out_png,
+                                out_mp4=out_mp4,
+                                fps=self.fps,
+                            )
+                            joint_fk_pca_images.append(
+                                wandb.Image(str(out_png), caption=f"{pfx} joint_fk_pca (xyz={xyz_key or 'n/a'})")
+                            )
+                        except Exception as exc:
+                            warnings.warn(f"[{pfx}] joint_fk_pca failed: {exc}", stacklevel=2)
+
+                    # robot_flow
+                    if self.enable_part_c and q_sfd is not None:
+                        ft_idx = min(self.flow_overlay_ft_index, q_sfd.shape[1] - 1)
+                        q_sd = q_sfd[:, ft_idx, :]
+
+                        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f_mp4, tempfile.NamedTemporaryFile(
+                            suffix=".png", delete=False
+                        ) as f_png:
+                            out_mp4 = Path(f_mp4.name)
+                            out_png = Path(f_png.name)
+                        try:
+                            robot = self._get_robot()
+                            render_robot_q_flow_video(
+                                robot=robot,
+                                q_steps=q_sd,
+                                out_mp4=out_mp4,
+                                out_png=out_png,
+                                fps=self.fps,
+                                pad_gripper=self.robot_pad_gripper,
+                            )
+                            robot_flow_videos.append(wandb.Video(str(out_mp4), fps=self.fps, format="mp4"))
+                        except Exception as exc:
+                            warnings.warn(f"[{pfx}] robot_flow failed: {exc}", stacklevel=2)
+
                 n = max(
                     len(uv_videos),
                     len(joints_videos),
@@ -791,10 +769,14 @@ class FlowVisCallback(ValidationCallback):
                     len(denoise_points_videos),
                     len(xyz_image_flow_videos),
                     len(joint_xyz_pca_plots),
+                    len(xyz_overlay_videos),
+                    len(joint_fk_pca_images),
+                    len(robot_flow_videos),
                 )
                 if n >= self.max_videos:
                     break
 
+            # existing keys
             out[f"flow_vis/{ds_name}/uv"] = uv_videos[: self.max_videos]
             out[f"flow_vis/{ds_name}/joints_3d"] = joints_videos[: self.max_videos]
             out[f"flow_vis/{ds_name}/xyz_3d"] = xyz_videos[: self.max_videos]
@@ -802,14 +784,19 @@ class FlowVisCallback(ValidationCallback):
                 out[f"flow_vis/{ds_name}/denoise_plots"] = denoise_plots[: self.max_videos]
                 out[f"flow_vis/{ds_name}/denoise_points_3d"] = denoise_points_videos[: self.max_videos]
                 if denoise_last_l2_to_target:
-                    out[f"flow_vis/{ds_name}/denoise_last_l2_to_target"] = float(
-                        np.mean(denoise_last_l2_to_target)
-                    )
+                    out[f"flow_vis/{ds_name}/denoise_last_l2_to_target"] = float(np.mean(denoise_last_l2_to_target))
             if self.enable_xyz_image_flow:
                 out[f"flow_vis/{ds_name}/xyz_image_flow"] = xyz_image_flow_videos[: self.max_videos]
             if self.enable_joint_xyz_pca_flow:
                 out[f"flow_vis/{ds_name}/joint_xyz_pca_flow"] = joint_xyz_pca_plots[: self.max_videos]
                 if joint_xyz_direction_cos:
                     out[f"flow_vis/{ds_name}/joint_xyz_direction_cosine"] = float(np.mean(joint_xyz_direction_cos))
+
+            if self.enable_part_a:
+                out[f"flow_vis/{ds_name}/xyz_overlay"] = xyz_overlay_videos[: self.max_videos]
+            if self.enable_part_b:
+                out[f"flow_vis/{ds_name}/joint_fk_pca"] = joint_fk_pca_images[: self.max_videos]
+            if self.enable_part_c:
+                out[f"flow_vis/{ds_name}/robot_flow"] = robot_flow_videos[: self.max_videos]
 
         return out

@@ -1,331 +1,206 @@
 from __future__ import annotations
 
-import matplotlib
-
-matplotlib.use("Agg")
-
-import argparse
+from importlib.util import find_spec
 from pathlib import Path
-from typing import Any, Tuple
 
-import numpy as np
+import imageio.v2 as imageio
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation, FFMpegWriter
-from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
-
-import jax
-import jax.numpy as jnp
-import jaxlie
-import pyroki as pk
+import numpy as np
 import yourdfpy
-from xgym import calibrate
-from xgym.calibrate.urdf.robot import urdf
-
-from crossformer.data.grain.datasets import _DecodedArrayRecord
-
-
-# -------------------------
-# utilities
-# -------------------------
-def _get_by_path(obj: dict, path: str):
-    cur = obj
-    for key in path.split("."):
-        if not isinstance(cur, dict) or key not in cur:
-            return None
-        cur = cur[key]
-    return cur
-
-
-def _fit_pca_2d(x: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    x: [M, D]
-    returns:
-      z2: [M, 2]
-      evr: [2] explained variance ratio
-    """
-    x = np.asarray(x, dtype=np.float32)
-    xz = StandardScaler().fit_transform(x)
-    pca = PCA(n_components=2)
-    z2 = pca.fit_transform(xz)
-    return z2, pca.explained_variance_ratio_
 
 
 def _ensure_snd(x: np.ndarray, name: str) -> np.ndarray:
     """
-    Normalize to [S, N, D]
-      [S, D] -> [S, 1, D]
+    Normalize to [S, N, D].
+      [S, D]    -> [S, 1, D]
       [S, N, D] -> as-is
     """
     x = np.asarray(x, dtype=np.float32)
     if x.ndim == 2:
-        x = x[:, None, :]
-    elif x.ndim != 3:
-        raise ValueError(f"{name} must be [S,D] or [S,N,D], got {x.shape}")
-    return x
+        return x[:, None, :]
+    if x.ndim == 3:
+        return x
+    raise ValueError(f"{name} must be [S,D] or [S,N,D], got {x.shape}")
 
 
-def _flatten_k3ds_xyz(k3ds: np.ndarray) -> np.ndarray:
-    """
-    k3ds:
-      [S, J, 4] -> [S, J*3]
-      [S, N, J, 4] -> [S, N, J*3]
-      [S, J, 3] -> [S, J*3]
-      [S, N, J, 3] -> [S, N, J*3]
-    """
-    k = np.asarray(k3ds, dtype=np.float32)
-    if k.ndim == 3 and k.shape[-1] in (3, 4):
-        return k[..., :3].reshape(k.shape[0], -1)
-    if k.ndim == 4 and k.shape[-1] in (3, 4):
-        return k[..., :3].reshape(k.shape[0], k.shape[1], -1)
-    raise ValueError(f"Unsupported k3ds shape {k.shape}")
+def _rotvec_from_matrix(r: np.ndarray) -> np.ndarray:
+    tr = np.trace(r)
+    c = np.clip((tr - 1.0) * 0.5, -1.0, 1.0)
+    theta = float(np.arccos(c))
+    if theta < 1e-8:
+        return np.zeros(3, dtype=np.float32)
 
-
-# -------------------------
-# robot FK
-# -------------------------
-def make_robot() -> pk.Robot:
-    urdf_model = yourdfpy.URDF.load(
-        urdf, mesh_dir=calibrate.urdf.robot.DNAME / "assets"
+    v = np.array(
+        [
+            r[2, 1] - r[1, 2],
+            r[0, 2] - r[2, 0],
+            r[1, 0] - r[0, 1],
+        ],
+        dtype=np.float64,
     )
-    return pk.Robot.from_urdf(urdf_model)
+    s = np.linalg.norm(v)
+    if s < 1e-8:
+        w, vecs = np.linalg.eigh(r)
+        axis = vecs[:, np.argmax(w)]
+    else:
+        axis = v / s
+    return (theta * axis).astype(np.float32)
 
 
-def get_fk_fn_all_links(robot: pk.Robot, pad_gripper: bool = True):
-    """
-    Input q:
-      [S, Dq] or [S, N, Dq]
-    Output:
-      [S, L*3] or [S, N, L*3]
-    where L = number of robot links.
-    """
-    def fk_fn(q: jax.Array) -> jax.Array:
-        pads = [(0, 0)] * (q.ndim - 1) + [(0, 1)]  # add gripper dim if needed
-        q_pad = jnp.pad(q, pads, constant_values=0.0) if pad_gripper else q
-        t = jaxlie.SE3(robot.forward_kinematics(q_pad)).translation()  # [..., L, 3]
-        return t.reshape(*t.shape[:-2], -1)  # [..., L*3]
+def _urdf_paths() -> tuple[Path, Path]:
+    spec = find_spec("xgym")
+    if spec is None or spec.origin is None:
+        raise RuntimeError("xgym is required for FK PCA visualization")
+    root = Path(spec.origin).resolve().parent
+    urdf_dir = root / "calibrate" / "urdf"
+    return urdf_dir / "xarm7_standalone.urdf", urdf_dir / "assets"
+
+
+def _make_fk_fn():
+    urdf_path, mesh_dir = _urdf_paths()
+    robot = yourdfpy.URDF.load(urdf_path, mesh_dir=mesh_dir)
+
+    def fk_fn(q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """
+        q: [N,7]
+        returns:
+          xyz: [N,3]
+          rotvec: [N,3]
+        """
+        q = np.asarray(q, dtype=np.float64)
+        if q.shape[-1] < 7:
+            raise ValueError(f"Expected q dim >=7, got {q.shape}")
+        q7 = q[:, :7]
+        q8 = np.pad(q7, ((0, 0), (0, 1)))  # add gripper dummy
+        xyz = np.empty((q8.shape[0], 3), dtype=np.float32)
+        rot = np.empty((q8.shape[0], 3), dtype=np.float32)
+        for i, qi in enumerate(q8):
+            robot.update_cfg(qi)
+            tf = robot.get_transform("link_eef")
+            xyz[i] = tf[:3, 3]
+            rot[i] = _rotvec_from_matrix(tf[:3, :3])
+        return xyz, rot
 
     return fk_fn
 
 
-# -------------------------
-# plotting / animation
-# -------------------------
-def _axis_limits(z2: np.ndarray, pad=0.10):
-    mn, mx = z2.min(0), z2.max(0)
-    d = np.maximum(mx - mn, 1e-6)
-    return (
-        mn[0] - pad * d[0],
-        mx[0] + pad * d[0],
-        mn[1] - pad * d[1],
-        mx[1] + pad * d[1],
-    )
+def _fit_pca(*xs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    x = np.concatenate(xs, axis=0)
+    mean = x.mean(axis=0, keepdims=True)
+    x0 = x - mean
+    _, _, vh = np.linalg.svd(x0, full_matrices=False)
+    basis = vh[:2].T
+    return mean.astype(np.float32), basis.astype(np.float32)
+
+
+def _project_pca(x: np.ndarray, mean: np.ndarray, basis: np.ndarray) -> np.ndarray:
+    return (x - mean) @ basis
+
+
+def _frame_image(fig: plt.Figure) -> np.ndarray:
+    canvas = FigureCanvasAgg(fig)
+    canvas.draw()
+    w, h = canvas.get_width_height()
+    buf = np.frombuffer(canvas.buffer_rgba(), dtype=np.uint8)
+    return buf.reshape(h, w, 4)[..., :3].copy()
+
+
+def _plot_panel(ax: plt.Axes, z: np.ndarray, t_text: str, lim: float, color: str, title: str):
+    ax.scatter(z[:, 0], z[:, 1], s=12, alpha=0.35, linewidths=0.0, color=color)
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(-lim, lim)
+    ax.set_xlabel("pc 1")
+    ax.set_ylabel("pc 2")
+    ax.set_title(f"{title}   {t_text}")
+    ax.grid(alpha=0.2)
+    ax.set_aspect("equal", adjustable="box")
+
+
+def _safe_lim(z0: np.ndarray, z1: np.ndarray) -> float:
+    v = np.abs(np.concatenate([z0, z1], axis=0)).max()
+    return float(max(1e-3, 1.05 * v))
 
 
 def _plot_two_panel_video(
-    q_flow: np.ndarray,      # [S,N,Dq] (N may be 1)
-    x_flow: np.ndarray,      # [S,N,Dx] (N may be 1)
-    out_png: Path,
-    out_mp4: Path,
+    q_flow: np.ndarray,            # [S,D] or [S,N,D]
+    x_flow: np.ndarray | None,     # ignored (kept for callback compatibility)
+    out_png: str | Path,
+    out_mp4: str | Path,
     fps: int = 8,
 ):
-    S, N, Dq = q_flow.shape
-    S2, N2, Dx = x_flow.shape
-    if (S, N) != (S2, N2):
-        raise ValueError(f"shape mismatch q={q_flow.shape}, x={x_flow.shape}")
+    """
+    Compatibility entrypoint used by callback.
+    Now produces 4 panels:
+      1) Joint PCA
+      2) FK XYZ PCA
+      3) FK Rot PCA
+      4) FK Pose PCA (xyz+rot)
+    """
+    del x_flow  # no longer needed; computed from q via FK
 
-    # PCA fit across all step+sample points so axes are fixed over time
-    q_all = q_flow.reshape(S * N, Dq)
-    x_all = x_flow.reshape(S * N, Dx)
+    q_snd = _ensure_snd(q_flow, "q_flow")  # [S,N,D]
+    S, N, D = q_snd.shape
+    if D < 7:
+        raise ValueError(f"Need q dim >= 7, got {q_snd.shape}")
 
-    q2_all, q_evr = _fit_pca_2d(q_all)  # [S*N,2]
-    x2_all, x_evr = _fit_pca_2d(x_all)
+    fk_fn = _make_fk_fn()
 
-    q2 = q2_all.reshape(S, N, 2)
-    x2 = x2_all.reshape(S, N, 2)
+    # Endpoints to define stable PCA bases/limits
+    q0 = q_snd[0][:, :7]      # [N,7]
+    q1 = q_snd[-1][:, :7]     # [N,7]
+    x0, r0 = fk_fn(q0)        # [N,3], [N,3]
+    x1, r1 = fk_fn(q1)
+    p0 = np.concatenate([x0, r0], axis=1)  # [N,6]
+    p1 = np.concatenate([x1, r1], axis=1)
 
-    qlim = _axis_limits(q2_all)
-    xlim = _axis_limits(x2_all)
+    q_mean, q_basis = _fit_pca(q0, q1)
+    x_mean, x_basis = _fit_pca(x0, x1)
+    r_mean, r_basis = _fit_pca(r0, r1)
+    p_mean, p_basis = _fit_pca(p0, p1)
 
-    fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(10, 4), dpi=130)
-    for ax in (ax0, ax1):
-        ax.grid(True, alpha=0.25)
-        ax.set_xlabel("PC1")
-        ax.set_ylabel("PC2")
+    q_lim = _safe_lim(_project_pca(q0, q_mean, q_basis), _project_pca(q1, q_mean, q_basis))
+    x_lim = _safe_lim(_project_pca(x0, x_mean, x_basis), _project_pca(x1, x_mean, x_basis))
+    r_lim = _safe_lim(_project_pca(r0, r_mean, r_basis), _project_pca(r1, r_mean, r_basis))
+    p_lim = _safe_lim(_project_pca(p0, p_mean, p_basis), _project_pca(p1, p_mean, p_basis))
 
-    ax0.set_title(f"Joint PCA  EVR=({q_evr[0]:.2f},{q_evr[1]:.2f})")
-    ax1.set_title(f"FK XYZ PCA EVR=({x_evr[0]:.2f},{x_evr[1]:.2f})")
+    out_png = Path(out_png)
+    out_mp4 = Path(out_mp4)
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    out_mp4.parent.mkdir(parents=True, exist_ok=True)
 
-    ax0.set_xlim(qlim[0], qlim[1]); ax0.set_ylim(qlim[2], qlim[3])
-    ax1.set_xlim(xlim[0], xlim[1]); ax1.set_ylim(xlim[2], xlim[3])
+    fig, axs = plt.subplots(1, 4, figsize=(20, 5), dpi=128)
+    frames: list[np.ndarray] = []
 
-    # artists
-    # cloud points (current step)
-    q_sc = ax0.scatter([], [], c="blue", s=20, alpha=0.25)
-    x_sc = ax1.scatter([], [], c="red", s=20, alpha=0.25)
-    # centroid
-    q_ctr = ax0.scatter([], [], c="navy", s=65, marker="x")
-    x_ctr = ax1.scatter([], [], c="darkred", s=65, marker="x")
-    # trajectory of centroids across steps
-    q_line, = ax0.plot([], [], color="blue", lw=1.6, alpha=0.85)
-    x_line, = ax1.plot([], [], color="red", lw=1.6, alpha=0.85)
+    for s in range(S):
+        for ax in axs:
+            ax.clear()
 
-    title = fig.suptitle("")
+        q_t = q_snd[s][:, :7]       # [N,7]
+        x_t, r_t = fk_fn(q_t)       # [N,3], [N,3]
+        p_t = np.concatenate([x_t, r_t], axis=1)
 
-    def update(k: int):
-        qk = q2[k]  # [N,2]
-        xk = x2[k]  # [N,2]
+        t_text = f"step={s+1}/{S} (N={N})"
 
-        q_sc.set_offsets(qk)
-        x_sc.set_offsets(xk)
+        _plot_panel(axs[0], _project_pca(q_t, q_mean, q_basis), t_text, q_lim, "blue", "Joint PCA")
+        _plot_panel(axs[1], _project_pca(x_t, x_mean, x_basis), t_text, x_lim, "red", "FK XYZ PCA")
+        _plot_panel(axs[2], _project_pca(r_t, r_mean, r_basis), t_text, r_lim, "green", "FK Rot PCA")
+        _plot_panel(axs[3], _project_pca(p_t, p_mean, p_basis), t_text, p_lim, "purple", "FK Pose PCA")
 
-        qmu = qk.mean(0)
-        xmu = xk.mean(0)
-        q_ctr.set_offsets(qmu[None, :])
-        x_ctr.set_offsets(xmu[None, :])
+        fig.tight_layout()
+        frame = _frame_image(fig)
+        frames.append(frame)
 
-        q_hist = q2[: k + 1].mean(1)  # [k+1,2]
-        x_hist = x2[: k + 1].mean(1)
-        q_line.set_data(q_hist[:, 0], q_hist[:, 1])
-        x_line.set_data(x_hist[:, 0], x_hist[:, 1])
-
-        mode = "cloud" if N > 1 else "trajectory"
-        title.set_text(f"{mode} step {k + 1}/{S}  (N={N})")
-        return q_sc, x_sc, q_ctr, x_ctr, q_line, x_line, title
-
-    update(0)
-    fig.tight_layout()
-    fig.savefig(out_png, bbox_inches="tight")
-    print(f"[ok] wrote {out_png}")
-
-    anim = FuncAnimation(fig, update, frames=S, interval=1000 / fps, blit=False)
-    anim.save(out_mp4, writer=FFMpegWriter(fps=fps, bitrate=2400))
     plt.close(fig)
-    print(f"[ok] wrote {out_mp4}")
 
-    # simple numeric diagnostics
-    q_spread = np.linalg.norm(q2 - q2.mean(axis=1, keepdims=True), axis=-1).mean(axis=1)  # [S]
-    x_spread = np.linalg.norm(x2 - x2.mean(axis=1, keepdims=True), axis=-1).mean(axis=1)  # [S]
-    print("[diag] joint spread first/last:", float(q_spread[0]), float(q_spread[-1]))
-    print("[diag] fk    spread first/last:", float(x_spread[0]), float(x_spread[-1]))
+    imageio.imwrite(out_png, frames[0])
+    with imageio.get_writer(out_mp4, fps=fps, codec="libx264") as writer:
+        for fr in frames:
+            writer.append_data(fr)
 
-
-# -------------------------
-# data loading
-# -------------------------
-def _load_q_from_record(step: dict, q_path: str, ft_index: int) -> np.ndarray:
-    """
-    q_path examples:
-      action.q          -> [S,7] or [S,ft,7]
-      observation.q     -> [S,7] etc
-      action.k3ds       -> [S,J,4] or [S,N,J,4] (xyz flattened)
-    Returns:
-      q_flow [S,D] or [S,N,D]
-    """
-    q_raw = _get_by_path(step, q_path)
-    if q_raw is None:
-        raise KeyError(f"Missing `{q_path}` in record.")
-
-    q = np.asarray(q_raw, dtype=np.float32)
-
-    # If path points to k3ds, use xyz flattened as joint representation.
-    if q.ndim in (3, 4) and q.shape[-1] in (3, 4):
-        return _flatten_k3ds_xyz(q)
-
-    # Otherwise assume q angles
-    if q.ndim == 2:          # [S,D]
-        return q
-    if q.ndim == 3:          # [S,ft,D] or [S,N,D]
-        # if middle dim small and user gave ft index, treat as future-time dim
-        if q.shape[1] > ft_index and q.shape[1] <= 64:
-            return q[:, ft_index, :]
-        return q
-
-    raise ValueError(f"Unsupported q shape {q.shape} from path {q_path}")
-
-
-def _load_q_from_npy(q_npy: Path, key: str, ft_index: int) -> np.ndarray:
-    p = q_npy.expanduser().resolve()
-    arr = np.load(p)[key] if p.suffix == ".npz" else np.load(p)
-    arr = np.asarray(arr, dtype=np.float32)
-
-    if arr.ndim in (3, 4) and arr.shape[-1] in (3, 4):
-        return _flatten_k3ds_xyz(arr)
-    if arr.ndim == 2:
-        return arr
-    if arr.ndim == 3:
-        if arr.shape[1] > ft_index and arr.shape[1] <= 64:
-            return arr[:, ft_index, :]
-        return arr
-
-    raise ValueError(f"Unsupported q_npy shape {arr.shape}")
-
-
-# -------------------------
-# main
-# -------------------------
-def main():
-    parser = argparse.ArgumentParser(
-        description="Two-panel PCA convergence video: Joint (left) vs FK XYZ (right), supports trajectory and cloud."
-    )
-    parser.add_argument("--data-dir", type=Path, default=Path("~/crossformer_data").expanduser())
-    parser.add_argument("--record-idx", type=int, default=0)
-
-    parser.add_argument(
-        "--q-path",
-        type=str,
-        default="action.q",
-        help="Path for joint flow in record. Can be q (angles) or k3ds.",
-    )
-    parser.add_argument("--q-npy", type=Path, default=None, help="Optional .npy/.npz for q flow (overrides --q-path).")
-    parser.add_argument("--q-npy-key", type=str, default="q_flow_steps")
-    parser.add_argument("--ft-index", type=int, default=0)
-
-    parser.add_argument("--pad-gripper", action="store_true", default=True)
-    parser.add_argument("--fps", type=int, default=8)
-    parser.add_argument("--out-dir", type=Path, default=Path("~/repos/crossformer/tests/out").expanduser())
-    args = parser.parse_args()
-
-    shards = sorted(args.data_dir.glob("**/*.arrayrecord"))
-    records = _DecodedArrayRecord(shards)
-    print(f"[info] records={len(records)} shards={len(shards)}")
-    if len(records) == 0:
-        raise RuntimeError("No records found.")
-    step = records[args.record_idx]
-
-    if args.q_npy is not None:
-        q_flow = _load_q_from_npy(args.q_npy, args.q_npy_key, args.ft_index)
-        print(f"[info] loaded q from npy: {args.q_npy}")
-    else:
-        q_flow = _load_q_from_record(step, args.q_path, args.ft_index)
-        print(f"[info] loaded q from record path: {args.q_path}")
-
-    q_flow = _ensure_snd(q_flow, "q_flow")   # [S,N,Dq]
-    S, N, Dq = q_flow.shape
-    print(f"[info] q_flow shape={q_flow.shape}")
-
-    # FK from q
-    robot = make_robot()
-    fk_fn = get_fk_fn_all_links(robot, pad_gripper=args.pad_gripper)
-
-    q_jax = jnp.asarray(q_flow)
-    x_flow = np.asarray(fk_fn(q_jax), dtype=np.float32)  # [S,N,Dx] or [S,Dx]
-    x_flow = _ensure_snd(x_flow, "x_flow")
-    print(f"[info] x_flow shape={x_flow.shape}")
-
-    out_dir = args.out_dir.expanduser().resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_png = out_dir / "pca_convergence_step0.png"
-    out_mp4 = out_dir / "pca_convergence.mp4"
-
-    _plot_two_panel_video(
-        q_flow=q_flow,
-        x_flow=x_flow,
-        out_png=out_png,
-        out_mp4=out_mp4,
-        fps=args.fps,
-    )
-
-
-if __name__ == "__main__":
-    main()
+    return {
+        "out_png": str(out_png),
+        "out_mp4": str(out_mp4),
+        "num_steps": S,
+        "num_points": N,
+    }

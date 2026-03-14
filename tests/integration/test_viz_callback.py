@@ -15,7 +15,7 @@ from crossformer.utils.callbacks.flow_viz import (
     load_camera_extrinsics,
 )
 
-shards = sorted(Path("~/data/arrayrecords/sweep_mano/0.0.2/to_step").expanduser().glob("*.arrayrecord"))
+shards = sorted(Path("~/crossformer_data/").expanduser().glob("*.arrayrecord"))
 records = _DecodedArrayRecord(shards)
 
 START = 40  # change this to pick frames where hand is visiblek
@@ -56,7 +56,7 @@ cb.camera_R = R
 cb.camera_t = t
 cb.use_rerun = True
 cb.rerun_spawn = False
-cb.rerun_path = "/data/home/nhogg/flow_viz.rrd"
+cb.rerun_path = "/home/nh/flow_viz.rrd"
 cb.ros_to_opencv = True  # k3ds are in ROS frame; extrinsics assume OpenCV world convention
 cb._rerun_initialized = False
 cb.val_iterators = {"sweep_mano": dummy_iter()}

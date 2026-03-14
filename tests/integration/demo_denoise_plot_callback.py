@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import shutil
 
 import imageio
 import numpy as np
@@ -42,6 +43,17 @@ def _make_eval_step(seed: int, batch_size: int, flow_steps: int, future_steps: i
     return _eval_step
 
 
+def _save_wandb_video_artifact(wb_vid, out_path: Path, fps: int) -> None:
+    if hasattr(wb_vid, "data"):
+        frames = wb_vid.data.transpose(0, 2, 3, 1)
+        imageio.mimwrite(out_path, frames, fps=fps)
+        return
+    src = getattr(wb_vid, "_path", None)
+    if src is None:
+        raise ValueError("Unsupported wandb.Video object; no .data or ._path")
+    shutil.copyfile(src, out_path)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Demo denoise plots from FlowVisCallback.")
     parser.add_argument("--wait-ms", type=int, default=1, help="OpenCV wait per refresh in ms.")
@@ -74,15 +86,20 @@ def main() -> None:
     cb.rerun_path = None
     cb.ros_to_opencv = False
     cb.enable_denoise_plots = True
-    cb.enable_xyz_image_flow = True
-    cb.enable_joint_xyz_pca_flow = True
+    cb.enable_xyz_image_flow = False
+    cb.enable_joint_xyz_pca_flow = False
     cb.show_denoise_plot_window = True
     cb.denoise_plot_window_wait_ms = args.wait_ms
     cb.denoise_pred_keys = ("joints_flow_steps",)
     cb.denoise_target_keys = ("joints_target_ft",)
     cb.flow_q_keys = ("q_flow_steps",)
     cb.flow_xyz_keys = ("fk_xyz_flow_steps", "joints_flow_steps")
+    cb.enable_part_a = True
+    cb.enable_part_b = True
+    cb.enable_part_c = True
     cb._rerun_initialized = False
+    cb._fk_fn = None
+    cb._robot = None
     cb.val_iterators = {"dummy": _dummy_iter()}
     cb.eval_step = _make_eval_step(
         seed=args.seed,
@@ -109,22 +126,26 @@ def main() -> None:
     saved_vid = 0
     for idx, wb_vid in enumerate(out.get(points_key, [])):
         gif_path = out_dir / f"denoise_points_3d_{idx:03d}.gif"
-        frames = wb_vid.data.transpose(0, 2, 3, 1)
-        imageio.mimwrite(gif_path, frames, fps=args.fps)
+        _save_wandb_video_artifact(wb_vid, gif_path, fps=args.fps)
         saved_vid += 1
-    overlay_key = "flow_vis/dummy/xyz_image_flow"
+    overlay_key = "flow_vis/dummy/xyz_overlay"
     saved_overlay = 0
     for idx, wb_vid in enumerate(out.get(overlay_key, [])):
-        gif_path = out_dir / f"xyz_image_flow_{idx:03d}.gif"
-        frames = wb_vid.data.transpose(0, 2, 3, 1)
-        imageio.mimwrite(gif_path, frames, fps=args.fps)
+        mp4_path = out_dir / f"xyz_overlay_{idx:03d}.mp4"
+        _save_wandb_video_artifact(wb_vid, mp4_path, fps=args.fps)
         saved_overlay += 1
-    pca_key = "flow_vis/dummy/joint_xyz_pca_flow"
+    pca_key = "flow_vis/dummy/joint_fk_pca"
     saved_pca = 0
     for idx, wb_img in enumerate(out.get(pca_key, [])):
-        png_path = out_dir / f"joint_xyz_pca_flow_{idx:03d}.png"
+        png_path = out_dir / f"joint_fk_pca_{idx:03d}.png"
         wb_img.image.save(png_path)
         saved_pca += 1
+    robot_key = "flow_vis/dummy/robot_flow"
+    saved_robot = 0
+    for idx, wb_vid in enumerate(out.get(robot_key, [])):
+        mp4_path = out_dir / f"robot_flow_{idx:03d}.mp4"
+        _save_wandb_video_artifact(wb_vid, mp4_path, fps=args.fps)
+        saved_robot += 1
     if scalar_key in out:
         (out_dir / "denoise_metrics.txt").write_text(
             f"{scalar_key}={out[scalar_key]:.6f}\n",
@@ -132,7 +153,8 @@ def main() -> None:
         )
     print(
         f"Saved denoise plots={saved}, denoise_3d_gifs={saved_vid}, "
-        f"xyz_overlay_gifs={saved_overlay}, joint_xyz_pca_plots={saved_pca} to: {out_dir}"
+        f"xyz_overlay_gifs={saved_overlay}, joint_fk_pca_plots={saved_pca}, "
+        f"robot_flow_gifs={saved_robot} to: {out_dir}"
     )
 
     if cb.show_denoise_plot_window:
