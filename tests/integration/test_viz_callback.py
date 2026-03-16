@@ -66,8 +66,10 @@ out = cb(train_state=None, step=0)
 
 
 def save(wandb_video, path):
+    path = str(Path(path).expanduser())
     frames = wandb_video.data.transpose(0, 2, 3, 1)
     imageio.mimwrite(path, frames, fps=5)
+    print(f"saved {path}")
 
 
 save(out["flow_vis/sweep_mano/uv"][0], "~/uv.gif")
