@@ -75,7 +75,7 @@ class CrossFormerModel:
     config: Config = struct.field(pytree_node=False)
     params: Params
     example_batch: Data
-    dataset_statistics: Data | None
+    dataset_statistics: Data | None = struct.field(pytree_node=False)
 
     def create_tasks(self, goals: Data | None = None, texts: Sequence[str] | None = None):
         """Creates tasks dict from goals and texts.
@@ -259,7 +259,7 @@ class CrossFormerModel:
         # load dataset statistics
         with open(os.path.join(checkpoint_path, "dataset_statistics.json"), "r") as f:
             dataset_statistics = json.load(f)
-            dataset_statistics = jax.tree.map(np.array, dataset_statistics, is_leaf=lambda x: not isinstance(x, dict))
+            dataset_statistics = _stats_to_arrays(dataset_statistics)
 
         # create model def (a CrossFormerModule)
         module = CrossFormerModule.create(**config["model"])
@@ -354,10 +354,7 @@ class CrossFormerModel:
             dataset_statistics_path = os.path.join(checkpoint_path, "dataset_statistics.json")
             if not os.path.exists(dataset_statistics_path):
                 with open(dataset_statistics_path, "w") as f:
-                    json.dump(
-                        jax.tree.map(lambda x: x.tolist(), self.dataset_statistics),
-                        f,
-                    )
+                    json.dump(_stats_to_jsonable(self.dataset_statistics), f)
 
     @classmethod
     def from_config(
@@ -466,6 +463,22 @@ def _verify_shapes(
         raise AssertionError(f"{name} does not match example batch.")
 
     return weak_fail or fail
+
+
+def _stats_to_arrays(stats):
+    if isinstance(stats, dict):
+        return {k: _stats_to_arrays(v) for k, v in stats.items()}
+    if stats is None:
+        return None
+    return np.asarray(stats)
+
+
+def _stats_to_jsonable(stats):
+    if isinstance(stats, dict):
+        return {k: _stats_to_jsonable(v) for k, v in stats.items()}
+    if stats is None:
+        return None
+    return np.asarray(stats).tolist()
 
 
 def _download_from_huggingface(huggingface_repo_id: str):
