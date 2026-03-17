@@ -147,23 +147,30 @@ def _plot_two_panel_video(
 
     fk_fn = _make_fk_fn()
 
-    # Endpoints to define stable PCA bases/limits
-    q0 = q_snd[0][:, :7]  # [N,7]
-    q1 = q_snd[-1][:, :7]  # [N,7]
-    x0, r0 = fk_fn(q0)  # [N,3], [N,3]
-    x1, r1 = fk_fn(q1)
-    p0 = np.concatenate([x0, r0], axis=1)  # [N,6]
-    p1 = np.concatenate([x1, r1], axis=1)
+    # Fit one global PCA basis over all points across all steps.
+    q_steps = q_snd[:, :, :7]  # [S,N,7]
+    x_steps = np.empty((S, N, 3), dtype=np.float32)
+    r_steps = np.empty((S, N, 3), dtype=np.float32)
+    for s in range(S):
+        x_s, r_s = fk_fn(q_steps[s])
+        x_steps[s] = x_s
+        r_steps[s] = r_s
+    p_steps = np.concatenate([x_steps, r_steps], axis=-1)  # [S,N,6]
 
-    q_mean, q_basis = _fit_pca(q0, q1)
-    x_mean, x_basis = _fit_pca(x0, x1)
-    r_mean, r_basis = _fit_pca(r0, r1)
-    p_mean, p_basis = _fit_pca(p0, p1)
+    q_all = q_steps.reshape(S * N, 7)
+    x_all = x_steps.reshape(S * N, 3)
+    r_all = r_steps.reshape(S * N, 3)
+    p_all = p_steps.reshape(S * N, 6)
 
-    q_lim = _safe_lim(_project_pca(q0, q_mean, q_basis), _project_pca(q1, q_mean, q_basis))
-    x_lim = _safe_lim(_project_pca(x0, x_mean, x_basis), _project_pca(x1, x_mean, x_basis))
-    r_lim = _safe_lim(_project_pca(r0, r_mean, r_basis), _project_pca(r1, r_mean, r_basis))
-    p_lim = _safe_lim(_project_pca(p0, p_mean, p_basis), _project_pca(p1, p_mean, p_basis))
+    q_mean, q_basis = _fit_pca(q_all)
+    x_mean, x_basis = _fit_pca(x_all)
+    r_mean, r_basis = _fit_pca(r_all)
+    p_mean, p_basis = _fit_pca(p_all)
+
+    q_lim = float(max(1e-3, 1.05 * np.abs(_project_pca(q_all, q_mean, q_basis)).max()))
+    x_lim = float(max(1e-3, 1.05 * np.abs(_project_pca(x_all, x_mean, x_basis)).max()))
+    r_lim = float(max(1e-3, 1.05 * np.abs(_project_pca(r_all, r_mean, r_basis)).max()))
+    p_lim = float(max(1e-3, 1.05 * np.abs(_project_pca(p_all, p_mean, p_basis)).max()))
 
     out_png = Path(out_png)
     out_mp4 = Path(out_mp4)
@@ -177,9 +184,10 @@ def _plot_two_panel_video(
         for ax in axs:
             ax.clear()
 
-        q_t = q_snd[s][:, :7]  # [N,7]
-        x_t, r_t = fk_fn(q_t)  # [N,3], [N,3]
-        p_t = np.concatenate([x_t, r_t], axis=1)
+        q_t = q_steps[s]
+        x_t = x_steps[s]
+        r_t = r_steps[s]
+        p_t = p_steps[s]
 
         t_text = f"step={s + 1}/{S} (N={N})"
 

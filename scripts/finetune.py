@@ -273,6 +273,17 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
             return apm
         return jnp.ones_like(action_tensor, dtype=jnp.bool_)
 
+    def _prepare_action_batch(batch):
+        # NOTE- updated key: keep train/val action shapes aligned (W=1, H=20, A=84 for k3ds).
+        unsqueeze = lambda x: jnp.expand_dims(x, axis=1)
+        batch["action"] = jax.tree.map(unsqueeze, batch["action"])
+        if isinstance(batch["action"], dict) and "k3ds" in batch["action"]:
+            batch["action"]["k3ds"] = rearrange(batch["action"]["k3ds"], "b w h x y -> b w h (x y)")
+        if isinstance(batch.get("embodiment"), dict):
+            squeeze = lambda x: jnp.squeeze(x, axis=-1)
+            batch["embodiment"] = jax.tree.map(squeeze, batch["embodiment"])
+        return batch
+
     def loss_fn(params, batch, rng, train=True):
         bound_module = model.module.bind({"params": params}, rngs={"dropout": rng})
         transformer_embeddings = bound_module.crossformer_transformer(
@@ -282,17 +293,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
             train=train,
         )
 
-        cfg.vprint("-> patch")
-        # quick patch
-        unsqueeze = lambda x: jnp.expand_dims(x, axis=1)
-        batch["action"] = jax.tree.map(unsqueeze, batch["action"])
-        # fix k3ds
-
-        batch["action"]["k3ds"] = rearrange(batch["action"]["k3ds"], "b w h x y -> b w h (x y)")
-        squeeze = lambda x: jnp.squeeze(x, axis=-1)
-        batch["embodiment"] = jax.tree.map(squeeze, batch["embodiment"])
-        # end patch
-        cfg.vprint("-> end patch")
+        batch = _prepare_action_batch(batch)
 
         action_loss, action_metrics = 0, {}
         for head_name, head in bound_module.heads.items():
@@ -336,7 +337,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         new_state = state.apply_gradients(grads=grads, rng=rng)
         return new_state, info
 
-    flow_viz_num_samples = 8
+    flow_viz_num_samples = 24
     flow_viz_eval_every = 1
 
     def _to_q_flow_steps_from_samples(deltas):
@@ -356,6 +357,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
             batch["observation"]["timestep_pad_mask"],
             train=train,
         )
+        batch = _prepare_action_batch(batch)
 
         action_loss, action_metrics = 0, {}
         for head_name, head in bound_module.heads.items():
@@ -375,19 +377,22 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
             action_loss += head_loss * head_sample_fraction * head.loss_weight
             action_metrics[head_name] = head_metrics
 
-        if "mano" in cfg.model.heads:
-            mano_head = bound_module.heads["mano"]
-            deltas = mano_head.predict_action(
+        for vis_head_name in ("mano", "single", "k3ds"):
+            if vis_head_name not in bound_module.heads:
+                continue
+            vis_head = bound_module.heads[vis_head_name]
+            deltas = vis_head.predict_action(
                 transformer_embeddings,
                 train=train,
                 rng=rng,
                 sample_shape=(flow_viz_num_samples,) if flow_viz_num_samples > 1 else (),
             )
-            vis = {"deltas": deltas}
+            vis = {"deltas": deltas, "vis_head": vis_head_name}
             q_flow_steps = _to_q_flow_steps_from_samples(deltas)
             if q_flow_steps is not None:
                 vis["q_flow_steps"] = q_flow_steps
             action_metrics["vis"] = vis
+            break
         return action_loss, action_metrics
 
     #
@@ -431,7 +436,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     flow_viz_callback.flow_overlay_ft_index = 0
     flow_viz_callback.flow_q_keys = ("q_flow_steps", "joint_flow_steps", "deltas")
     flow_viz_callback.flow_xyz_keys = ("fk_xyz_flow_steps", "xyz_flow_steps", "joints_flow_steps")
-    flow_viz_callback.compute_fk_from_q_steps = True
+    flow_viz_callback.compute_fk_from_q_steps = False
     flow_viz_callback.q_pca_dims = 7
     flow_viz_callback._fk_fn = None
     flow_viz_callback._robot = None

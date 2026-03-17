@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 import tempfile
+import traceback
 from typing import Any, Mapping
 import warnings
 
@@ -560,20 +561,24 @@ class FlowVisCallback(ValidationCallback):
         return wandb.Video(str(out_mp4), fps=self.fps, format="mp4")
 
     def _render_joint_fk_pca(
-        self, q_sfd: np.ndarray, xyz_sftj3: np.ndarray, xyz_key: str | None, pfx: str
+        self, q_sfd: np.ndarray, xyz_sftj3: np.ndarray | None, xyz_key: str | None, pfx: str
     ) -> wandb.Image:
-        ft_idx = min(self.flow_overlay_ft_index, q_sfd.shape[1] - 1, xyz_sftj3.shape[1] - 1)
-        q_sd = q_sfd[:, ft_idx, : self.q_pca_dims]
-        x_sd = xyz_sftj3[:, ft_idx].reshape(xyz_sftj3.shape[0], -1)
-        with (
-            tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f_png,
-            tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f_mp4,
-        ):
-            out_png = Path(f_png.name)
-            out_mp4 = Path(f_mp4.name)
+        # NOTE- updated key: preserve sample axis when q_sfd is already [S,N,D].
+        q_flow = q_sfd[..., : self.q_pca_dims]
+        if xyz_sftj3 is None:
+            x_flow = q_flow
+        else:
+            ft_idx = min(self.flow_overlay_ft_index, q_sfd.shape[1] - 1)
+            q_sd = q_sfd[:, ft_idx, : self.q_pca_dims]
+            ft_idx = min(ft_idx, xyz_sftj3.shape[1] - 1)
+            x_sd = xyz_sftj3[:, ft_idx].reshape(xyz_sftj3.shape[0], -1)
+            q_flow = _ensure_snd(q_sd, "q_flow")
+            x_flow = _ensure_snd(x_sd, "x_flow")
+        out_png = Path("/tmp/pca_step0.png")
+        out_mp4 = Path("/tmp/pca.mp4")
         _plot_two_panel_video(
-            q_flow=_ensure_snd(q_sd, "q_flow"),
-            x_flow=_ensure_snd(x_sd, "x_flow"),
+            q_flow=q_flow,
+            x_flow=x_flow,
             out_png=out_png,
             out_mp4=out_mp4,
             fps=self.fps,
@@ -778,19 +783,17 @@ class FlowVisCallback(ValidationCallback):
                             ):
                                 xyz_overlay_videos.append(self._render_xyz_overlay(xyz_sftj3, img_for_overlay, K, R, t))
                                 rendered += 1
-                            elif (
-                                renderer == "joint_fk_pca"
-                                and self.enable_part_b
-                                and q_sfd is not None
-                                and xyz_sftj3 is not None
-                            ):
+                            elif renderer == "joint_fk_pca" and self.enable_part_b and q_sfd is not None:
                                 joint_fk_pca_images.append(self._render_joint_fk_pca(q_sfd, xyz_sftj3, xyz_key, pfx))
                                 rendered += 1
                             elif renderer == "robot_flow" and self.enable_part_c and q_sfd is not None:
                                 robot_flow_videos.append(self._render_robot_flow(q_sfd))
                                 rendered += 1
                         except Exception as exc:
-                            warnings.warn(f"[{pfx}] {renderer} failed: {exc}", stacklevel=2)
+                            warnings.warn(
+                                f"[{pfx}] {renderer} failed: {exc}\n{traceback.format_exc()}",
+                                stacklevel=2,
+                            )
 
                 n = max(
                     len(uv_videos),
