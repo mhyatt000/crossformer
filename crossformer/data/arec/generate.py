@@ -11,6 +11,7 @@ import warnings
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tqdm import tqdm
 
 from crossformer.data.utils.trajectory import binarize_gripper_actions as binarize
 from crossformer.data.utils.trajectory import scan_noop
@@ -28,6 +29,7 @@ class Builder:
     root: Path
     threshold: float = 1e-3
     workers: int = 32
+    limit: int | None = None
 
     def build(self):
         """Define data splits."""
@@ -37,13 +39,38 @@ class Builder:
             self.files = self.files[: self.limit]
         return self._generate_examples(self.files)
 
+    def clean(self, dry: bool = True) -> None:
+        files = list(self.root.rglob("*.dat"))
+        if self.limit:
+            files = files[: self.limit]
+
+        with ThreadPoolExecutor(max_workers=self.workers) as ex:
+            results = ex.map(self._clean_file, files, [dry] * len(files))
+            for _ in tqdm(results, total=len(files), desc="Cleaning episodes"):
+                pass
+
+    def _clean_file(self, path: Path, dry: bool) -> None:
+        try:
+            _, _ = memmap.read(path)
+        except Exception as e:
+            log.error("Error reading %s", path)
+            log.error("%s", e)
+            if not dry:
+                path.unlink()
+                log.info("Deleted %s", path)
+                meta = path.with_suffix(".json")
+                if meta.exists():
+                    meta.unlink()
+                    log.info("Deleted %s", meta)
+
     def _generate_examples(self, ds) -> Iterator[list[dict]]:
         """Generator of examples for each split."""
 
         self.task, self.lang = self._load_task()
 
         with ThreadPoolExecutor(max_workers=self.workers) as ex:
-            for result in ex.map(self._parse_example, ds):
+            results = ex.map(self._parse_example, ds)
+            for result in tqdm(results, total=len(ds), desc="Parsing episodes"):
                 if result is not None:
                     yield result
 

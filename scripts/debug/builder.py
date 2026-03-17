@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 import logging
 from pathlib import Path
+from typing import Literal
 
 from rich.pretty import pprint
 from tqdm import tqdm
@@ -14,13 +15,15 @@ from crossformer.data.arec.generate import Builder
 log = logging.getLogger(__name__)
 
 
+@dataclass
 class DebugBuilder(Builder):
-    def __init__(self, dir: Path, name: str, version: str, workers: int, limit: int | None):
-        super().__init__(workers=workers)
-        self.root = dir
-        self.name = name
-        self.VERSION = version
-        self.limit = limit
+    root: Path
+    name: str = ""
+    version: str = ""
+
+    threshold: float = 1e-3
+    workers: int = 32
+    limit: int | None = None
 
 
 @dataclass
@@ -31,6 +34,8 @@ class Config:
     verbose: bool = False
     version: str = "0.5.0"
     limit: int | None = None
+    route: Literal["build", "clean"] = "build"
+    dry: bool = True  # dry run for cleaning (don't actually delete files)
     by_step: bool = False
 
 
@@ -53,12 +58,16 @@ def main(cfg: Config) -> None:
         logging.basicConfig(level=logging.DEBUG)
 
     builder = DebugBuilder(
-        dir=cfg.dir,
+        root=cfg.dir,
         name=cfg.name,
         version=cfg.version,
         workers=cfg.workers,
         limit=cfg.limit,
     )
+
+    if cfg.route == "clean":
+        builder.clean(dry=cfg.dry)
+        return
 
     total_eps = 0
     total_steps = 0
