@@ -18,7 +18,6 @@ import optax
 import tensorflow as tf
 import tqdm
 import tyro
-import wandb
 
 from crossformer import cn
 from crossformer.data.oxe.oxe_standardization_transforms import (
@@ -43,6 +42,7 @@ from crossformer.utils.train_utils import (
     Timer,
     TrainState,
 )
+import wandb
 
 log = logging.getLogger(__name__)
 
@@ -224,6 +224,55 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     # Define loss, train_step, and eval_step
     #
 
+    def _resolve_action_tensor(batch, head_name: str):
+        actions = batch["action"]
+        if not isinstance(actions, dict):
+            return actions
+        if head_name in actions:
+            return actions[head_name]
+        if head_name == "single" and "k3ds" in actions:
+            return actions["k3ds"]  # NOTE- updated key
+        if len(actions) == 1:
+            return next(iter(actions.values()))
+        raise KeyError(f"Missing action tensor for head '{head_name}'. Available: {tuple(actions.keys())}")
+
+    def _resolve_head_mask(batch, head_name: str):
+        def _as_b(mask):
+            mask = jnp.asarray(mask, dtype=jnp.bool_)
+            if mask.ndim == 0:
+                return jnp.broadcast_to(mask, (batch["observation"]["timestep_pad_mask"].shape[0],))
+            if mask.ndim > 1:
+                mask = jnp.squeeze(mask)
+            if mask.ndim != 1:
+                raise ValueError(f"action_head_mask for '{head_name}' must be 1D after squeeze, got {mask.shape}")
+            return mask
+
+        bs = batch["observation"]["timestep_pad_mask"].shape[0]
+        emb = batch.get("embodiment")
+        if isinstance(emb, dict):
+            if head_name in emb:
+                return _as_b(emb[head_name])
+            if head_name == "single" and "single_arm" in emb:
+                return _as_b(emb["single_arm"])  # NOTE- updated key
+        ahm = batch.get("action_head_masks")
+        if isinstance(ahm, dict):
+            if head_name in ahm:
+                return _as_b(ahm[head_name])
+            if head_name == "single" and "single_arm" in ahm:
+                return _as_b(ahm["single_arm"])  # NOTE- updated key
+        return jnp.ones((bs,), dtype=jnp.bool_)
+
+    def _resolve_action_pad_mask(batch, head_name: str, action_tensor):
+        apm = batch.get("action_pad_mask")
+        if isinstance(apm, dict):
+            if head_name in apm:
+                return apm[head_name]
+            if head_name == "single" and "k3ds" in apm:
+                return apm["k3ds"]  # NOTE- updated key
+        if apm is not None and not isinstance(apm, dict):
+            return apm
+        return jnp.ones_like(action_tensor, dtype=jnp.bool_)
+
     def loss_fn(params, batch, rng, train=True):
         bound_module = model.module.bind({"params": params}, rngs={"dropout": rng})
         transformer_embeddings = bound_module.crossformer_transformer(
@@ -248,20 +297,18 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         action_loss, action_metrics = 0, {}
         for head_name, head in bound_module.heads.items():
             cfg.vprint(f"[DEBUG] Processing head: {head_name}")
-            # if head_name == "single_arm":
-            # head_loss, head_metrics = head.loss(embeddings=transformer_embeddings, batch=batch, train=True)
-            # else:
+            action_tensor = _resolve_action_tensor(batch, head_name)
+            head_mask = _resolve_head_mask(batch, head_name)
+            action_pad_mask = _resolve_action_pad_mask(batch, head_name, action_tensor)
             head_loss, head_metrics = head.loss(
                 transformer_embeddings,
-                batch["action"][head_name],
+                action_tensor,
                 batch["observation"]["timestep_pad_mask"],
-                action_pad_mask=jnp.ones_like(batch["action"][head_name], dtype=jnp.bool_),
-                action_head_mask=batch["embodiment"][head_name],
+                action_pad_mask=action_pad_mask,
+                action_head_mask=head_mask,
                 train=train,
             )
-
-            # head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(batch["action"])
-            head_sample_fraction = batch["embodiment"][head_name].mean()
+            head_sample_fraction = head_mask.mean()
             action_loss += head_loss * head_sample_fraction * head.loss_weight
             action_metrics[head_name] = head_metrics
         action_metrics["total_loss"] = action_loss
@@ -289,6 +336,18 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         new_state = state.apply_gradients(grads=grads, rng=rng)
         return new_state, info
 
+    flow_viz_num_samples = 8
+    flow_viz_eval_every = 1
+
+    def _to_q_flow_steps_from_samples(deltas):
+        if flow_viz_num_samples <= 1:
+            return None
+        if deltas.ndim == 5:  # [K,B,W,H,A]
+            return jnp.transpose(deltas[:, 0, 0, :, :], (1, 0, 2))  # [H,K,A]
+        if deltas.ndim == 4 and deltas.shape[0] == flow_viz_num_samples:  # [K,B,H,A]
+            return jnp.transpose(deltas[:, 0, :, :], (1, 0, 2))  # [H,K,A]
+        return None
+
     def val_fn(params, batch, rng, train=False):
         bound_module = model.module.bind({"params": params}, rngs={"dropout": rng})
         transformer_embeddings = bound_module.crossformer_transformer(
@@ -300,16 +359,19 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
 
         action_loss, action_metrics = 0, {}
         for head_name, head in bound_module.heads.items():
+            action_tensor = _resolve_action_tensor(batch, head_name)
+            head_mask = _resolve_head_mask(batch, head_name)
+            action_pad_mask = _resolve_action_pad_mask(batch, head_name, action_tensor)
             head_loss, head_metrics = head.loss(
                 transformer_embeddings,
-                batch["action"],
+                action_tensor,
                 batch["observation"]["timestep_pad_mask"],
-                batch["action_pad_mask"],
-                action_head_mask=batch["action_head_masks"][head_name],
+                action_pad_mask,
+                action_head_mask=head_mask,
                 train=train,
             )
 
-            head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(batch["action"])
+            head_sample_fraction = head_mask.mean()
             action_loss += head_loss * head_sample_fraction * head.loss_weight
             action_metrics[head_name] = head_metrics
 
@@ -319,8 +381,13 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
                 transformer_embeddings,
                 train=train,
                 rng=rng,
+                sample_shape=(flow_viz_num_samples,) if flow_viz_num_samples > 1 else (),
             )
-            action_metrics["vis"] = {"deltas": deltas}
+            vis = {"deltas": deltas}
+            q_flow_steps = _to_q_flow_steps_from_samples(deltas)
+            if q_flow_steps is not None:
+                vis["q_flow_steps"] = q_flow_steps
+            action_metrics["vis"] = vis
         return action_loss, action_metrics
 
     #
@@ -332,6 +399,8 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
             yield next(dsit)
 
     def flow_eval_step(state: TrainState, batch):
+        if flow_viz_eval_every > 1 and (int(state.step) % flow_viz_eval_every != 0):
+            return {"text_conditioned": {"vis": {}}}
         rng_eval = jax.random.fold_in(state.rng, int(state.step))
         _, metrics = val_fn(state.model.params, batch, rng_eval, train=False)
         vis = metrics.get("vis", {})
@@ -345,6 +414,9 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     flow_viz_callback.fps = 8
     flow_viz_callback.max_videos = 2
     flow_viz_callback.num_val_batches = 1
+    flow_viz_callback.run_every_steps = 1
+    flow_viz_callback.max_renderers_per_item = 2
+    flow_viz_callback.enabled_renderers = ("joint_fk_pca", "xyz_overlay")
     flow_viz_callback.camera_view = "low"
     flow_viz_callback.camera_intrinsics = _DEFAULT_K.copy()
     flow_viz_callback.camera_R, flow_viz_callback.camera_t = load_camera_extrinsics("low")
