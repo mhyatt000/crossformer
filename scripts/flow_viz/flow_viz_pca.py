@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from importlib.util import find_spec
 from pathlib import Path
 
@@ -123,8 +124,8 @@ def _safe_lim(z0: np.ndarray, z1: np.ndarray) -> float:
 
 
 def _plot_two_panel_video(
-    q_flow: np.ndarray,            # [S,D] or [S,N,D]
-    x_flow: np.ndarray | None,     # ignored (kept for callback compatibility)
+    q_flow: np.ndarray,  # [S,D] or [S,N,D]
+    x_flow: np.ndarray | None,  # ignored (kept for callback compatibility)
     out_png: str | Path,
     out_mp4: str | Path,
     fps: int = 8,
@@ -147,9 +148,9 @@ def _plot_two_panel_video(
     fk_fn = _make_fk_fn()
 
     # Endpoints to define stable PCA bases/limits
-    q0 = q_snd[0][:, :7]      # [N,7]
-    q1 = q_snd[-1][:, :7]     # [N,7]
-    x0, r0 = fk_fn(q0)        # [N,3], [N,3]
+    q0 = q_snd[0][:, :7]  # [N,7]
+    q1 = q_snd[-1][:, :7]  # [N,7]
+    x0, r0 = fk_fn(q0)  # [N,3], [N,3]
     x1, r1 = fk_fn(q1)
     p0 = np.concatenate([x0, r0], axis=1)  # [N,6]
     p1 = np.concatenate([x1, r1], axis=1)
@@ -176,11 +177,11 @@ def _plot_two_panel_video(
         for ax in axs:
             ax.clear()
 
-        q_t = q_snd[s][:, :7]       # [N,7]
-        x_t, r_t = fk_fn(q_t)       # [N,3], [N,3]
+        q_t = q_snd[s][:, :7]  # [N,7]
+        x_t, r_t = fk_fn(q_t)  # [N,3], [N,3]
         p_t = np.concatenate([x_t, r_t], axis=1)
 
-        t_text = f"step={s+1}/{S} (N={N})"
+        t_text = f"step={s + 1}/{S} (N={N})"
 
         _plot_panel(axs[0], _project_pca(q_t, q_mean, q_basis), t_text, q_lim, "blue", "Joint PCA")
         _plot_panel(axs[1], _project_pca(x_t, x_mean, x_basis), t_text, x_lim, "red", "FK XYZ PCA")
@@ -204,3 +205,132 @@ def _plot_two_panel_video(
         "num_steps": S,
         "num_points": N,
     }
+
+
+def _extract_q(step: dict) -> np.ndarray:
+    q_raw = None
+    k3_raw = None
+
+    action = step.get("action")
+    if isinstance(action, dict):
+        q_raw = action.get("q")
+        k3_raw = action.get("k3ds")
+    if q_raw is None:
+        q_raw = step.get("q")
+    if k3_raw is None:
+        k3_raw = step.get("k3ds")
+
+    if q_raw is not None:
+        q = np.asarray(q_raw, dtype=np.float32)
+        if q.ndim == 3:
+            q = q[:, 0, :]
+        if q.ndim != 2:
+            raise ValueError(f"Expected q with ndim 2/3, got {q.shape}")
+        return q
+    if k3_raw is not None:
+        k3 = np.asarray(k3_raw, dtype=np.float32)  # [S,J,3/4]
+        if k3.ndim != 3:
+            raise ValueError(f"Expected k3ds with ndim 3, got {k3.shape}")
+        return k3[:, :, :3].reshape(k3.shape[0], -1)  # [S,D]
+
+    keys = sorted(step.keys()) if isinstance(step, dict) else []
+    raise KeyError(f"Could not find q/k3ds in record. Available keys: {keys}")
+
+
+def _load_q_from_dataset(
+    path: Path,
+    traj_index: int,
+    max_steps: int | None,
+    sample_mode: str,
+    num_samples: int,
+) -> np.ndarray:
+    from crossformer.data.grain.datasets import _DecodedArrayRecord
+
+    shards = sorted(path.expanduser().glob("**/*.arrayrecord"))
+    if not shards:
+        raise FileNotFoundError(f"No ArrayRecord shards found in {path}")
+
+    records = _DecodedArrayRecord(shards)
+    if traj_index < 0 or traj_index >= len(records):
+        raise IndexError(f"traj_index {traj_index} out of range [0, {len(records) - 1}]")
+
+    if num_samples < 1:
+        raise ValueError(f"num_samples must be >=1, got {num_samples}")
+
+    q = _extract_q(records[traj_index])
+    if max_steps is not None:
+        q = q[:max_steps]
+
+    if sample_mode == "single":
+        out = q
+    elif sample_mode == "window":
+        n = int(num_samples)
+        offs = np.arange(n, dtype=np.int32) - (n // 2)
+        S = q.shape[0]
+        idx = np.arange(S, dtype=np.int32)[:, None] + offs[None, :]
+        idx = np.clip(idx, 0, S - 1)
+        out = q[idx]  # [S,N,D]
+    elif sample_mode == "episodes":
+        if traj_index + num_samples > len(records):
+            raise IndexError(
+                f"Need {num_samples} records from traj_index={traj_index}, "
+                f"but only {len(records) - traj_index} available"
+            )
+        qs = []
+        for i in range(traj_index, traj_index + num_samples):
+            qi = _extract_q(records[i])
+            if max_steps is not None:
+                qi = qi[:max_steps]
+            qs.append(qi)
+        s = min(x.shape[0] for x in qs)
+        d = qs[0].shape[1]
+        if any(x.shape[1] != d for x in qs):
+            shapes = [x.shape for x in qs]
+            raise ValueError(f"Mismatched q dims across episodes: {shapes}")
+        out = np.stack([x[:s] for x in qs], axis=1)  # [S,N,D]
+    else:
+        raise ValueError(f"Unknown sample_mode: {sample_mode}")
+
+    if out.shape[0] < 2:
+        raise ValueError(f"Need at least 2 steps for PCA video, got {out.shape[0]}")
+    return out
+
+
+def _cli() -> dict[str, str | int]:
+    p = argparse.ArgumentParser(description="Render PCA flow video from ArrayRecord dataset.")
+    p.add_argument("--dataset-dir", type=Path, required=True, help="Directory containing *.arrayrecord shards")
+    p.add_argument("--traj-index", type=int, default=0, help="Record index to visualize")
+    p.add_argument("--max-steps", type=int, default=80, help="Max trajectory steps to render")
+    p.add_argument(
+        "--sample-mode",
+        type=str,
+        choices=("single", "episodes", "window"),
+        default="single",
+        help="How to build N samples per step for PCA scatter",
+    )
+    p.add_argument("--num-samples", type=int, default=8, help="Number of samples (N) for episodes/window mode")
+    p.add_argument("--fps", type=int, default=8, help="Output video fps")
+    p.add_argument("--out-dir", type=Path, default=Path("/tmp/flow_viz_pca"), help="Output directory")
+    args = p.parse_args()
+
+    q = _load_q_from_dataset(
+        args.dataset_dir,
+        args.traj_index,
+        args.max_steps,
+        sample_mode=args.sample_mode,
+        num_samples=args.num_samples,
+    )
+    q_flow = _ensure_snd(q, "q_flow")
+
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    return _plot_two_panel_video(
+        q_flow=q_flow,
+        x_flow=None,
+        out_png=args.out_dir / "pca_step0.png",
+        out_mp4=args.out_dir / "pca.mp4",
+        fps=args.fps,
+    )
+
+
+if __name__ == "__main__":
+    print(_cli())
