@@ -10,9 +10,10 @@ import warnings
 import jax
 import jax.numpy as jnp
 import numpy as np
-import xgym
-from xgym.rlds.util.trajectory import binarize_gripper_actions as binarize
-from xgym.rlds.util.trajectory import scan_noop
+
+from crossformer.data.utils.trajectory import binarize_gripper_actions as binarize
+from crossformer.data.utils.trajectory import scan_noop
+from crossformer.utils.io import memmap
 
 log = logging.getLogger(__name__)
 
@@ -167,13 +168,13 @@ class Builder:
         log.debug(path)
 
         try:
-            info, ep = xgym.viz.memmap.read(path)
+            info, ep = memmap.read(path)
             cams = [k for k in info["schema"] if "camera" in k]
             if len(cams) < 2:
                 raise ValueError(f"Not enough cameras {cams}")
         except Exception as e:
-            xgym.logger.error(f"Error reading {path}")
-            xgym.logger.error(e)
+            log.error("Error reading %s", path)
+            log.error("%s", e)
             return None
 
         n = len(ep["time"])
@@ -253,7 +254,9 @@ class Builder:
     def _generate_examples(self, ds) -> Iterator[tuple[str, Any]]:
         """Generator of examples for each split."""
 
-        self.taskfile = next(self.root.glob("*.npy"))  # from: cwd
+        self.taskfile = next(self.root.glob("*.npy"), None)
+        if self.taskfile is None:
+            raise FileNotFoundError(f"No task embedding .npy file found under {self.root}")
         self.task = self.taskfile.stem.replace("_", " ")
         self.lang = np.load(self.taskfile)
 
