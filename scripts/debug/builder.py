@@ -6,11 +6,12 @@ import logging
 from pathlib import Path
 from typing import Literal
 
-from rich.pretty import pprint
+from rich import print
 from tqdm import tqdm
 import tyro
 
 from crossformer.data.arec.generate import Builder
+from crossformer.utils.spec import spec
 
 log = logging.getLogger(__name__)
 
@@ -78,8 +79,9 @@ def main(cfg: Config) -> None:
         total_steps += len(ep)
         if first is None:
             first = _first(ep, cfg.by_step)
+        print(spec(ep[0]))
 
-    pprint(
+    print(
         {
             "name": builder.name,
             "dir": str(builder.root),
@@ -89,7 +91,7 @@ def main(cfg: Config) -> None:
         }
     )
     if first is not None:
-        pprint(builder.spec(first))
+        print(spec(first))
 
 
 if __name__ == "__main__":
