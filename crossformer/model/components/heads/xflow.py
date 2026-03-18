@@ -16,8 +16,8 @@ from crossformer.model.components.transformer import MAPHead
 from crossformer.utils.mytyping import PRNGKey
 
 from .base import ActionHead
+from .dof import FactoredQueryEncoding
 from .io.attention import CrossAttention, make_cross_attention_mask, SelfAttention
-from .io.position_encoding import TrainablePositionEncoding
 from .losses import continuous_loss, sample_tau
 
 
@@ -79,9 +79,9 @@ class PerceiverDecoder(nn.Module):
 class XFlowHead(nn.Module, ActionHead):
     """Perceiver IO flow-matching head for cross-embodied action prediction.
 
-    Uses learnable output queries that cross-attend to transformer embeddings
-    (+ optional guidance tokens), then projects to the target action space.
-    Supports arbitrary action_dim, action_horizon, and classifier-free guidance.
+    Uses factored output queries (Fourier chunk position x learned DOF embedding)
+    that cross-attend to transformer embeddings (+ optional guidance tokens).
+    Each query predicts one scalar: the velocity for a single (timestep, DOF) pair.
 
     Shape contract:
         transformer tokens: (B, W, N, E) — batch, window, num_tokens, embed_dim
@@ -92,9 +92,9 @@ class XFlowHead(nn.Module, ActionHead):
     # Identity
     readout_key: str
 
-    # Action space (set per-embodiment)
-    action_horizon: int = 1
-    action_dim: int = 7
+    # Action space — defined by DOF vocabulary + temporal chunk steps
+    dof_ids: tuple[int, ...]  # DOF vocab IDs, e.g. ids("j0",..."gripper")
+    chunk_steps: tuple[float, ...]  # temporal positions, e.g. chunk_range(20)
     clip_pred: bool = True
     max_action: float = 5.0
     loss_type: str = "mse"
@@ -116,25 +116,41 @@ class XFlowHead(nn.Module, ActionHead):
     # Pooling strategy for transformer outputs
     pool_strategy: str = "mean"
 
+    @property
+    def action_dim(self) -> int:
+        return len(self.dof_ids)
+
+    @property
+    def action_horizon(self) -> int:
+        return len(self.chunk_steps)
+
     def setup(self):
         D = self.num_query_channels
 
         if self.pool_strategy == "use_map":
             self.map_head = MAPHead()
 
-        # Learnable output query positions — one per action-horizon step
-        self.query_pos_enc = TrainablePositionEncoding(
-            index_dim=self.action_horizon,
+        # Factored queries: Fourier chunk position x learned DOF embedding
+        self.query_pos_enc = FactoredQueryEncoding(
+            chunk_steps=self.chunk_steps,
+            dof_ids=self.dof_ids,
             num_channels=D,
             name="query_pos_enc",
         )
 
-        # Condition the queries on noisy actions and time
+        # Per-query scalar action conditioning via Fourier features
+        self.action_features = FourierFeatures(
+            self.time_dim,
+            learnable=True,
+            name="action_ff",
+        )
         self.action_proj = nn.Dense(D, name="action_proj")
+
+        # Time conditioning
         self.time_features = FourierFeatures(self.time_dim, learnable=True, name="time_ff")
         self.time_proj = nn.Dense(D, name="time_proj")
 
-        # Decoder and output projection
+        # Decoder and scalar output projection (one value per query)
         self.decoder = PerceiverDecoder(
             num_heads=self.num_heads,
             num_self_attend_layers=self.num_self_attend_layers,
@@ -142,7 +158,7 @@ class XFlowHead(nn.Module, ActionHead):
             dropout_prob=self.dropout_prob,
             name="decoder",
         )
-        self.output_proj = nn.Dense(self.action_dim, name="output_proj")
+        self.output_proj = nn.Dense(1, name="output_proj")
 
     # ------------------------------------------------------------------
     # Helpers
@@ -163,7 +179,7 @@ class XFlowHead(nn.Module, ActionHead):
         raise ValueError(f"{self.pool_strategy} not implemented!")
 
     def _build_queries(self, batch_size: int, time: ArrayLike, a_t: ArrayLike) -> Array:
-        """Build conditioned output queries: pos_enc + action + time.
+        """Build factored conditioned queries: (chunk ⊕ dof) + action + time.
 
         Args:
             batch_size: B*W (merged batch and window dims).
@@ -171,21 +187,17 @@ class XFlowHead(nn.Module, ActionHead):
             a_t: (BW, H, A) noisy actions.
 
         Returns:
-            (BW, action_horizon, num_query_channels)
+            (BW, H*A, num_query_channels)
         """
-        D = self.num_query_channels
-        H = self.action_horizon
+        # Factored positional encoding
+        pos_q = self.query_pos_enc(batch_size=batch_size)  # (BW, H*A, D)
 
-        # Learnable positional queries
-        pos_q = self.query_pos_enc(batch_size=batch_size)  # (BW, H, D)
+        # Per-scalar action conditioning: (BW, H, A) → (BW, H*A, 1) → Fourier → Dense
+        a_flat = rearrange(a_t, "bw h a -> bw (h a) 1")
+        act_cond = self.action_proj(self.action_features(a_flat))  # (BW, H*A, D)
 
-        # Project noisy actions per chunk step
-        act_cond = self.action_proj(a_t)  # (BW, H, D)
-
-        # Time conditioning — broadcast across horizon
-        t_feat = self.time_features(time)  # (BW, time_dim)
-        t_cond = self.time_proj(t_feat)  # (BW, D)
-        t_cond = t_cond[:, None, :]  # (BW, 1, D)
+        # Time conditioning — broadcast across all queries
+        t_cond = self.time_proj(self.time_features(time))[:, None, :]  # (BW, 1, D)
 
         return pos_q + act_cond + t_cond
 
@@ -242,7 +254,7 @@ class XFlowHead(nn.Module, ActionHead):
         a_t_bw = rearrange(a_t, "b w h a -> (b w) h a")  # (BW, H, A)
 
         # Build conditioned queries
-        queries = self._build_queries(B * W, time_bw, a_t_bw)  # (BW, H, D)
+        queries = self._build_queries(B * W, time_bw, a_t_bw)  # (BW, H*A, D)
 
         # Build context: transformer embeddings + optional guidance tokens
         context = embed_bw  # (BW, S, E)
@@ -269,7 +281,7 @@ class XFlowHead(nn.Module, ActionHead):
                 g_mask_bw = jnp.ones((B * W, G), dtype=jnp.int32)
 
             kv_mask = jnp.concatenate([ctx_mask, g_mask_bw], axis=1)  # (BW, S+G)
-            query_mask = jnp.ones((B * W, self.action_horizon), dtype=jnp.int32)
+            query_mask = jnp.ones((B * W, self.action_horizon * self.action_dim), dtype=jnp.int32)
             attention_mask = make_cross_attention_mask(query_mask, kv_mask)
 
         # Decode
@@ -278,11 +290,11 @@ class XFlowHead(nn.Module, ActionHead):
             context,
             deterministic=not train,
             attention_mask=attention_mask,
-        )  # (BW, H, D)
+        )  # (BW, H*A, D)
 
-        # Project to action dim and flatten
-        output = self.output_proj(decoded)  # (BW, H, A)
-        output = rearrange(output, "(b w) h a -> b w (h a)", b=B, w=W)  # (B, W, H*A)
+        # Scalar output per query, flatten
+        output = self.output_proj(decoded).squeeze(-1)  # (BW, H*A)
+        output = rearrange(output, "(b w) q -> b w q", b=B, w=W)  # (B, W, H*A)
         return output
 
     # ------------------------------------------------------------------
