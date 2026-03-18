@@ -7,6 +7,7 @@ from .diffusion import DiffusionActionHead
 from .flow import AdjFlowHead, FlowMatchingActionHead
 from .l1 import L1ActionHead, MSEActionHead
 from .losses import continuous_loss, masked_mean, sample_tau
+from .xflow import XFlowHead
 
 __all__ = [
     "ActionHead",
@@ -16,6 +17,7 @@ __all__ = [
     "FlowMatchingActionHead",
     "L1ActionHead",
     "MSEActionHead",
+    "XFlowHead",
     "continuous_loss",
     "masked_mean",
     "sample_tau",
