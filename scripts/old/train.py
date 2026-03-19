@@ -11,6 +11,7 @@ import os
 import os.path as osp
 
 from absl import app, flags, logging
+from crossformer.utils.typing import Data
 from flax.traverse_util import flatten_dict
 import jax
 from jax.experimental import multihost_utils
@@ -19,7 +20,6 @@ from ml_collections import config_flags
 import optax
 from tpu_utils import prevent_cross_region
 import tqdm
-import wandb
 
 import crossformer
 from crossformer.data.dataset import make_interleaved_dataset
@@ -37,7 +37,7 @@ from crossformer.utils.train_utils import (
     Timer,
     TrainState,
 )
-from crossformer.utils.typing import Data
+import wandb
 
 FLAGS = flags.FLAGS
 

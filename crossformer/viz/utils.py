@@ -9,7 +9,6 @@ import imageio
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
-import wandb
 
 from crossformer.data.oxe import ActionDim
 
@@ -21,6 +20,7 @@ from crossformer.viz._oikit import (  # OpenDRRenderer,
     edge_list_obj,
     vert_type_hand,
 )
+import wandb
 
 
 def persp_project(points3d, cam_intr):

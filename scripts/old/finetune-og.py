@@ -16,9 +16,6 @@ import optax
 import tensorflow as tf
 import tqdm
 
-# from crossformer.viz.utils import SequenceViz
-import wandb
-
 from crossformer.data.dataset import make_interleaved_dataset, make_single_dataset
 from crossformer.data.oxe import (
     make_oxe_dataset_kwargs_and_weights,
@@ -40,6 +37,9 @@ from crossformer.utils.train_utils import (
     Timer,
     TrainState,
 )
+
+# from crossformer.viz.utils import SequenceViz
+import wandb
 
 try:
     from jax_smi import initialise_tracking  # type: ignore
