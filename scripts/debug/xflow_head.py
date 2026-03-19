@@ -1,4 +1,4 @@
-"""Forward pass demo for XFlowHead (Perceiver IO flow-matching action head)."""
+"""Forward pass demo for XFlowHead (single-kernel cross-embodiment training)."""
 
 from __future__ import annotations
 
@@ -9,13 +9,20 @@ from rich.rule import Rule
 
 from crossformer.model.components.base import TokenGroup
 from crossformer.model.components.heads.dof import (
+    build_query_mask,
     chunk_range,
     chunk_strided,
     EMBODIMENTS,
-    ids,
+    pad_chunk_steps,
+    pad_dof_ids,
 )
 from crossformer.model.components.heads.xflow import XFlowHead
 from crossformer.utils.spec import spec
+
+# -- helpers ------------------------------------------------------------------
+
+MAX_H = 20  # max chunk steps across all embodiments
+MAX_A = 18  # max DOFs across all embodiments (xarm_ruka = 7+11)
 
 
 def show(label, tree):
@@ -32,246 +39,155 @@ def param_count(variables):
     print(f"  [bold green]params[/]: {n:,}")
 
 
-def make_transformer_outputs(rng, batch, window, n_tokens, embed_dim, readout_key="readout"):
-    """Simulate transformer output tokens."""
+def make_transformer_outputs(rng, batch, window, n_tokens, embed_dim):
     tokens = jax.random.normal(rng, (batch, window, n_tokens, embed_dim))
     mask = jnp.ones((batch, window, n_tokens), dtype=jnp.int32)
-    return {readout_key: TokenGroup(tokens=tokens, mask=mask)}
+    return {"readout": TokenGroup(tokens=tokens, mask=mask)}
 
 
-def run_init_and_forward():
-    """Basic init + forward pass with factored queries."""
-    print(Rule("XFlowHead: init + forward (xarm_gripper)"))
-    B, W, N, E = 4, 2, 8, 512  # batch, window, n_tokens, embed_dim
-    H = 20  # action_horizon
-    dof = EMBODIMENTS["xarm_gripper"]  # (j0..j6, gripper) → 8 DOFs
-
-    head = XFlowHead(
+def make_head():
+    """Single head instance shared across all embodiments."""
+    return XFlowHead(
         readout_key="readout",
-        dof_ids=dof,
-        chunk_steps=chunk_range(H),
+        max_dofs=MAX_A,
+        max_horizon=MAX_H,
         num_query_channels=256,
         num_heads=8,
         num_self_attend_layers=2,
         flow_steps=10,
     )
 
+
+def pad_embodiment(dof_ids, steps):
+    """Pad a single embodiment's specs to max size."""
+    return (
+        jnp.array(pad_dof_ids(dof_ids, MAX_A)),
+        jnp.array(pad_chunk_steps(steps, MAX_H)),
+    )
+
+
+# -- demos --------------------------------------------------------------------
+
+
+def run_single_embodiment():
+    """Single embodiment forward pass."""
+    print(Rule("single embodiment: xarm_gripper"))
+    B, W, N, E = 4, 2, 8, 512
+    head = make_head()
+
     rng = jax.random.PRNGKey(0)
     init_rng, fwd_rng = jax.random.split(rng)
     outputs = make_transformer_outputs(init_rng, B, W, N, E)
-
     variables = head.init({"params": init_rng, "dropout": fwd_rng}, outputs)
 
-    A = len(dof)
+    # Pad to max size
+    dof_padded, chunk_padded = pad_embodiment(
+        EMBODIMENTS["xarm_gripper"],
+        chunk_range(10),
+    )
+    dof_ids = jnp.tile(dof_padded[None], (B, 1))  # (B, MAX_A)
+    chunk_steps = jnp.tile(chunk_padded[None], (B, 1))  # (B, MAX_H)
+
     time = jax.random.uniform(fwd_rng, (B, W, 1))
-    a_t = jax.random.normal(fwd_rng, (B, W, H, A))
+    a_t = jax.random.normal(fwd_rng, (B, W, MAX_H, MAX_A))
+
     pred = head.apply(
         variables,
         outputs,
         time=time,
         a_t=a_t,
+        dof_ids=dof_ids,
+        chunk_steps=chunk_steps,
         train=False,
         rngs={"dropout": fwd_rng},
     )
 
-    print("[bold]transformer tokens:[/]")
-    show("tokens", outputs["readout"].tokens)
-    print("[bold]flow inputs:[/]")
-    show("time", time)
-    show("a_t", a_t)
-    print("[bold]output:[/]")
+    q_mask = build_query_mask(chunk_steps, dof_ids)
+    valid = q_mask[0].sum()
+    total = MAX_H * MAX_A
+
+    print("[bold]io:[/]")
     show("pred", pred)
-    print(f"  expected: ({B}, {W}, {H * A})")
-    print(f"  queries per step: {H} chunks x {A} DOFs = {H * A}")
+    print(f"  valid queries: {int(valid)} / {total} (H=10 x A=8 = 80)")
     param_count(variables)
 
 
-def run_various_embodiments():
-    """Show DOF vocab sharing: different embodiments, shared embeddings."""
-    print(Rule("XFlowHead: various embodiments (DOF vocab)"))
-    B, W, N, E = 2, 1, 4, 256
-    rng = jax.random.PRNGKey(1)
-
-    configs = [
-        {"dof": EMBODIMENTS["xarm_gripper"], "H": 4, "label": "xarm+gripper (7+1), H=4"},
-        {"dof": EMBODIMENTS["xarm"], "H": 4, "label": "xarm no gripper (7), H=4"},
-        {"dof": EMBODIMENTS["xarm_ruka"], "H": 20, "label": "xarm+ruka (7+11), H=20"},
-        {"dof": EMBODIMENTS["cartesian_pose"], "H": 10, "label": "cartesian pose (6), H=10"},
-        {"dof": EMBODIMENTS["cart_pose_gripper"], "H": 1, "label": "cart+grip (7), H=1"},
-        {"dof": ids("ee_x", "ee_y", "ee_z"), "H": 50, "label": "cart position (3), H=50"},
-    ]
-
-    for cfg in configs:
-        dof, H = cfg["dof"], cfg["H"]
-        A = len(dof)
-        head = XFlowHead(
-            readout_key="readout",
-            dof_ids=dof,
-            chunk_steps=chunk_range(H),
-            num_query_channels=128,
-            num_heads=4,
-            num_self_attend_layers=1,
-        )
-        init_rng, fwd_rng = jax.random.split(rng)
-        rng = fwd_rng
-        outputs = make_transformer_outputs(init_rng, B, W, N, E)
-        variables = head.init({"params": init_rng, "dropout": fwd_rng}, outputs)
-
-        time = jax.random.uniform(fwd_rng, (B, W, 1))
-        a_t = jax.random.normal(fwd_rng, (B, W, H, A))
-        pred = head.apply(
-            variables,
-            outputs,
-            time=time,
-            a_t=a_t,
-            train=False,
-            rngs={"dropout": fwd_rng},
-        )
-        n = sum(x.size for x in jax.tree.leaves(variables["params"]))
-        print(f"  {cfg['label']:40s} -> pred {pred.shape}  queries={H * A:4d}  params={n:,}")
-
-
-def run_strided_chunks():
-    """Multi-resolution: coarse + dense chunk strategies."""
-    print(Rule("XFlowHead: strided chunk steps (multi-resolution)"))
-    B, W, N, E = 2, 1, 4, 256
-    dof = EMBODIMENTS["xarm_gripper"]
-    A = len(dof)
-    rng = jax.random.PRNGKey(4)
-
-    strategies = [
-        ("dense H=20", chunk_range(20)),
-        ("stride=5, end=50", chunk_strided(50, 5)),
-        ("stride=2, end=20", chunk_strided(20, 2)),
-        ("stride=10, end=100", chunk_strided(100, 10)),
-    ]
-
-    for label, steps in strategies:
-        H = len(steps)
-        head = XFlowHead(
-            readout_key="readout",
-            dof_ids=dof,
-            chunk_steps=steps,
-            num_query_channels=128,
-            num_heads=4,
-            num_self_attend_layers=1,
-        )
-        init_rng, fwd_rng = jax.random.split(rng)
-        rng = fwd_rng
-        outputs = make_transformer_outputs(init_rng, B, W, N, E)
-        variables = head.init({"params": init_rng, "dropout": fwd_rng}, outputs)
-
-        time = jax.random.uniform(fwd_rng, (B, W, 1))
-        a_t = jax.random.normal(fwd_rng, (B, W, H, A))
-        pred = head.apply(
-            variables,
-            outputs,
-            time=time,
-            a_t=a_t,
-            train=False,
-            rngs={"dropout": fwd_rng},
-        )
-        n = sum(x.size for x in jax.tree.leaves(variables["params"]))
-        print(f"  {label:30s} steps={H:3d}  queries={H * A:4d}  pred={pred.shape}  params={n:,}")
-
-
-def run_with_guidance():
-    """Forward pass with classifier-free guidance tokens."""
-    print(Rule("XFlowHead: guidance tokens (CFG)"))
+def run_mixed_batch():
+    """Mixed batch: different embodiments in the same forward pass (1 kernel)."""
+    print(Rule("mixed batch: 4 embodiments, 1 forward pass"))
     B, W, N, E = 4, 2, 8, 512
-    dof = EMBODIMENTS["xarm_gripper"]
-    H, A = 10, len(dof)
-    G = 5
+    head = make_head()
 
-    head = XFlowHead(
-        readout_key="readout",
-        dof_ids=dof,
-        chunk_steps=chunk_range(H),
-        num_query_channels=256,
-        num_heads=8,
-        num_self_attend_layers=2,
-    )
-
-    rng = jax.random.PRNGKey(2)
+    rng = jax.random.PRNGKey(1)
     init_rng, fwd_rng = jax.random.split(rng)
     outputs = make_transformer_outputs(init_rng, B, W, N, E)
-    guidance_tokens = jax.random.normal(fwd_rng, (B, G, E))
-    guidance_mask = jnp.ones((B, G), dtype=jnp.int32)
     variables = head.init({"params": init_rng, "dropout": fwd_rng}, outputs)
 
+    # 4 different embodiments in one batch
+    embodiments = [
+        ("xarm_gripper", EMBODIMENTS["xarm_gripper"], chunk_range(10)),
+        ("xarm_ruka", EMBODIMENTS["xarm_ruka"], chunk_range(20)),
+        ("cartesian_pose", EMBODIMENTS["cartesian_pose"], chunk_strided(20, 2)),
+        ("cartesian_pos", EMBODIMENTS["cartesian_pos"], chunk_strided(100, 25)),
+    ]
+
+    dof_list, chunk_list = [], []
+    for _, dof, steps in embodiments:
+        d, c = pad_embodiment(dof, steps)
+        dof_list.append(d)
+        chunk_list.append(c)
+    dof_ids = jnp.stack(dof_list)  # (4, MAX_A)
+    chunk_steps = jnp.stack(chunk_list)  # (4, MAX_H)
+
     time = jax.random.uniform(fwd_rng, (B, W, 1))
-    a_t = jax.random.normal(fwd_rng, (B, W, H, A))
+    a_t = jax.random.normal(fwd_rng, (B, W, MAX_H, MAX_A))
 
-    pred_cond = head.apply(
+    pred = head.apply(
         variables,
         outputs,
         time=time,
         a_t=a_t,
+        dof_ids=dof_ids,
+        chunk_steps=chunk_steps,
         train=False,
-        guidance_tokens=guidance_tokens,
-        guidance_mask=guidance_mask,
         rngs={"dropout": fwd_rng},
     )
 
-    zero_mask = jnp.zeros((B, G), dtype=jnp.int32)
-    pred_uncond = head.apply(
-        variables,
-        outputs,
-        time=time,
-        a_t=a_t,
-        train=False,
-        guidance_tokens=guidance_tokens,
-        guidance_mask=zero_mask,
-        rngs={"dropout": fwd_rng},
-    )
+    print("[bold]mixed batch — per-sample valid queries:[/]")
+    q_mask = build_query_mask(chunk_steps, dof_ids)
+    for i, (name, dof, steps) in enumerate(embodiments):
+        valid = int(q_mask[i].sum())
+        print(f"  [{i}] {name:20s}  H={len(steps):2d} x A={len(dof):2d} = {valid:3d} valid / {MAX_H * MAX_A}")
 
-    print("[bold]guidance:[/]")
-    show("guidance_tokens", guidance_tokens)
-    show("guidance_mask", guidance_mask)
-    print("[bold]conditioned vs unconditioned:[/]")
-    show("pred_cond", pred_cond)
-    show("pred_uncond", pred_uncond)
-    diff = jnp.abs(pred_cond - pred_uncond).mean()
-    print(f"  mean |cond - uncond| = {float(diff):.6f}")
-    print("  (non-zero means guidance tokens affect output)")
-
-    cfg_scale = 2.0
-    pred_cfg = pred_uncond + cfg_scale * (pred_cond - pred_uncond)
-    show("pred_cfg (scale=2.0)", pred_cfg)
+    show("pred", pred)
     param_count(variables)
 
 
 def run_loss():
-    """Compute flow matching loss."""
-    print(Rule("XFlowHead: loss computation"))
+    """Loss computation with mixed embodiments."""
+    print(Rule("loss: mixed embodiments"))
     B, W, N, E = 4, 2, 8, 512
-    dof = EMBODIMENTS["xarm_gripper"]
-    H, A = 10, len(dof)
+    head = make_head()
 
-    head = XFlowHead(
-        readout_key="readout",
-        dof_ids=dof,
-        chunk_steps=chunk_range(H),
-        num_query_channels=256,
-        num_heads=8,
-        num_self_attend_layers=2,
-    )
-
-    rng = jax.random.PRNGKey(3)
+    rng = jax.random.PRNGKey(2)
     init_rng, fwd_rng = jax.random.split(rng)
     outputs = make_transformer_outputs(init_rng, B, W, N, E)
     variables = head.init({"params": init_rng, "dropout": fwd_rng}, outputs)
 
-    actions = jax.random.normal(fwd_rng, (B, W, H, A))
-    timestep_pad_mask = jnp.ones((B, W), dtype=bool)
-    action_pad_mask = jnp.ones((B, W, H, A), dtype=bool)
+    # Two different embodiments repeated
+    dof_a, chunk_a = pad_embodiment(EMBODIMENTS["xarm_gripper"], chunk_range(10))
+    dof_b, chunk_b = pad_embodiment(EMBODIMENTS["cartesian_pose"], chunk_strided(20, 2))
+    dof_ids = jnp.stack([dof_a, dof_b, dof_a, dof_b])
+    chunk_steps = jnp.stack([chunk_a, chunk_b, chunk_a, chunk_b])
+
+    actions = jax.random.normal(fwd_rng, (B, W, MAX_H, MAX_A))
 
     loss, metrics = head.apply(
         variables,
         outputs,
         actions,
-        timestep_pad_mask,
-        action_pad_mask,
+        dof_ids,
+        chunk_steps,
         train=True,
         method=head.loss,
         rngs={"dropout": fwd_rng},
@@ -284,13 +200,11 @@ def run_loss():
 
 
 def main():
-    print(Rule("XFlowHead Forward Pass Demo", style="bold magenta"))
-    run_init_and_forward()
-    run_various_embodiments()
-    run_strided_chunks()
-    run_with_guidance()
+    print(Rule("XFlowHead: Single-Kernel Cross-Embodiment Demo", style="bold magenta"))
+    run_single_embodiment()
+    run_mixed_batch()
     run_loss()
-    print("\n[bold green]All XFlowHead demos completed successfully.[/]")
+    print("\n[bold green]All demos completed successfully.[/]")
 
 
 if __name__ == "__main__":

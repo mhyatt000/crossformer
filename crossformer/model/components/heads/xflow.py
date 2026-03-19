@@ -16,7 +16,7 @@ from crossformer.model.components.transformer import MAPHead
 from crossformer.utils.mytyping import PRNGKey
 
 from .base import ActionHead
-from .dof import FactoredQueryEncoding
+from .dof import build_query_mask, FactoredQueryEncoding
 from .io.attention import CrossAttention, make_cross_attention_mask, SelfAttention
 from .losses import continuous_loss, sample_tau
 
@@ -79,27 +79,30 @@ class PerceiverDecoder(nn.Module):
 class XFlowHead(nn.Module, ActionHead):
     """Perceiver IO flow-matching head for cross-embodied action prediction.
 
-    Uses factored output queries (Fourier chunk position x learned DOF embedding)
-    that cross-attend to transformer embeddings (+ optional guidance tokens).
-    Each query predicts one scalar: the velocity for a single (timestep, DOF) pair.
+    Embodiment-agnostic: accepts per-sample dof_ids and chunk_steps at forward
+    time. The DOF vocabulary embedding is shared across all embodiments.
+    Padded positions (MASK DOF / CHUNK_PAD) are masked in attention.
+
+    Single-kernel training: all embodiments in one batch, padded to max size.
 
     Shape contract:
-        transformer tokens: (B, W, N, E) — batch, window, num_tokens, embed_dim
-        actions:            (B, W, H, A) — batch, window, action_horizon, action_dim
-        guidance_tokens:    (B, G, E)    — optional extra conditioning for CFG
+        transformer tokens: (B, W, N, E)
+        dof_ids:            (B, max_A) int — per-sample DOF vocab IDs, MASK-padded
+        chunk_steps:        (B, max_H) float — per-sample temporal positions, padded
+        actions:            (B, W, max_H, max_A) — padded with zeros
+        guidance_tokens:    (B, G, E) — optional
     """
 
     # Identity
     readout_key: str
 
-    # Action space — defined by DOF vocabulary + temporal chunk steps
-    dof_ids: tuple[int, ...]  # DOF vocab IDs, e.g. ids("j0",..."gripper")
-    chunk_steps: tuple[float, ...]  # temporal positions, e.g. chunk_range(20)
+    # Structural bounds (determines max query count = max_horizon * max_dofs)
+    max_dofs: int
+    max_horizon: int
     clip_pred: bool = True
     max_action: float = 5.0
     loss_type: str = "mse"
     loss_weight: float = 1.0
-    constrain_loss_dims: bool = True
 
     # Perceiver decoder
     num_query_channels: int = 256
@@ -116,14 +119,6 @@ class XFlowHead(nn.Module, ActionHead):
     # Pooling strategy for transformer outputs
     pool_strategy: str = "mean"
 
-    @property
-    def action_dim(self) -> int:
-        return len(self.dof_ids)
-
-    @property
-    def action_horizon(self) -> int:
-        return len(self.chunk_steps)
-
     def setup(self):
         D = self.num_query_channels
 
@@ -132,8 +127,6 @@ class XFlowHead(nn.Module, ActionHead):
 
         # Factored queries: Fourier chunk position x learned DOF embedding
         self.query_pos_enc = FactoredQueryEncoding(
-            chunk_steps=self.chunk_steps,
-            dof_ids=self.dof_ids,
             num_channels=D,
             name="query_pos_enc",
         )
@@ -173,28 +166,33 @@ class XFlowHead(nn.Module, ActionHead):
         if self.pool_strategy == "mean":
             return token_group.tokens.mean(axis=-2)
         if self.pool_strategy == "pass":
-            # Flatten tokens into the sequence dim: (B, W, N, E) -> (B, W*N, E)
             t = token_group.tokens
             return rearrange(t, "b w n e -> b (w n) e")
         raise ValueError(f"{self.pool_strategy} not implemented!")
 
-    def _build_queries(self, batch_size: int, time: ArrayLike, a_t: ArrayLike) -> Array:
-        """Build factored conditioned queries: (chunk ⊕ dof) + action + time.
+    def _build_queries(
+        self,
+        chunk_steps: ArrayLike,
+        dof_ids: ArrayLike,
+        time: ArrayLike,
+        a_t: ArrayLike,
+    ) -> Array:
+        """Build factored conditioned queries: (chunk + dof) + action + time.
 
         Args:
-            batch_size: B*W (merged batch and window dims).
+            chunk_steps: (BW, max_H) float.
+            dof_ids: (BW, max_A) int.
             time: (BW, 1) flow timestep.
-            a_t: (BW, H, A) noisy actions.
+            a_t: (BW, max_H, max_A) noisy actions.
 
         Returns:
-            (BW, H*A, num_query_channels)
+            (BW, max_H*max_A, D)
         """
-        # Factored positional encoding
-        pos_q = self.query_pos_enc(batch_size=batch_size)  # (BW, H*A, D)
+        pos_q = self.query_pos_enc(chunk_steps, dof_ids)  # (BW, max_H*max_A, D)
 
-        # Per-scalar action conditioning: (BW, H, A) → (BW, H*A, 1) → Fourier → Dense
+        # Per-scalar action conditioning
         a_flat = rearrange(a_t, "bw h a -> bw (h a) 1")
-        act_cond = self.action_proj(self.action_features(a_flat))  # (BW, H*A, D)
+        act_cond = self.action_proj(self.action_features(a_flat))  # (BW, max_H*max_A, D)
 
         # Time conditioning — broadcast across all queries
         t_cond = self.time_proj(self.time_features(time))[:, None, :]  # (BW, 1, D)
@@ -210,6 +208,8 @@ class XFlowHead(nn.Module, ActionHead):
         transformer_outputs: dict[str, TokenGroup],
         time: ArrayLike | None = None,
         a_t: ArrayLike | None = None,
+        dof_ids: ArrayLike | None = None,
+        chunk_steps: ArrayLike | None = None,
         train: bool = True,
         guidance_tokens: ArrayLike | None = None,
         guidance_mask: ArrayLike | None = None,
@@ -217,72 +217,76 @@ class XFlowHead(nn.Module, ActionHead):
         """Predict action velocities.
 
         Args:
-            transformer_outputs: dict mapping readout_key -> TokenGroup with
-                tokens of shape (B, W, N, E).
+            transformer_outputs: dict mapping readout_key -> TokenGroup (B, W, N, E).
             time: (B, W, 1) flow timestep in [0, 1].
-            a_t: (B, W, H, A) or (B, W, H*A) current noisy actions.
+            a_t: (B, W, max_H, max_A) or (B, W, max_H*max_A) noisy actions.
+            dof_ids: (B, max_A) int — MASK-padded DOF vocab IDs.
+            chunk_steps: (B, max_H) float — padded temporal positions.
             guidance_tokens: (B, G, E) optional extra conditioning tokens.
             guidance_mask: (B, G) int mask (1=keep, 0=drop for CFG).
 
         Returns:
-            (B, W, H*A) predicted velocity field.
+            (B, W, max_H*max_A) predicted velocity field.
         """
-        embeddings = self._embed(transformer_outputs, train=train)  # (B, W, E) or (B, S, E)
+        max_H, max_A = self.max_horizon, self.max_dofs
+        embeddings = self._embed(transformer_outputs, train=train)
 
         # During init provide zero dummies
-        if (time is None or a_t is None) and not self.is_initializing():
-            raise ValueError("Must provide time and a_t when calling XFlowHead")
         if self.is_initializing():
             B = embeddings.shape[0]
             W = embeddings.shape[1] if embeddings.ndim == 3 else 1
+            dof_ids = jnp.zeros((B, max_A), dtype=jnp.int32)
+            chunk_steps = jnp.zeros((B, max_H), dtype=jnp.float32)
             time = jnp.zeros((B, W, 1))
-            a_t = jnp.zeros((B, W, self.action_horizon, self.action_dim))
+            a_t = jnp.zeros((B, W, max_H, max_A))
+        elif time is None or a_t is None or dof_ids is None or chunk_steps is None:
+            raise ValueError("Must provide time, a_t, dof_ids, chunk_steps")
 
-        # Flatten actions to (B, W, H, A) if needed
         if a_t.ndim == 3:
-            a_t = rearrange(a_t, "b w (h a) -> b w h a", h=self.action_horizon, a=self.action_dim)
+            a_t = rearrange(a_t, "b w (h a) -> b w h a", h=max_H, a=max_A)
 
         B, W = time.shape[:2]
-        E = embeddings.shape[-1]
 
         # Merge batch and window: (B, W, ...) -> (BW, ...)
-        embed_bw = rearrange(embeddings, "b w ... -> (b w) ...")  # (BW, ..., E)
-        # If pool was "mean", embed_bw is (BW, E) — unsqueeze to (BW, 1, E) for cross-attn
+        embed_bw = rearrange(embeddings, "b w ... -> (b w) ...")
         if embed_bw.ndim == 2:
             embed_bw = embed_bw[:, None, :]  # (BW, 1, E)
-        time_bw = rearrange(time, "b w t -> (b w) t")  # (BW, 1)
-        a_t_bw = rearrange(a_t, "b w h a -> (b w) h a")  # (BW, H, A)
+        time_bw = rearrange(time, "b w t -> (b w) t")
+        a_t_bw = rearrange(a_t, "b w h a -> (b w) h a")
+
+        # Tile per-sample specs across window: (B, ...) -> (BW, ...)
+        dof_bw = jnp.repeat(dof_ids, W, axis=0)
+        chunk_bw = jnp.repeat(chunk_steps, W, axis=0)
 
         # Build conditioned queries
-        queries = self._build_queries(B * W, time_bw, a_t_bw)  # (BW, H*A, D)
+        queries = self._build_queries(chunk_bw, dof_bw, time_bw, a_t_bw)
 
-        # Build context: transformer embeddings + optional guidance tokens
-        context = embed_bw  # (BW, S, E)
-        attention_mask = None
+        # Query mask from padding — zero out padded queries
+        q_mask = build_query_mask(chunk_bw, dof_bw)  # (BW, max_H*max_A)
+        queries = queries * q_mask[..., None]
+
+        # Cross-attention mask (always applied — masks padded queries)
+        S = embed_bw.shape[1]
+        context = embed_bw
+        kv_mask = jnp.ones((B * W, S), dtype=jnp.int32)
 
         if guidance_tokens is not None:
             G = guidance_tokens.shape[1]
-            # Repeat guidance for each window step: (B, G, E) -> (BW, G, E)
-            guide_bw = jnp.repeat(guidance_tokens, W, axis=0) if W > 1 else guidance_tokens
-            # Tile properly: (B, G, E) -> (B, 1, G, E) -> (B, W, G, E) -> (BW, G, E)
             guide_bw = jnp.tile(guidance_tokens[:, None], (1, W, 1, 1))
             guide_bw = rearrange(guide_bw, "b w g e -> (b w) g e")
-            context = jnp.concatenate([context, guide_bw], axis=1)  # (BW, S+G, E)
-
-            # Build cross-attention mask
-            S = embed_bw.shape[1]
-            ctx_mask = jnp.ones((B * W, S), dtype=jnp.int32)
+            context = jnp.concatenate([context, guide_bw], axis=1)
 
             if guidance_mask is not None:
-                # (B, G) -> (BW, G)
                 g_mask_bw = jnp.tile(guidance_mask[:, None], (1, W, 1))
                 g_mask_bw = rearrange(g_mask_bw, "b w g -> (b w) g")
             else:
                 g_mask_bw = jnp.ones((B * W, G), dtype=jnp.int32)
+            kv_mask = jnp.concatenate([kv_mask, g_mask_bw], axis=1)
 
-            kv_mask = jnp.concatenate([ctx_mask, g_mask_bw], axis=1)  # (BW, S+G)
-            query_mask = jnp.ones((B * W, self.action_horizon * self.action_dim), dtype=jnp.int32)
-            attention_mask = make_cross_attention_mask(query_mask, kv_mask)
+        attention_mask = make_cross_attention_mask(
+            q_mask.astype(jnp.int32),
+            kv_mask,
+        )
 
         # Decode
         decoded = self.decoder(
@@ -290,12 +294,11 @@ class XFlowHead(nn.Module, ActionHead):
             context,
             deterministic=not train,
             attention_mask=attention_mask,
-        )  # (BW, H*A, D)
+        )
 
         # Scalar output per query, flatten
-        output = self.output_proj(decoded).squeeze(-1)  # (BW, H*A)
-        output = rearrange(output, "(b w) q -> b w q", b=B, w=W)  # (B, W, H*A)
-        return output
+        output = self.output_proj(decoded).squeeze(-1)  # (BW, max_H*max_A)
+        return rearrange(output, "(b w) q -> b w q", b=B, w=W)
 
     # ------------------------------------------------------------------
     # Loss
@@ -305,9 +308,8 @@ class XFlowHead(nn.Module, ActionHead):
         self,
         transformer_outputs: dict[str, TokenGroup],
         actions: ArrayLike,
-        timestep_pad_mask: ArrayLike,
-        action_pad_mask: ArrayLike,
-        action_head_mask: ArrayLike | None = None,
+        dof_ids: ArrayLike,
+        chunk_steps: ArrayLike,
         train: bool = True,
         guidance_tokens: ArrayLike | None = None,
         guidance_mask: ArrayLike | None = None,
@@ -316,17 +318,10 @@ class XFlowHead(nn.Module, ActionHead):
 
         Args:
             transformer_outputs: dict with readout_key -> TokenGroup (B, W, N, E).
-            actions: (B, W, H, A) ground-truth actions.
-            timestep_pad_mask: (B, W) bool mask for valid timesteps.
-            action_pad_mask: (B, W, H, A) bool mask for valid action dims.
-            action_head_mask: (B,) bool mask for embodiments using this head.
-            guidance_tokens: (B, G, E) optional guidance for CFG.
-            guidance_mask: (B, G) mask for guidance dropout.
+            actions: (B, W, max_H, max_A) padded ground-truth actions.
+            dof_ids: (B, max_A) MASK-padded DOF vocab IDs.
+            chunk_steps: (B, max_H) padded temporal positions.
         """
-        if self.constrain_loss_dims:
-            actions = actions[:, :, : self.action_horizon, : self.action_dim]
-            action_pad_mask = action_pad_mask[:, :, : self.action_horizon, : self.action_dim]
-
         actions_flat = rearrange(actions, "b w h a -> b w (h a)")
         actions_flat = jnp.clip(actions_flat, -self.max_action, self.max_action)
 
@@ -342,18 +337,16 @@ class XFlowHead(nn.Module, ActionHead):
             transformer_outputs,
             time=time,
             a_t=blended,
+            dof_ids=dof_ids,
+            chunk_steps=chunk_steps,
             train=train,
             guidance_tokens=guidance_tokens,
             guidance_mask=guidance_mask,
         )
 
-        if action_head_mask is None:
-            action_head_mask = jnp.ones(pred.shape[0], dtype=bool)
-
-        mask = rearrange(
-            timestep_pad_mask[:, :, None, None] & action_pad_mask & action_head_mask[:, None, None, None],
-            "b w h a -> b w (h a)",
-        )
+        # Loss mask from padding — broadcast across window dim
+        q_mask = build_query_mask(chunk_steps, dof_ids)  # (B, max_H*max_A)
+        mask = jnp.broadcast_to(q_mask[:, None, :], pred.shape)
 
         loss, metrics = continuous_loss(pred, target, mask, loss_type=self.loss_type)
         return loss * self.loss_weight, metrics
@@ -366,22 +359,23 @@ class XFlowHead(nn.Module, ActionHead):
         self,
         transformer_outputs: dict[str, TokenGroup],
         rng: PRNGKey,
+        dof_ids: ArrayLike,
+        chunk_steps: ArrayLike,
         train: bool = False,
         *args,
         sample_shape: tuple[int, ...] = (),
         guidance_tokens: ArrayLike | None = None,
         guidance_mask: ArrayLike | None = None,
         cfg_scale: float | None = None,
-        embodiment_action_dim: int | None = None,
         **kwargs,
     ) -> Array:
         """Predict actions by solving the flow ODE (Euler integration).
 
-        Args:
-            cfg_scale: if set, run classifier-free guidance with this scale.
-                v = v_uncond + cfg_scale * (v_cond - v_uncond)
+        Returns:
+            (B, W, max_H, max_A) — padded actions; use query mask to extract valid.
         """
         module, variables = self.unbind()
+        max_H, max_A = self.max_horizon, self.max_dofs
 
         def sample_actions(rng):
             rng, key = jax.random.split(rng)
@@ -390,7 +384,7 @@ class XFlowHead(nn.Module, ActionHead):
 
             a_t = self.base_std * jax.random.normal(
                 key,
-                (batch_size, window_size, self.action_horizon * self.action_dim),
+                (batch_size, window_size, max_H * max_A),
             )
             dt = 1.0 / max(self.flow_steps, 1)
 
@@ -401,6 +395,8 @@ class XFlowHead(nn.Module, ActionHead):
                     transformer_outputs,
                     t,
                     a_t,
+                    dof_ids=dof_ids,
+                    chunk_steps=chunk_steps,
                     train=train,
                     guidance_tokens=guidance_tokens,
                     guidance_mask=guidance_mask,
@@ -411,13 +407,14 @@ class XFlowHead(nn.Module, ActionHead):
 
                 if cfg_scale is not None:
                     v_cond = _velocity(a_t, time_val)
-                    # Unconditioned: zero out guidance mask
                     zero_mask = jnp.zeros_like(guidance_mask) if guidance_mask is not None else None
                     v_uncond = module.apply(
                         variables,
                         transformer_outputs,
                         jnp.full((*a_t.shape[:2], 1), time_val, dtype=a_t.dtype),
                         a_t,
+                        dof_ids=dof_ids,
+                        chunk_steps=chunk_steps,
                         train=train,
                         guidance_tokens=guidance_tokens,
                         guidance_mask=zero_mask,
@@ -434,12 +431,7 @@ class XFlowHead(nn.Module, ActionHead):
             steps = jnp.arange(self.flow_steps)
             a_t, _ = jax.lax.scan(scan_fn, a_t, steps)
 
-            actions = rearrange(
-                a_t,
-                "b w (h a) -> b w h a",
-                h=self.action_horizon,
-                a=self.action_dim,
-            )
+            actions = rearrange(a_t, "b w (h a) -> b w h a", h=max_H, a=max_A)
             if self.clip_pred:
                 actions = jnp.clip(actions, -self.max_action, self.max_action)
             return actions
