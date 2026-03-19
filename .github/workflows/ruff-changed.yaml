@@ -15,7 +15,6 @@ jobs:
     - uses: astral-sh/setup-uv@v5
       with:
         python-version: '3.11'
-    - run: uv sync --group dev
     - name: Run ruff on changed Python files
       shell: bash
       run: |
@@ -33,4 +32,4 @@ jobs:
         fi
 
         printf 'Ruff checking:\n%s\n' "${files[@]}"
-        uv run ruff check --fix --unsafe-fixes --config=ruff.toml "${files[@]}"
+        uvx ruff check --fix --unsafe-fixes --config=ruff.toml "${files[@]}"
