@@ -15,6 +15,7 @@ select = [  # list of rule codes Ruff should check
     "PERF", # perflint: safe micro-optimizations
     "ISC",  # implicit string concatenation checks (see ignore for ISC001)
     "RUF",  # Ruff-specific rules (e.g., remove unused `# noqa`)
+    "C901", # mccabe cyclomatic complexity
     #
     "T10",  # flake8-debugger: breakpoint()/pdb/ipdb/etc.
     "T20",  # flake8-print: print()/pprint()
@@ -75,7 +76,16 @@ unfixable = [
 
 [lint.per-file-ignores]
 "**/__init__.py" = ["F401"] # allow unused imports in top-level __init__.py
-"tests/**"       = ["T201","T203"] # allow print/pprint in tests
+"tests/**"       = [
+    "T201","T203",
+    "C901",
+] # allow print/pprint in tests
+"crossformer/data/oxe/**/*.py" = ["C901"]
+"crossformer/data/dataset.py" = ["C901"]
+"scripts/**" = ["C901"]
+
+[lint.mccabe]
+max-complexity = 10
 
 [lint.isort]
 order-by-type = false
