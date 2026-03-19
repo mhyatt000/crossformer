@@ -97,8 +97,8 @@ class XFlowHead(nn.Module, ActionHead):
     readout_key: str
 
     # Structural bounds (determines max query count = max_horizon * max_dofs)
-    max_dofs: int
-    max_horizon: int
+    max_dofs: int = 50
+    max_horizon: int = 20
     clip_pred: bool = True
     max_action: float = 5.0
     loss_type: str = "mse"
