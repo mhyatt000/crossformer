@@ -1,8 +1,8 @@
-"""Standalone training loop for XFlowHead with real data.
+"""End-to-end XFlowHead training: CrossFormerModel + real data.
 
-Loads data via GrainDataFactory, extracts actions for each head,
-maps to dof_ids/chunk_steps, and trains a shared XFlowHead on all heads.
-Transformer outputs are zeros (no backbone).
+Full transformer backbone with XFlowHead, trained on real data from
+GrainDataFactory. Multi-head cross-embodiment training with per-head
+gradient accumulation.
 
 Usage:
     uv run scripts/train/xflow.py
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import partial
+import re
 
 from flax.training.train_state import TrainState
 import jax
@@ -25,7 +26,7 @@ from rich.table import Table
 from tqdm import tqdm
 import tyro
 
-from crossformer.model.components.base import TokenGroup
+from crossformer.embody import slot_positions
 from crossformer.model.components.heads.dof import (
     build_query_mask,
     chunk_range,
@@ -33,14 +34,15 @@ from crossformer.model.components.heads.dof import (
     pad_chunk_steps,
     pad_dof_ids,
     pad_slot_positions,
-    slot_positions,
 )
 from crossformer.model.components.heads.xflow import XFlowHead
-from crossformer.utils.spec import spec
+from crossformer.model.components.tokenizers import LowdimObsTokenizer
+from crossformer.model.components.transformer import common_transformer_sizes
+from crossformer.model.crossformer_model import CrossFormerModel
+from crossformer.utils.spec import ModuleSpec, spec
 
 # -- embodiment mapping -------------------------------------------------------
 
-# Map batch action keys → DOF recipes in EMBODIMENTS.
 HEAD_TO_EMBODIMENT = {
     "single": "xarm_gripper",
     "single_arm": "xarm_gripper",
@@ -50,13 +52,10 @@ HEAD_TO_EMBODIMENT = {
 
 # -- config -------------------------------------------------------------------
 
-N_TOKENS = 8  # dummy transformer token count
-EMBED_DIM = 512
-
 
 @dataclass
 class Config:
-    """XFlowHead standalone training config."""
+    """XFlowHead end-to-end training config."""
 
     steps: int = 200  # training steps
     lr: float = 1e-3  # learning rate
@@ -65,6 +64,8 @@ class Config:
     mix: str = "xgym_sweep"  # dataset mix name
     heads: tuple[str, ...] = ("single", "k3ds")  # action head keys to train on
     horizon: int = 20  # action horizon from data pipeline
+    transformer_size: str = "dummy"  # transformer size preset
+    obs_keys: tuple[str, ...] = ("proprio_.*", "time", "timestep")  # lowdim obs keys to tokenize
 
 
 # -- helpers ------------------------------------------------------------------
@@ -81,82 +82,146 @@ def resolve_heads(heads):
     return info
 
 
-def make_head(max_h, max_a):
-    return XFlowHead(
-        readout_key="readout",
-        max_dofs=max_a,
-        max_horizon=max_h,
-        num_query_channels=256,
-        num_heads=8,
-        num_self_attend_layers=2,
-        flow_steps=10,
-    )
+def make_model_config(cfg, max_h, max_a, max_w):
+    """Build CrossFormerModel config with XFlowHead."""
+    token_dim, transformer_kwargs = common_transformer_sizes(cfg.transformer_size)
+    readout_name = "xflow"
+    readout_key = f"readout_{readout_name}"
+    return {
+        "model": {
+            "observation_tokenizers": {
+                "lowdim": ModuleSpec.create(
+                    LowdimObsTokenizer,
+                    obs_keys=list(cfg.obs_keys),
+                ),
+            },
+            "task_tokenizers": {},
+            "heads": {
+                "xflow": ModuleSpec.create(
+                    XFlowHead,
+                    readout_key=readout_key,
+                    max_dofs=max_a,
+                    max_horizon=max_h,
+                    num_query_channels=256,
+                    num_heads=8,
+                    num_self_attend_layers=2,
+                    flow_steps=10,
+                ),
+            },
+            "readouts": {readout_name: 4},
+            "token_embedding_size": token_dim,
+            "transformer_kwargs": transformer_kwargs,
+            "max_horizon": max_w,
+        },
+        "text_processor": None,
+    }
 
 
-def batch_to_xflow(batch, head_key, max_h, max_a, embodiment_name):
-    """Extract actions for one head and build XFlowHead inputs."""
+def normalize_obs(obs, obs_keys):
+    """Flatten selected lowdim inputs to (B, W, D)."""
+    out = dict(obs)
+    for key in obs_keys:
+        x = out[key]
+        if x.ndim == 2:
+            out[key] = x[..., None]
+        elif x.ndim > 3:
+            out[key] = x.reshape(*x.shape[:2], -1)
+    return out
+
+
+def resolve_obs_keys(obs, patterns):
+    """Resolve regex patterns against real observation keys."""
+    keys = []
+    for pat in patterns:
+        keys.extend(k for k in sorted(obs) if k not in keys and re.fullmatch(pat, k))
+    if not keys:
+        raise ValueError(f"No observation keys matched {patterns}. available={tuple(sorted(obs))}")
+    return tuple(keys)
+
+
+def prepare_head_inputs(batch, head_key, max_h, max_a, embodiment_name):
+    """Extract and pad actions + embodiment metadata for one head."""
+    if head_key not in batch["action"]:
+        return None
+
     actions_real = batch["action"][head_key]
     # Flatten multi-dim DOFs like k3ds (B, H, 21, 4) → (B, H, 84)
     if actions_real.ndim == 4 and actions_real.shape[-1] != actions_real.shape[-2]:
-        # Heuristic: if last two dims are unequal and ndim=4, it's (B, H, joints, coords)
         actions_real = actions_real.reshape(*actions_real.shape[:2], -1)
     if actions_real.ndim == 3:
         actions_real = actions_real[:, None, :, :]
-    B, W, H_real, A_real = actions_real.shape
+    B, W, H_real, A_real = actions_real.shape  # noqa RUF
+    if H_real > max_h or A_real > max_a:
+        raise ValueError(f"{head_key}: action shape {(H_real, A_real)} exceeds bounds {(max_h, max_a)}")
 
-    pad_h = max_h - H_real
-    pad_a = max_a - A_real
-    actions = jnp.pad(actions_real, ((0, 0), (0, 0), (0, pad_h), (0, pad_a)))
+    actions = jnp.pad(actions_real, ((0, 0), (0, 0), (0, max_h - H_real), (0, max_a - A_real)))
 
     dof_recipe = EMBODIMENTS[embodiment_name]
-    dof_padded = jnp.array(pad_dof_ids(dof_recipe, max_a))
-    chunk_padded = jnp.array(pad_chunk_steps(chunk_range(H_real), max_h))
-    slot_padded = jnp.array(pad_slot_positions(slot_positions(len(dof_recipe)), max_a))
-    dof_ids = jnp.tile(dof_padded[None], (B, 1))
-    chunk_steps = jnp.tile(chunk_padded[None], (B, 1))
-    slot_pos = jnp.tile(slot_padded[None], (B, 1))
+    dof_ids = jnp.tile(jnp.array(pad_dof_ids(dof_recipe, max_a))[None], (B, 1))
+    chunk_steps = jnp.tile(jnp.array(pad_chunk_steps(chunk_range(H_real), max_h))[None], (B, 1))
+    slot_pos = jnp.tile(jnp.array(pad_slot_positions(slot_positions(len(dof_recipe)), max_a))[None], (B, 1))
 
-    # Dummy transformer outputs (no backbone)
-    tokens = jnp.zeros((B, W, N_TOKENS, EMBED_DIM))
-    mask = jnp.ones((B, W, N_TOKENS), dtype=jnp.int32)
-    transformer_outputs = {"readout": TokenGroup(tokens=tokens, mask=mask)}
-
-    # Embodiment mask: which samples have data for this head
     emb_mask = batch["embodiment"].get(head_key)
     emb_mask = emb_mask.reshape(B) if emb_mask is not None else jnp.ones(B, dtype=jnp.bool_)
 
-    return transformer_outputs, actions, dof_ids, chunk_steps, slot_pos, emb_mask
+    return actions, dof_ids, chunk_steps, slot_pos, emb_mask
 
 
-# -- train step ---------------------------------------------------------------
+# -- TrainState with RNG -----------------------------------------------------
 
 
-@partial(jax.jit, static_argnames=("train",))
-def train_step_single(state, rng, transformer_outputs, actions, dof_ids, chunk_steps, slot_pos, emb_mask, train=True):
-    """Train step for one head, returns masked loss."""
-    dropout_rng = jax.random.fold_in(rng, state.step)
+class TrainStateRng(TrainState):
+    rng: jax.Array
 
-    def loss_fn(params):
-        loss, metrics = state.apply_fn(
-            {"params": params},
+    def apply_gradients(self, *, grads, **kwargs):
+        _, new_rng = jax.random.split(self.rng)
+        state = super().apply_gradients(grads=grads, **kwargs)
+        return state.replace(rng=new_rng)
+
+
+# -- train / eval steps ------------------------------------------------------
+
+
+def make_loss_fn(module):
+    """Build loss function: transformer → XFlowHead.loss for one head."""
+
+    def loss_fn(params, obs, task, pad_mask, actions, dof_ids, chunk_steps, slot_pos, emb_mask, rng, train=True):
+        bound = module.bind({"params": params}, rngs={"dropout": rng})
+        transformer_outputs = bound.crossformer_transformer(
+            obs,
+            task,
+            pad_mask,
+            train=train,
+        )
+        loss, metrics = bound.heads["xflow"].loss(
             transformer_outputs,
             actions,
             dof_ids,
             chunk_steps,
             slot_pos=slot_pos,
             train=train,
-            method=XFlowHead.loss,
-            rngs={"dropout": dropout_rng},
         )
-        # Mask loss by embodiment (samples without this head contribute 0)
         frac = emb_mask.mean()
         return loss * frac, {k: v * frac for k, v in metrics.items()}
 
-    (loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
+    return loss_fn
+
+
+@partial(jax.jit, static_argnames=("loss_fn", "train"))
+def train_step_single(
+    state, loss_fn, obs, task, pad_mask, actions, dof_ids, chunk_steps, slot_pos, emb_mask, train=True
+):
+    """Forward + backward for one head, returns loss + grads."""
+    rng = jax.random.fold_in(state.rng, state.step)
+
+    def _loss(params):
+        return loss_fn(params, obs, task, pad_mask, actions, dof_ids, chunk_steps, slot_pos, emb_mask, rng, train=train)
+
+    (loss, metrics), grads = jax.value_and_grad(_loss, has_aux=True)(state.params)
     return loss, metrics, grads
 
 
-@partial(jax.jit)
+@jax.jit
 def apply_grads(state, grads):
     state = state.apply_gradients(grads=grads)
     grad_norm = optax.global_norm(grads)
@@ -167,7 +232,7 @@ def apply_grads(state, grads):
 
 
 def main(cfg: Config):
-    print(Rule("XFlowHead: multi-head training on real data", style="bold magenta"))
+    print(Rule("XFlowHead + CrossFormerModel: real data", style="bold magenta"))
 
     # Resolve embodiments and compute max dims
     head_info = resolve_heads(cfg.heads)
@@ -197,24 +262,50 @@ def main(cfg: Config):
     dsit = iter(dataset.dataset)
     example_batch = next(dsit)
     print(spec(example_batch))
+    obs_keys = resolve_obs_keys(example_batch["observation"], cfg.obs_keys)
+    print(f"  obs_keys: {obs_keys}")
 
     for h in cfg.heads:
         act = example_batch["action"][h]
         print(f"  action['{h}'] shape: {act.shape}")
 
-    # Init model
-    print(Rule("init model"))
-    head = make_head(max_h, max_a)
+    # Build model
+    print(Rule("building CrossFormerModel"))
+    max_w = example_batch["observation"]["timestep_pad_mask"].shape[1]
+    example_obs = normalize_obs(example_batch["observation"], obs_keys)
+    config = make_model_config(cfg, max_h, max_a, max_w)
+    config["model"]["observation_tokenizers"]["lowdim"] = ModuleSpec.create(
+        LowdimObsTokenizer,
+        obs_keys=[f"^{re.escape(k)}$" for k in obs_keys],
+    )
+    init_batch = {
+        "observation": example_obs,
+        "task": example_batch.get("task", {"pad_mask_dict": {}}),
+    }
+
     rng = jax.random.PRNGKey(42)
     init_rng, train_rng, pred_rng = jax.random.split(rng, 3)
 
-    dummy = batch_to_xflow(example_batch, cfg.heads[0], max_h, max_a, head_info[cfg.heads[0]]["embodiment"])
-    variables = head.init({"params": init_rng, "dropout": init_rng}, dummy[0])
-    n_params = sum(x.size for x in jax.tree.leaves(variables["params"]))
-    print(f"params: {n_params:,}")
+    model = CrossFormerModel.from_config(
+        config,
+        init_batch,
+        text_processor=None,
+        verbose=False,
+        rng=init_rng,
+    )
+    n_params = sum(x.size for x in jax.tree.leaves(model.params))
+    print(f"  params: {n_params:,}")
+    print(f"  heads: {list(model.module.heads.keys())}")
 
+    # Optimizer + state
     tx = optax.adamw(cfg.lr, weight_decay=1e-4)
-    state = TrainState.create(apply_fn=head.apply, params=variables["params"], tx=tx)
+    state = TrainStateRng.create(
+        apply_fn=model.module.apply,
+        params=model.params,
+        tx=tx,
+        rng=train_rng,
+    )
+    loss_fn = make_loss_fn(model.module)
 
     # Train
     print(Rule("training"))
@@ -228,6 +319,9 @@ def main(cfg: Config):
     losses = []
     for step in tqdm(range(cfg.steps)):
         batch = next(dsit)
+        obs = normalize_obs(batch["observation"], obs_keys)
+        task = batch.get("task", {"pad_mask_dict": {}})
+        pad_mask = obs["timestep_pad_mask"]
 
         total_loss = 0.0
         total_grads = None
@@ -235,17 +329,22 @@ def main(cfg: Config):
 
         for h in cfg.heads:
             emb_name = head_info[h]["embodiment"]
-            tout, actions, dof_ids, chunk_steps, slot_pos, emb_mask = batch_to_xflow(
+            inputs = prepare_head_inputs(
                 batch,
                 h,
                 max_h,
                 max_a,
                 emb_name,
             )
+            if inputs is None:
+                continue
+            actions, dof_ids, chunk_steps, slot_pos, emb_mask = inputs
             loss_h, _metrics_h, grads_h = train_step_single(
                 state,
-                train_rng,
-                tout,
+                loss_fn,
+                obs,
+                task,
+                pad_mask,
                 actions,
                 dof_ids,
                 chunk_steps,
@@ -254,15 +353,10 @@ def main(cfg: Config):
             )
             total_loss += float(loss_h)
             head_losses[h] = float(loss_h)
-            total_grads = (
-                grads_h
-                if total_grads is None
-                else jax.tree.map(
-                    lambda a, b: a + b,
-                    total_grads,
-                    grads_h,
-                )
-            )
+            total_grads = grads_h if total_grads is None else jax.tree.map(lambda a, b: a + b, total_grads, grads_h)
+
+        if total_grads is None:
+            raise ValueError(f"No configured heads found in batch. wanted={cfg.heads} got={tuple(batch['action'])}")
 
         state, grad_norm = apply_grads(state, total_grads)
         losses.append(total_loss)
@@ -289,36 +383,48 @@ def main(cfg: Config):
     print(Rule("predict_action: full denoise per head"))
 
     batch = next(dsit)
+    obs = normalize_obs(batch["observation"], obs_keys)
+    task = batch.get("task", {"pad_mask_dict": {}})
+
+    bound = model.module.bind({"params": state.params})
+    transformer_outputs = bound.crossformer_transformer(
+        obs,
+        task,
+        obs["timestep_pad_mask"],
+        train=False,
+    )
+
     for i, h in enumerate(cfg.heads):
         emb_name = head_info[h]["embodiment"]
         n_dofs = head_info[h]["n_dofs"]
-        tout, actions, dof_ids, chunk_steps, slot_pos, _ = batch_to_xflow(
+        inputs = prepare_head_inputs(
             batch,
             h,
             max_h,
             max_a,
             emb_name,
         )
+        if inputs is None:
+            continue
+        actions, dof_ids, chunk_steps, slot_pos, _ = inputs
 
-        pred = head.apply(
-            {"params": state.params},
-            tout,
+        pred = bound.heads["xflow"].predict_action(
+            transformer_outputs,
             rng=jax.random.fold_in(pred_rng, i),
             dof_ids=dof_ids,
             chunk_steps=chunk_steps,
             slot_pos=slot_pos,
             train=False,
-            method=XFlowHead.predict_action,
         )  # (B, W, max_h, max_a)
 
         # Extract valid region and compute MSE
-        q_mask = build_query_mask(chunk_steps, dof_ids, slot_pos)  # (B, max_h*max_a)
-        pred_flat = pred.reshape(cfg.batch_size, 1, -1)
-        tgt_flat = actions.reshape(cfg.batch_size, 1, -1)
-        sq_err = (pred_flat - tgt_flat) ** 2 * q_mask[:, None, :]
-        mse = sq_err.sum() / (q_mask.sum() * 1)  # avg over valid queries
+        q_mask = build_query_mask(chunk_steps, dof_ids, slot_pos)
+        pred_flat = pred.reshape(pred.shape[0], pred.shape[1], -1)
+        tgt_flat = actions.reshape(actions.shape[0], actions.shape[1], -1)
+        mask = jnp.broadcast_to(q_mask[:, None, :], pred_flat.shape)
+        sq_err = (pred_flat - tgt_flat) ** 2 * mask
+        mse = sq_err.sum() / mask.sum()
 
-        # Extract valid actions for display (first sample)
         pred_valid = pred[0, 0, : cfg.horizon, :n_dofs]
         tgt_valid = actions[0, 0, : cfg.horizon, :n_dofs]
 
