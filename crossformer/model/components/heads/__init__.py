@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from crossformer.embody import DOF, ids, MASK_ID, VOCAB_SIZE
+
 from .base import ActionHead, ContinuousActionHead
 from .diffusion import DiffusionActionHead
 from .dof import (
@@ -9,14 +11,10 @@ from .dof import (
     CHUNK_PAD,
     chunk_range,
     chunk_strided,
-    DOF,
     EMBODIMENTS,
     FactoredQueryEncoding,
-    ids,
-    MASK_ID,
     pad_chunk_steps,
     pad_dof_ids,
-    VOCAB_SIZE,
 )
 from .flow import AdjFlowHead, FlowMatchingActionHead
 from .l1 import L1ActionHead, MSEActionHead

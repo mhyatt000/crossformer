@@ -174,21 +174,23 @@ class XFlowHead(nn.Module, ActionHead):
         self,
         chunk_steps: ArrayLike,
         dof_ids: ArrayLike,
+        slot_pos: ArrayLike,
         time: ArrayLike,
         a_t: ArrayLike,
     ) -> Array:
-        """Build factored conditioned queries: (chunk + dof) + action + time.
+        """Build factored conditioned queries: (chunk + dof + slot) + action + time.
 
         Args:
             chunk_steps: (BW, max_H) float.
             dof_ids: (BW, max_A) int.
+            slot_pos: (BW, max_A) float.
             time: (BW, 1) flow timestep.
             a_t: (BW, max_H, max_A) noisy actions.
 
         Returns:
             (BW, max_H*max_A, D)
         """
-        pos_q = self.query_pos_enc(chunk_steps, dof_ids)  # (BW, max_H*max_A, D)
+        pos_q = self.query_pos_enc(chunk_steps, dof_ids, slot_pos)  # (BW, max_H*max_A, D)
 
         # Per-scalar action conditioning
         a_flat = rearrange(a_t, "bw h a -> bw (h a) 1")
@@ -210,6 +212,7 @@ class XFlowHead(nn.Module, ActionHead):
         a_t: ArrayLike | None = None,
         dof_ids: ArrayLike | None = None,
         chunk_steps: ArrayLike | None = None,
+        slot_pos: ArrayLike | None = None,
         train: bool = True,
         guidance_tokens: ArrayLike | None = None,
         guidance_mask: ArrayLike | None = None,
@@ -222,6 +225,7 @@ class XFlowHead(nn.Module, ActionHead):
             a_t: (B, W, max_H, max_A) or (B, W, max_H*max_A) noisy actions.
             dof_ids: (B, max_A) int — MASK-padded DOF vocab IDs.
             chunk_steps: (B, max_H) float — padded temporal positions.
+            slot_pos: (B, max_A) float — ordinal position in action vector.
             guidance_tokens: (B, G, E) optional extra conditioning tokens.
             guidance_mask: (B, G) int mask (1=keep, 0=drop for CFG).
 
@@ -237,10 +241,17 @@ class XFlowHead(nn.Module, ActionHead):
             W = embeddings.shape[1] if embeddings.ndim == 3 else 1
             dof_ids = jnp.zeros((B, max_A), dtype=jnp.int32)
             chunk_steps = jnp.zeros((B, max_H), dtype=jnp.float32)
+            slot_pos = jnp.zeros((B, max_A), dtype=jnp.float32)
             time = jnp.zeros((B, W, 1))
             a_t = jnp.zeros((B, W, max_H, max_A))
         elif time is None or a_t is None or dof_ids is None or chunk_steps is None:
             raise ValueError("Must provide time, a_t, dof_ids, chunk_steps")
+
+        if slot_pos is None:
+            slot_pos = jnp.broadcast_to(
+                jnp.arange(max_A, dtype=jnp.float32),
+                dof_ids.shape,
+            )
 
         if a_t.ndim == 3:
             a_t = rearrange(a_t, "b w (h a) -> b w h a", h=max_H, a=max_A)
@@ -257,12 +268,13 @@ class XFlowHead(nn.Module, ActionHead):
         # Tile per-sample specs across window: (B, ...) -> (BW, ...)
         dof_bw = jnp.repeat(dof_ids, W, axis=0)
         chunk_bw = jnp.repeat(chunk_steps, W, axis=0)
+        slot_bw = jnp.repeat(slot_pos, W, axis=0)
 
         # Build conditioned queries
-        queries = self._build_queries(chunk_bw, dof_bw, time_bw, a_t_bw)
+        queries = self._build_queries(chunk_bw, dof_bw, slot_bw, time_bw, a_t_bw)
 
         # Query mask from padding — zero out padded queries
-        q_mask = build_query_mask(chunk_bw, dof_bw)  # (BW, max_H*max_A)
+        q_mask = build_query_mask(chunk_bw, dof_bw, slot_bw)  # (BW, max_H*max_A)
         queries = queries * q_mask[..., None]
 
         # Cross-attention mask (always applied — masks padded queries)
@@ -310,6 +322,7 @@ class XFlowHead(nn.Module, ActionHead):
         actions: ArrayLike,
         dof_ids: ArrayLike,
         chunk_steps: ArrayLike,
+        slot_pos: ArrayLike | None = None,
         train: bool = True,
         guidance_tokens: ArrayLike | None = None,
         guidance_mask: ArrayLike | None = None,
@@ -321,6 +334,7 @@ class XFlowHead(nn.Module, ActionHead):
             actions: (B, W, max_H, max_A) padded ground-truth actions.
             dof_ids: (B, max_A) MASK-padded DOF vocab IDs.
             chunk_steps: (B, max_H) padded temporal positions.
+            slot_pos: (B, max_A) float — ordinal position (optional, defaults to arange).
         """
         actions_flat = rearrange(actions, "b w h a -> b w (h a)")
         actions_flat = jnp.clip(actions_flat, -self.max_action, self.max_action)
@@ -339,13 +353,14 @@ class XFlowHead(nn.Module, ActionHead):
             a_t=blended,
             dof_ids=dof_ids,
             chunk_steps=chunk_steps,
+            slot_pos=slot_pos,
             train=train,
             guidance_tokens=guidance_tokens,
             guidance_mask=guidance_mask,
         )
 
         # Loss mask from padding — broadcast across window dim
-        q_mask = build_query_mask(chunk_steps, dof_ids)  # (B, max_H*max_A)
+        q_mask = build_query_mask(chunk_steps, dof_ids, slot_pos)  # (B, max_H*max_A)
         mask = jnp.broadcast_to(q_mask[:, None, :], pred.shape)
 
         loss, metrics = continuous_loss(pred, target, mask, loss_type=self.loss_type)
@@ -361,6 +376,7 @@ class XFlowHead(nn.Module, ActionHead):
         rng: PRNGKey,
         dof_ids: ArrayLike,
         chunk_steps: ArrayLike,
+        slot_pos: ArrayLike | None = None,
         train: bool = False,
         *args,
         sample_shape: tuple[int, ...] = (),
@@ -397,6 +413,7 @@ class XFlowHead(nn.Module, ActionHead):
                     a_t,
                     dof_ids=dof_ids,
                     chunk_steps=chunk_steps,
+                    slot_pos=slot_pos,
                     train=train,
                     guidance_tokens=guidance_tokens,
                     guidance_mask=guidance_mask,
@@ -415,6 +432,7 @@ class XFlowHead(nn.Module, ActionHead):
                         a_t,
                         dof_ids=dof_ids,
                         chunk_steps=chunk_steps,
+                        slot_pos=slot_pos,
                         train=train,
                         guidance_tokens=guidance_tokens,
                         guidance_mask=zero_mask,
