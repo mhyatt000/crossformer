@@ -5,12 +5,17 @@ from pathlib import Path
 import resource
 
 import grain
+import jax
 import numpy as np
 import pytest
 
 from crossformer.data.arec.arec import ArrayRecordBuilder
 
 pytestmark = [pytest.mark.integration, pytest.mark.slow]
+
+
+def _has_2_gpus() -> bool:
+    return len(jax.devices()) >= 2
 
 
 LOW_FD_LIMIT = 48
@@ -123,6 +128,7 @@ def _run_case(
 
 
 @pytest.mark.skipif(os.name != "posix", reason="FD-limit behavior requires POSIX rlimit")
+@pytest.mark.skipif(not _has_2_gpus(), reason="requires 2+ GPUs")
 @pytest.mark.parametrize("read_threads", [1, 4, 16], ids=lambda x: f"thread{x}")
 @pytest.mark.parametrize("mp_workers", [1, 2, 4, 8], ids=lambda x: f"proc{x}")
 @pytest.mark.parametrize("mp_buffer", [1, 8], ids=lambda x: f"buf{x}")
