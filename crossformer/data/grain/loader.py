@@ -262,6 +262,7 @@ class GrainDataFactory:
     """in charge of making GrainDataLoader"""
 
     stats: dict[str, Any] = field(init=False, default_factory=dict)
+    mp: int = 8  # of processes for mp prefetch. set to 0 to disable mp prefetch
 
     def source2ds(self, dconfig, tfconfig, cfg: cn.Train) -> GrainDataLoader:
         ds, stats = make_single_dataset(
@@ -343,7 +344,8 @@ class GrainDataFactory:
         )
 
         ds = ds.batch(cfg.data.loader.batch_size, drop_remainder=True)  # , batch_fn=batch_fn)
-        ds = ds.mp_prefetch(grain.MultiprocessingOptions(num_workers=8, per_worker_buffer_size=8))
+        if self.mp > 0:
+            ds = ds.mp_prefetch(grain.MultiprocessingOptions(num_workers=self.mp, per_worker_buffer_size=8))
 
         batch = next(iter(ds))
         log.debug("batch spec: %s", spec(batch))
