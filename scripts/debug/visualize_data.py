@@ -11,12 +11,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 from rich.pretty import pprint
 import tyro
-import wandb
 
 from crossformer import cn
 from crossformer.data.grain import builders, pipelines
 from crossformer.data.grain.datasets import _DecodedArrayRecord, _EpisodeDataset
 from crossformer.utils.spec import spec
+import wandb
 
 logger = logging.getLogger(__name__)
 
