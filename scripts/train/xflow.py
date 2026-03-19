@@ -18,11 +18,14 @@ import re
 
 from flax.training.train_state import TrainState
 import jax
+from jax.experimental import multihost_utils
 import jax.numpy as jnp
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 import optax
 from rich import print
 from rich.rule import Rule
 from rich.table import Table
+import tensorflow as tf
 from tqdm import tqdm
 import tyro
 
@@ -39,6 +42,7 @@ from crossformer.model.components.heads.xflow import XFlowHead
 from crossformer.model.components.tokenizers import LowdimObsTokenizer
 from crossformer.model.components.transformer import common_transformer_sizes
 from crossformer.model.crossformer_model import CrossFormerModel
+from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec, spec
 
 # -- embodiment mapping -------------------------------------------------------
@@ -167,6 +171,11 @@ def prepare_head_inputs(batch, head_key, max_h, max_a, embodiment_name):
     return actions, dof_ids, chunk_steps, slot_pos, emb_mask
 
 
+def shard_batch(batch, mesh):
+    """Shard a host-local batch across the data axis."""
+    return multihost_utils.host_local_array_to_global_array(batch, mesh, PartitionSpec("batch"))
+
+
 # -- TrainState with RNG -----------------------------------------------------
 
 
@@ -232,7 +241,17 @@ def apply_grads(state, grads):
 
 
 def main(cfg: Config):
+    tf.config.set_visible_devices([], "GPU")
+    initialize_compilation_cache()
+    devices = jax.devices()
+    mesh = Mesh(devices, axis_names="batch")
+    dp_sharding = NamedSharding(mesh, PartitionSpec("batch"))
+    replicated_sharding = NamedSharding(mesh, PartitionSpec())
+
     print(Rule("XFlowHead + CrossFormerModel: real data", style="bold magenta"))
+    print(f"  backend={jax.default_backend()} devices={len(devices)}")
+    if cfg.batch_size % len(devices) != 0:
+        raise ValueError(f"batch_size={cfg.batch_size} must be divisible by devices={len(devices)}")
 
     # Resolve embodiments and compute max dims
     head_info = resolve_heads(cfg.heads)
@@ -258,7 +277,7 @@ def main(cfg: Config):
         seed=42,
         verbosity=0,
     )
-    dataset = GrainDataFactory(mp=0).make(train_cfg, shard_fn=None, train=True)
+    dataset = GrainDataFactory(mp=0).make(train_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=True)
     dsit = iter(dataset.dataset)
     example_batch = next(dsit)
     print(spec(example_batch))
@@ -292,6 +311,10 @@ def main(cfg: Config):
         text_processor=None,
         verbose=False,
         rng=init_rng,
+    )
+    model = model.replace(
+        params=jax.tree.map(lambda x: jax.device_put(x, replicated_sharding), model.params),
+        example_batch=jax.tree.map(lambda x: jax.device_put(x, replicated_sharding), model.example_batch),
     )
     n_params = sum(x.size for x in jax.tree.leaves(model.params))
     print(f"  params: {n_params:,}")
@@ -362,6 +385,7 @@ def main(cfg: Config):
         losses.append(total_loss)
 
         if step % cfg.log_every == 0 or step == cfg.steps - 1:
+            print(f"\n[bold]step={step} loss={total_loss}:[/]")
             row = [str(step), f"{total_loss:.4f}"]
             row.extend(f"{head_losses[h]:.4f}" for h in cfg.heads)
             row.append(f"{float(grad_norm):.4f}")
