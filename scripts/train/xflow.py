@@ -30,6 +30,7 @@ from tqdm import tqdm
 import tyro
 
 from crossformer.embody import slot_positions
+from crossformer.model.components.guidance import TokenGuidance
 from crossformer.model.components.heads.dof import (
     build_query_mask,
     chunk_range,
@@ -44,6 +45,7 @@ from crossformer.model.components.transformer import common_transformer_sizes
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec, spec
+from crossformer.utils.tree.core import flat
 
 # -- embodiment mapping -------------------------------------------------------
 
@@ -61,15 +63,21 @@ HEAD_TO_EMBODIMENT = {
 class Config:
     """XFlowHead end-to-end training config."""
 
-    steps: int = 200  # training steps
+    steps: int = 1  # training steps (1 for debug)
     lr: float = 1e-3  # learning rate
-    log_every: int = 10  # log interval
+    log_every: int = 1  # log interval
     batch_size: int = 4  # global batch size
     mix: str = "xgym_sweep"  # dataset mix name
     heads: tuple[str, ...] = ("single", "k3ds")  # action head keys to train on
     horizon: int = 20  # action horizon from data pipeline
     transformer_size: str = "dummy"  # transformer size preset
     obs_keys: tuple[str, ...] = ("proprio_.*", "time", "timestep")  # lowdim obs keys to tokenize
+
+    # Token guidance
+    use_guidance: bool = True  # enable guidance tokens
+    compress_guidance: bool = False  # compress via perceiver latents
+    num_guidance_latents: int = 4  # latent count when compress=True
+    guide_key: str = "action.pose"  # dot-path into batch for guidance signal
 
 
 # -- helpers ------------------------------------------------------------------
@@ -191,17 +199,48 @@ class TrainStateRng(TrainState):
 # -- train / eval steps ------------------------------------------------------
 
 
-def make_loss_fn(module):
-    """Build loss function: transformer → XFlowHead.loss for one head."""
+def make_loss_fn(module, guide_module=None):
+    """Build loss function: transformer → XFlowHead.loss for one head.
 
-    def loss_fn(params, obs, task, pad_mask, actions, dof_ids, chunk_steps, slot_pos, emb_mask, rng, train=True):
-        bound = module.bind({"params": params}, rngs={"dropout": rng})
+    When guide_module is provided, params is a dict {"model": ..., "guide": ...}.
+    The guide module encodes guide_input into guidance_tokens for the head.
+    """
+
+    def loss_fn(
+        params,
+        obs,
+        task,
+        pad_mask,
+        actions,
+        dof_ids,
+        chunk_steps,
+        slot_pos,
+        emb_mask,
+        rng,
+        guide_input=None,
+        train=True,
+    ):
+        if guide_module is not None:
+            model_params, guide_params = params["model"], params["guide"]
+        else:
+            model_params = params
+
+        bound = module.bind({"params": model_params}, rngs={"dropout": rng})
         transformer_outputs = bound.crossformer_transformer(
             obs,
             task,
             pad_mask,
             train=train,
         )
+
+        guidance_tokens = None
+        if guide_module is not None and guide_input is not None:
+            guidance_tokens = guide_module.apply(
+                {"params": guide_params},
+                guide_input,
+                deterministic=not train,
+            )
+
         loss, metrics = bound.heads["xflow"].loss(
             transformer_outputs,
             actions,
@@ -209,6 +248,7 @@ def make_loss_fn(module):
             chunk_steps,
             slot_pos=slot_pos,
             train=train,
+            guidance_tokens=guidance_tokens,
         )
         frac = emb_mask.mean()
         return loss * frac, {k: v * frac for k, v in metrics.items()}
@@ -218,13 +258,26 @@ def make_loss_fn(module):
 
 @partial(jax.jit, static_argnames=("loss_fn", "train"))
 def train_step_single(
-    state, loss_fn, obs, task, pad_mask, actions, dof_ids, chunk_steps, slot_pos, emb_mask, train=True
+    state, loss_fn, obs, task, pad_mask, actions, dof_ids, chunk_steps, slot_pos, emb_mask, guide_input=None, train=True
 ):
     """Forward + backward for one head, returns loss + grads."""
     rng = jax.random.fold_in(state.rng, state.step)
 
     def _loss(params):
-        return loss_fn(params, obs, task, pad_mask, actions, dof_ids, chunk_steps, slot_pos, emb_mask, rng, train=train)
+        return loss_fn(
+            params,
+            obs,
+            task,
+            pad_mask,
+            actions,
+            dof_ids,
+            chunk_steps,
+            slot_pos,
+            emb_mask,
+            rng,
+            guide_input=guide_input,
+            train=train,
+        )
 
     (loss, metrics), grads = jax.value_and_grad(_loss, has_aux=True)(state.params)
     return loss, metrics, grads
@@ -320,15 +373,38 @@ def main(cfg: Config):
     print(f"  params: {n_params:,}")
     print(f"  heads: {list(model.module.heads.keys())}")
 
+    # Guidance encoder
+    guide_module = None
+    guide_params = None
+    if cfg.use_guidance:
+        print(Rule("guidance encoder"))
+        guide_example = flat(example_batch).get(cfg.guide_key)
+        if guide_example is None:
+            raise ValueError(f"guide_key={cfg.guide_key!r} not found in batch. check dot-path.")
+        # Flatten trailing dims if needed: (B, W, ...) → (B, W, D)
+        if guide_example.ndim > 3:
+            guide_example = guide_example.reshape(*guide_example.shape[:2], -1)
+        print(f"  guide_key={cfg.guide_key} shape={guide_example.shape}")
+        guide_module = TokenGuidance(
+            embed_dim=256,
+            compress=cfg.compress_guidance,
+            num_latents=cfg.num_guidance_latents,
+        )
+        guide_vars = guide_module.init(init_rng, guide_example)
+        guide_params = jax.tree.map(lambda x: jax.device_put(x, replicated_sharding), guide_vars["params"])
+        n_guide = sum(x.size for x in jax.tree.leaves(guide_params))
+        print(f"  guide params: {n_guide:,}  compress={cfg.compress_guidance}")
+
     # Optimizer + state
+    combined_params = {"model": model.params, "guide": guide_params} if guide_module is not None else model.params
     tx = optax.adamw(cfg.lr, weight_decay=1e-4)
     state = TrainStateRng.create(
         apply_fn=model.module.apply,
-        params=model.params,
+        params=combined_params,
         tx=tx,
         rng=train_rng,
     )
-    loss_fn = make_loss_fn(model.module)
+    loss_fn = make_loss_fn(model.module, guide_module=guide_module)
 
     # Train
     print(Rule("training"))
@@ -345,6 +421,13 @@ def main(cfg: Config):
         obs = normalize_obs(batch["observation"], obs_keys)
         task = batch.get("task", {"pad_mask_dict": {}})
         pad_mask = obs["timestep_pad_mask"]
+
+        # Extract guidance signal
+        guide_input = None
+        if cfg.use_guidance:
+            guide_input = flat(batch).get(cfg.guide_key)
+            if guide_input is not None and guide_input.ndim > 3:
+                guide_input = guide_input.reshape(*guide_input.shape[:2], -1)
 
         total_loss = 0.0
         total_grads = None
@@ -373,6 +456,7 @@ def main(cfg: Config):
                 chunk_steps,
                 slot_pos,
                 emb_mask,
+                guide_input=guide_input,
             )
             total_loss += float(loss_h)
             head_losses[h] = float(loss_h)
@@ -410,13 +494,27 @@ def main(cfg: Config):
     obs = normalize_obs(batch["observation"], obs_keys)
     task = batch.get("task", {"pad_mask_dict": {}})
 
-    bound = model.module.bind({"params": state.params})
+    model_params = state.params["model"] if guide_module is not None else state.params
+    bound = model.module.bind({"params": model_params})
     transformer_outputs = bound.crossformer_transformer(
         obs,
         task,
         obs["timestep_pad_mask"],
         train=False,
     )
+
+    # Encode guidance tokens for inference
+    guide_tokens = None
+    if guide_module is not None:
+        guide_eval = flat(batch).get(cfg.guide_key)
+        if guide_eval is not None:
+            if guide_eval.ndim > 3:
+                guide_eval = guide_eval.reshape(*guide_eval.shape[:2], -1)
+            guide_tokens = guide_module.apply(
+                {"params": state.params["guide"]},
+                guide_eval,
+                deterministic=True,
+            )
 
     for i, h in enumerate(cfg.heads):
         emb_name = head_info[h]["embodiment"]
@@ -439,6 +537,7 @@ def main(cfg: Config):
             chunk_steps=chunk_steps,
             slot_pos=slot_pos,
             train=False,
+            guidance_tokens=guide_tokens,
         )  # (B, W, max_h, max_a)
 
         # Extract valid region and compute MSE
