@@ -79,6 +79,8 @@ class Config:
     num_guidance_latents: int = 4  # latent count when compress=True
     guide_key: str = "action.pose"  # dot-path into batch for guidance signal
 
+    mp: int = 1  # grain multiproc (for data loading)
+
 
 # -- helpers ------------------------------------------------------------------
 
@@ -199,48 +201,26 @@ class TrainStateRng(TrainState):
 # -- train / eval steps ------------------------------------------------------
 
 
-def make_loss_fn(module, guide_module=None):
-    """Build loss function: transformer → XFlowHead.loss for one head.
+def make_train_step(module, num_heads, guide_module=None):
+    """Build a fully compiled multi-head train step.
 
-    When guide_module is provided, params is a dict {"model": ..., "guide": ...}.
-    The guide module encodes guide_input into guidance_tokens for the head.
+    Runs the transformer once, then computes loss + grads for each head
+    inside a single JIT-compiled function via jax.lax.scan over stacked
+    per-head inputs.
+
+    Args:
+        module: CrossFormerModel module.
+        num_heads: number of action heads (determines scan length).
+        guide_module: optional TokenGuidance module.
+
+    Returns:
+        Compiled train_step(state, obs, task, pad_mask, head_inputs, guide_input).
     """
 
-    def loss_fn(
-        params,
-        obs,
-        task,
-        pad_mask,
-        actions,
-        dof_ids,
-        chunk_steps,
-        slot_pos,
-        emb_mask,
-        rng,
-        guide_input=None,
-        train=True,
-    ):
-        if guide_module is not None:
-            model_params, guide_params = params["model"], params["guide"]
-        else:
-            model_params = params
-
-        bound = module.bind({"params": model_params}, rngs={"dropout": rng})
-        transformer_outputs = bound.crossformer_transformer(
-            obs,
-            task,
-            pad_mask,
-            train=train,
-        )
-
-        guidance_tokens = None
-        if guide_module is not None and guide_input is not None:
-            guidance_tokens = guide_module.apply(
-                {"params": guide_params},
-                guide_input,
-                deterministic=not train,
-            )
-
+    def _loss_one_head(params, transformer_outputs, head_input, guidance_tokens, rng, train):
+        """Loss for a single head given precomputed transformer outputs."""
+        actions, dof_ids, chunk_steps, slot_pos, emb_mask = head_input
+        bound = module.bind({"params": params}, rngs={"dropout": rng})
         loss, metrics = bound.heads["xflow"].loss(
             transformer_outputs,
             actions,
@@ -253,41 +233,54 @@ def make_loss_fn(module, guide_module=None):
         frac = emb_mask.mean()
         return loss * frac, {k: v * frac for k, v in metrics.items()}
 
-    return loss_fn
+    @partial(jax.jit, static_argnames=("train",))
+    def train_step(state, obs, task, pad_mask, head_inputs, guide_input=None, train=True):
+        """Full multi-head train step: fwd transformer once, loss per head, sum grads.
 
+        Args:
+            state: TrainStateRng (params are {"model": ..., "guide": ...} or flat).
+            obs: observation dict.
+            task: task dict.
+            pad_mask: (B, W) timestep pad mask.
+            head_inputs: tuple of (actions, dof_ids, chunk_steps, slot_pos, emb_mask)
+                per head — each array has shape (B, ...).
+            guide_input: optional (B, S, D) guidance signal.
+            train: bool.
 
-@partial(jax.jit, static_argnames=("loss_fn", "train"))
-def train_step_single(
-    state, loss_fn, obs, task, pad_mask, actions, dof_ids, chunk_steps, slot_pos, emb_mask, guide_input=None, train=True
-):
-    """Forward + backward for one head, returns loss + grads."""
-    rng = jax.random.fold_in(state.rng, state.step)
+        Returns:
+            (state, total_loss, head_losses, grad_norm).
+        """
+        rng = jax.random.fold_in(state.rng, state.step)
 
-    def _loss(params):
-        return loss_fn(
-            params,
-            obs,
-            task,
-            pad_mask,
-            actions,
-            dof_ids,
-            chunk_steps,
-            slot_pos,
-            emb_mask,
-            rng,
-            guide_input=guide_input,
-            train=train,
-        )
+        def _total_loss(params):
+            model_params = params["model"] if guide_module is not None else params
 
-    (loss, metrics), grads = jax.value_and_grad(_loss, has_aux=True)(state.params)
-    return loss, metrics, grads
+            bound = module.bind({"params": model_params}, rngs={"dropout": rng})
+            transformer_outputs = bound.crossformer_transformer(obs, task, pad_mask, train=train)
 
+            guidance_tokens = None
+            if guide_module is not None and guide_input is not None:
+                guidance_tokens = guide_module.apply(
+                    {"params": params["guide"]},
+                    guide_input,
+                    deterministic=not train,
+                )
 
-@jax.jit
-def apply_grads(state, grads):
-    state = state.apply_gradients(grads=grads)
-    grad_norm = optax.global_norm(grads)
-    return state, grad_norm
+            total = jnp.float32(0.0)
+            head_losses = []
+            for hi in head_inputs:
+                loss_h, _ = _loss_one_head(model_params, transformer_outputs, hi, guidance_tokens, rng, train)
+                total = total + loss_h
+                head_losses.append(loss_h)
+
+            return total, jnp.stack(head_losses)
+
+        (total_loss, head_losses), grads = jax.value_and_grad(_total_loss, has_aux=True)(state.params)
+        state = state.apply_gradients(grads=grads)
+        grad_norm = optax.global_norm(grads)
+        return state, total_loss, head_losses, grad_norm
+
+    return train_step
 
 
 # -- main ---------------------------------------------------------------------
@@ -330,7 +323,7 @@ def main(cfg: Config):
         seed=42,
         verbosity=0,
     )
-    dataset = GrainDataFactory(mp=0).make(train_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=True)
+    dataset = GrainDataFactory(mp=cfg.mp).make(train_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=True)
     dsit = iter(dataset.dataset)
     example_batch = next(dsit)
     print(spec(example_batch))
@@ -404,7 +397,7 @@ def main(cfg: Config):
         tx=tx,
         rng=train_rng,
     )
-    loss_fn = make_loss_fn(model.module, guide_module=guide_module)
+    train_step = make_train_step(model.module, len(cfg.heads), guide_module=guide_module)
 
     # Train
     print(Rule("training"))
@@ -429,49 +422,30 @@ def main(cfg: Config):
             if guide_input is not None and guide_input.ndim > 3:
                 guide_input = guide_input.reshape(*guide_input.shape[:2], -1)
 
-        total_loss = 0.0
-        total_grads = None
-        head_losses = {}
-
+        # Prepare all head inputs (Python-side, pre-JIT)
+        head_inputs = []
         for h in cfg.heads:
             emb_name = head_info[h]["embodiment"]
-            inputs = prepare_head_inputs(
-                batch,
-                h,
-                max_h,
-                max_a,
-                emb_name,
-            )
+            inputs = prepare_head_inputs(batch, h, max_h, max_a, emb_name)
             if inputs is None:
-                continue
-            actions, dof_ids, chunk_steps, slot_pos, emb_mask = inputs
-            loss_h, _metrics_h, grads_h = train_step_single(
-                state,
-                loss_fn,
-                obs,
-                task,
-                pad_mask,
-                actions,
-                dof_ids,
-                chunk_steps,
-                slot_pos,
-                emb_mask,
-                guide_input=guide_input,
-            )
-            total_loss += float(loss_h)
-            head_losses[h] = float(loss_h)
-            total_grads = grads_h if total_grads is None else jax.tree.map(lambda a, b: a + b, total_grads, grads_h)
+                raise ValueError(f"Head '{h}' not found in batch. got={tuple(batch['action'])}")
+            head_inputs.append(inputs)
 
-        if total_grads is None:
-            raise ValueError(f"No configured heads found in batch. wanted={cfg.heads} got={tuple(batch['action'])}")
-
-        state, grad_norm = apply_grads(state, total_grads)
+        state, total_loss, per_head_losses, grad_norm = train_step(
+            state,
+            obs,
+            task,
+            pad_mask,
+            tuple(head_inputs),
+            guide_input=guide_input,
+        )
+        total_loss = float(total_loss)
         losses.append(total_loss)
 
         if step % cfg.log_every == 0 or step == cfg.steps - 1:
             print(f"\n[bold]step={step} loss={total_loss}:[/]")
             row = [str(step), f"{total_loss:.4f}"]
-            row.extend(f"{head_losses[h]:.4f}" for h in cfg.heads)
+            row.extend(f"{float(per_head_losses[i]):.4f}" for i in range(len(cfg.heads)))
             row.append(f"{float(grad_norm):.4f}")
             table.add_row(*row)
 
