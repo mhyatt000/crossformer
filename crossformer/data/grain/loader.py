@@ -316,7 +316,8 @@ class GrainDataFactory:
         shard_fn: Callable | None = None,
         train: bool = True,
     ) -> GrainDataLoader:
-        lim = _apply_fd_limit(4096)
+        lim = _apply_fd_limit(512**2)
+
         log.info("applied fd limit: %s", lim)
 
         log.debug("data mix: %s", cfg.data.mix.value)
