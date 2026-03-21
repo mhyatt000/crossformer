@@ -25,39 +25,48 @@ EPS = 1e-8
 
 class OnlineStats:
     def __init__(self, shape, dtype=np.float64):
-        self.n = 0
+        self.n = np.zeros(shape, dtype=np.int64)
         self.mean = np.zeros(shape, dtype=dtype)
         self.M2 = np.zeros(shape, dtype=dtype)
         self.min = np.full(shape, np.inf, dtype=dtype)
         self.max = np.full(shape, -np.inf, dtype=dtype)
 
-    def update(self, x: np.ndarray):
+    def update(self, x: np.ndarray, mask: np.ndarray | None = None):
         x = np.asarray(x, dtype=self.mean.dtype)
+        if mask is None:
+            mask = np.ones_like(x, dtype=bool)
+        else:
+            mask = np.asarray(mask, dtype=bool)
+            if mask.shape != x.shape:
+                mask = np.broadcast_to(mask, x.shape)
 
         # min / max (elementwise)
-        self.min = np.minimum(self.min, x)
-        self.max = np.maximum(self.max, x)
+        self.min = np.where(mask, np.minimum(self.min, x), self.min)
+        self.max = np.where(mask, np.maximum(self.max, x), self.max)
 
-        # Welford (vectorized)
-        self.n += 1
+        # Welford (vectorized, per-dim)
+        self.n += mask.astype(np.int64)
         delta = x - self.mean
-        self.mean += delta / self.n
+        denom = np.maximum(self.n, 1)
+        self.mean = np.where(mask, self.mean + delta / denom, self.mean)
         delta2 = x - self.mean
-        self.M2 += delta * delta2
+        self.M2 = np.where(mask, self.M2 + delta * delta2, self.M2)
 
     def finalize(self, sample_std=False):
-        if self.n <= 1:
-            std = np.zeros_like(self.mean)
+        valid = self.n > 0
+        if sample_std:
+            denom = np.maximum(self.n - 1, 1)
+            std = np.where(self.n > 1, np.sqrt(self.M2 / denom), 0)
         else:
-            denom = (self.n - 1) if sample_std else self.n
-            std = np.sqrt(self.M2 / denom)
+            denom = np.maximum(self.n, 1)
+            std = np.where(valid, np.sqrt(self.M2 / denom), 0)
 
         return {
-            # "n": self.n,
             "mean": self.mean,
             "std": std,
-            "minimum": self.min,
-            "maximum": self.max,
+            "minimum": np.where(valid, self.min, 0),
+            "maximum": np.where(valid, self.max, 0),
+            "mask": valid,
         }
 
 
@@ -67,6 +76,7 @@ class ArrayStatistics:
     std: jax.Array
     maximum: jax.Array
     minimum: jax.Array
+    mask: jax.Array | None = None
     p99: jax.Array | None = None
     p01: jax.Array | None = None
 
@@ -88,6 +98,7 @@ class ArrayStatistics:
             std=arr.std(axis=0),
             maximum=arr.max(axis=0),
             minimum=arr.min(axis=0),
+            mask=np.ones(arr.shape[1:], dtype=bool),
             p99=np.quantile(arr, 0.99, axis=0),
             p01=np.quantile(arr, 0.01, axis=0),
         )
@@ -159,13 +170,6 @@ def compute_dataset_statistics(
             return DatasetStatistics.from_json(json.load(f))
     log.info("no stats found in cache")
 
-    actions = []
-    proprio: dict[str, list[np.ndarray]] = {key: [] for key in proprio_keys}
-    num_transitions = 0
-
-    # assumes you can have it all in RAM
-    # but we can
-    # items: list[Data]= list(ds)
     N = int(ds[-1]["info"]["id"]["episode"][0] + 1)
     assert N, "No steps found in dataset."
     t = len(ds)
@@ -175,10 +179,11 @@ def compute_dataset_statistics(
     streams = {"action": streams["action"], "proprio": streams["observation"]["proprio"]}
 
     def _update(x):
-        # update action stats
-        jax.tree.map(lambda a, stream: stream.update(a), x["action"], streams["action"])
-        # update proprio stats
-        jax.tree.map(lambda p, stream: stream.update(p), x["observation"]["proprio"], streams["proprio"])
+        action_masks = x.get("action_norm_mask", {})
+        for key, value in x["action"].items():
+            streams["action"][key].update(value, action_masks.get(key))
+        for key, value in x["observation"]["proprio"].items():
+            streams["proprio"][key].update(value)
         return x
 
     # ds = ds.slice(slice(5))
@@ -226,17 +231,30 @@ def compute_dataset_statistics(
     return stats
 
 
-NORM_MASK = {
-    "single": [True] * 8,
-    "joints": [True] * 7,
-    "orientation": [True] * 3,
-    "position": [True] * 3,  # TODO rename to pose
-    "pose": [True] * 6,
-    "gripper": [False],  # raw is better if mostly one of open/closed
-    "k3ds": [True] * 63,  # 21 keypoints x 3 coords (homogeneous stripped)
-}
-NORM_MASK = jax.tree.map(np.array, NORM_MASK, is_leaf=lambda x: isinstance(x, list))
-NORM_MASK = jax.tree.map(lambda x: x.astype(bool), NORM_MASK)
+def _resolve_action_mask(
+    key: str,
+    stats: ArrayStatistics,
+    action_value: np.ndarray,
+    action_mask: Sequence[bool] | Mapping[str, Sequence[bool]] | None,
+) -> np.ndarray | None:
+    mask = stats.mask
+    override = action_mask.get(key) if isinstance(action_mask, Mapping) else action_mask
+    if override is not None:
+        override = np.asarray(override, dtype=bool)
+        if override.shape[-1] != action_value.shape[-1]:
+            raise ValueError(
+                f"Length of action mask {override.shape} does not match action dimension {action_value.shape}."
+            )
+        mask = override if mask is None else np.logical_and(mask, override)
+    return None if mask is None else np.asarray(mask, dtype=bool)
+
+
+def _apply_action_mask(action: np.ndarray, normalized: np.ndarray, mask: np.ndarray | None) -> np.ndarray:
+    if mask is None:
+        return normalized
+    if mask.shape[-1] != normalized.shape[-1]:
+        raise ValueError(f"Length of action mask {mask.shape} does not match action dimension {normalized.shape}.")
+    return np.where(mask, normalized, action)
 
 
 def normalize_action_and_proprio(
@@ -245,7 +263,7 @@ def normalize_action_and_proprio(
     metadata: DatasetStatistics,
     normalization_type: str,
     proprio_keys: Sequence[str],
-    action_mask: Sequence[bool] | None = None,
+    action_mask: Sequence[bool] | Mapping[str, Sequence[bool]] | None = None,
     skip_norm_keys: Sequence[str] = (),
     device: jax.Device | None = cpu,
 ) -> dict:
@@ -269,18 +287,14 @@ def normalize_action_and_proprio(
 
     action = step["action"]
     normalized = jax.tree.map(lambda a, ma: _norm(a, ma), action, metadata.action)
-
-    def do_norm_mask(_action, _normalized, _mask):
-        # normalize them all if no mask, else dont norm certain dim, ie gripper
-        if _mask is not None:
-            if _mask.shape[-1] != _normalized.shape[-1]:
-                raise ValueError(
-                    f"Length of action mask {_mask.shape} does not match action dimension {_normalized.shape}."
-                )
-            return np.where(_mask, _normalized, _action)
-        return _normalized
-
-    step["action"] = {k: do_norm_mask(action[k], normalized[k], NORM_MASK[k]) for k in action}
+    step["action"] = {
+        k: _apply_action_mask(
+            action[k],
+            normalized[k],
+            _resolve_action_mask(k, metadata.action[k], action[k], action_mask),
+        )
+        for k in action
+    }
 
     obs = step.get("observation")
     for key in proprio_keys:

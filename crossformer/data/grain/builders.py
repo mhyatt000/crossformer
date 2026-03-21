@@ -16,6 +16,8 @@ import jax
 import numpy as np
 
 from crossformer.data.grain import metadata
+from crossformer.data.grain.embody import build_action_norm_mask
+from crossformer.embody import Dataset
 from crossformer.utils.jax_utils import str2jax
 from crossformer.utils.spec import ModuleSpec
 
@@ -178,6 +180,7 @@ def _load_dataset_statistics(
     log.info("Computing dataset statistics from scratch...")
     hash_dependencies = [
         config.name,  # str(asdict(config))
+        "bodypart_norm_mask_v1",
         str(len(ds)),
         str(sorted(config.keys.image)),
         str(sorted(config.keys.depth)),
@@ -209,6 +212,8 @@ def build_trajectory_dataset(
     restructure = ModuleSpec.create(r, name=config.name, config=config)
     ds = ds.map(ModuleSpec.instantiate(restructure))
     ds = ds.map(note_embodiment)
+    embodiment = Dataset.REGISTRY[config.name].embodiment
+    ds = ds.map(lambda x: x | {"action_norm_mask": build_action_norm_mask(x["action"], embodiment)})
 
     stats = _load_dataset_statistics(config, ds)
     # stats = jax.tree.map(jax.device_get, stats)
