@@ -14,6 +14,7 @@ from crossformer.cn.dataset.types import Head
 from crossformer.data.arec.arec import ArrayRecordBuilder
 from crossformer.data.oxe.oxe_dataset_configs import OXE_DATASET_CONFIGS
 from crossformer.data.oxe.oxe_dataset_mixes import DATASET_TO_HEAD, HEAD_TO_DATASET
+from crossformer.embody import Embodiment, HUMAN_SINGLE, SINGLE
 
 log = logging.getLogger(__name__)
 
@@ -23,7 +24,8 @@ class DataSource(CN):
     REGISTRY: ClassVar[dict[str, DataSource]] = {}
 
     name: str = tyro.MISSING
-    head: Head = tyro.MISSING
+    head: Head = tyro.MISSING  # which head to associate with this dataset. soon to be deprecated
+    embodiment: Embodiment = tyro.MISSING  # embodiment has 1+ bodyparts. this will eventually replace self.head
 
     def _register(self):
         self.REGISTRY[self.name] = self
@@ -79,7 +81,8 @@ class Arec(DataSource):
         version = getattr(config, "version", None)
         branch = getattr(config, "branch", "main")
         head = DATASET_TO_HEAD.get(name)
-        return Arec(name=name, version=version, head=head, branch=branch)
+        embodiment = getattr(config, "embodiment")
+        return Arec(name=name, version=version, head=head, embodiment=embodiment, branch=branch)
 
     def create(self):
         pass
@@ -140,15 +143,15 @@ class MultiDataSource(DataSource):
 ##### ##### ##### #####
 
 XGYM = [
-    TFDS(name="xgym_duck_single", head=Head.SINGLE),
-    TFDS(name="xgym_lift_single", head=Head.SINGLE),
-    TFDS(name="xgym_stack_single", head=Head.SINGLE),
+    TFDS(name="xgym_duck_single", head=Head.SINGLE, embodiment=SINGLE),
+    TFDS(name="xgym_lift_single", head=Head.SINGLE, embodiment=SINGLE),
+    TFDS(name="xgym_stack_single", head=Head.SINGLE, embodiment=SINGLE),
 ]
 
 NEW = [
-    Arec(name="xgym_sweep_single", head=Head.SINGLE, version="0.5.0", branch="to_step"),
-    Arec(name="my_dataset", head=Head.SINGLE, version="0.5.3"),
-    Arec(name="sweep_mano", head=Head.MANO, version="0.0.2", branch="to_step"),
+    Arec(name="xgym_sweep_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.0", branch="to_step"),
+    Arec(name="my_dataset", head=Head.SINGLE, embodiment=SINGLE, version="0.5.3"),
+    Arec(name="sweep_mano", head=Head.MANO, embodiment=HUMAN_SINGLE, version="0.0.2", branch="to_step"),
 ]
 
 # multi source
