@@ -1,8 +1,7 @@
 """End-to-end XFlowHead training: CrossFormerModel + real data.
 
-Full transformer backbone with XFlowHead, trained on real data from
-GrainDataFactory. Multi-head cross-embodiment training with per-head
-gradient accumulation.
+Bundled action format: uses act.base / act.id from the grain embody
+pipeline instead of per-head action extraction.
 
 Usage:
     uv run scripts/train/xflow.py
@@ -16,7 +15,6 @@ from dataclasses import dataclass, field
 from functools import partial
 import re
 
-from flax.training.train_state import TrainState
 import jax
 from jax.experimental import multihost_utils
 import jax.numpy as jnp
@@ -30,34 +28,18 @@ from tqdm import tqdm
 import tyro
 
 import crossformer.cn as cn
-from crossformer.embody import slot_positions
 from crossformer.model.components.guidance import TokenGuidance
-from crossformer.model.components.heads.dof import (
-    build_query_mask,
-    chunk_range,
-    EMBODIMENTS,
-    pad_chunk_steps,
-    pad_dof_ids,
-    pad_slot_positions,
-)
+from crossformer.model.components.heads.dof import build_query_mask
 from crossformer.model.components.heads.xflow import XFlowHead
 from crossformer.model.components.tokenizers import LowdimObsTokenizer
 from crossformer.model.components.transformer import common_transformer_sizes
 from crossformer.model.crossformer_model import CrossFormerModel
+from crossformer.run.train_step import make_train_step
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec, spec
-from crossformer.utils.train_utils import Timer
+from crossformer.utils.train_utils import Timer, TrainState
 from crossformer.utils.tree.core import flat
 import wandb
-
-# -- embodiment mapping -------------------------------------------------------
-
-HEAD_TO_EMBODIMENT = {
-    "single": "xarm_gripper",
-    "single_arm": "xarm_gripper",
-    "mano": "mano",
-    "k3ds": "k3ds",
-}
 
 # -- config -------------------------------------------------------------------
 
@@ -72,7 +54,6 @@ class Config:
     log_every: int = 1  # log interval
     batch_size: int = 4  # global batch size
     mix: str = "xgym_sweep"  # dataset mix name
-    heads: tuple[str, ...] = ("single", "k3ds")  # action head keys to train on
     horizon: int = 20  # action horizon from data pipeline
     transformer_size: str = "dummy"  # transformer size preset
     obs_keys: tuple[str, ...] = ("proprio_.*", "time", "timestep")  # lowdim obs keys to tokenize
@@ -88,17 +69,6 @@ class Config:
 
 
 # -- helpers ------------------------------------------------------------------
-
-
-def resolve_heads(heads):
-    """Resolve head names → embodiment recipes, compute max dims."""
-    info = {}
-    for h in heads:
-        emb_name = HEAD_TO_EMBODIMENT.get(h)
-        if emb_name is None:
-            raise ValueError(f"No embodiment mapping for head '{h}'. Known: {list(HEAD_TO_EMBODIMENT)}")
-        info[h] = {"embodiment": emb_name, "n_dofs": len(EMBODIMENTS[emb_name])}
-    return info
 
 
 def make_model_config(cfg, max_h, max_a, max_w):
@@ -158,147 +128,31 @@ def resolve_obs_keys(obs, patterns):
     return tuple(keys)
 
 
-def prepare_head_inputs(batch, head_key, max_h, max_a, embodiment_name):
-    """Extract and pad actions + embodiment metadata for one head."""
-    if head_key not in batch["action"]:
-        return None
+def extract_bundled_actions(batch, max_h):
+    """Extract bundled actions from grain embody pipeline.
 
-    actions_real = batch["action"][head_key]
-    # Flatten multi-dim DOFs like k3ds (B, H, 21, 4) → (B, H, 84)
-    if actions_real.ndim == 4 and actions_real.shape[-1] != actions_real.shape[-2]:
-        actions_real = actions_real.reshape(*actions_real.shape[:2], -1)
-    if actions_real.ndim == 3:
-        actions_real = actions_real[:, None, :, :]
-    B, W, H_real, A_real = actions_real.shape  # noqa RUF
-    if H_real > max_h or A_real > max_a:
-        raise ValueError(f"{head_key}: action shape {(H_real, A_real)} exceeds bounds {(max_h, max_a)}")
+    Returns:
+        actions: (B, W, H, max_a) — W=1 added if missing.
+        dof_ids: (B, max_a) — from act.id.
+        chunk_steps: (B, H) — just arange(H) for now.
+            NOTE: chunk_steps padding disabled — all positions are valid.
+    """
+    actions = batch["act"]["base"]  # (B, H, max_a)
+    if actions.ndim == 3:
+        actions = actions[:, None, :, :]  # (B, 1, H, max_a)
+    B = actions.shape[0]
+    H = actions.shape[2]
 
-    actions = jnp.pad(actions_real, ((0, 0), (0, 0), (0, max_h - H_real), (0, max_a - A_real)))
+    dof_ids = batch["act"]["id"]  # (B, max_a)
+    # NOTE: no chunk_steps padding — just dense arange(H)
+    chunk_steps = jnp.tile(jnp.arange(H, dtype=jnp.float32)[None], (B, 1))
 
-    dof_recipe = EMBODIMENTS[embodiment_name]
-    dof_ids = jnp.tile(jnp.array(pad_dof_ids(dof_recipe, max_a))[None], (B, 1))
-    chunk_steps = jnp.tile(jnp.array(pad_chunk_steps(chunk_range(H_real), max_h))[None], (B, 1))
-    slot_pos = jnp.tile(jnp.array(pad_slot_positions(slot_positions(len(dof_recipe)), max_a))[None], (B, 1))
-
-    emb_mask = batch["embodiment"].get(head_key)
-    emb_mask = emb_mask.reshape(B) if emb_mask is not None else jnp.ones(B, dtype=jnp.bool_)
-
-    return actions, dof_ids, chunk_steps, slot_pos, emb_mask
+    return actions, dof_ids, chunk_steps
 
 
 def shard_batch(batch, mesh):
     """Shard a host-local batch across the data axis."""
     return multihost_utils.host_local_array_to_global_array(batch, mesh, PartitionSpec("batch"))
-
-
-# -- TrainState with RNG -----------------------------------------------------
-
-
-class TrainStateRng(TrainState):
-    rng: jax.Array
-
-    def apply_gradients(self, *, grads, **kwargs):
-        _, new_rng = jax.random.split(self.rng)
-        state = super().apply_gradients(grads=grads, **kwargs)
-        return state.replace(rng=new_rng)
-
-
-# -- train / eval steps ------------------------------------------------------
-
-
-def make_train_step(module, head_names, lr, guide_module=None):
-    """Build a fully compiled multi-head train step.
-
-    Runs the transformer once, then computes loss + grads for each head
-    inside a single JIT-compiled function via jax.lax.scan over stacked
-    per-head inputs.
-
-    Args:
-        module: CrossFormerModel module.
-        head_names: action heads to report metrics for.
-        lr: optimizer learning rate.
-        guide_module: optional TokenGuidance module.
-
-    Returns:
-        Compiled train_step(state, obs, task, pad_mask, head_inputs, guide_input).
-    """
-
-    def _loss_one_head(params, transformer_outputs, head_input, guidance_tokens, rng, train):
-        """Loss for a single head given precomputed transformer outputs."""
-        actions, dof_ids, chunk_steps, slot_pos, emb_mask = head_input
-        bound = module.bind({"params": params}, rngs={"dropout": rng})
-        loss, metrics = bound.heads["xflow"].loss(
-            transformer_outputs,
-            actions,
-            dof_ids,
-            chunk_steps,
-            slot_pos=slot_pos,
-            train=train,
-            guidance_tokens=guidance_tokens,
-        )
-        frac = emb_mask.mean()
-        metrics = {k: v * frac for k, v in metrics.items()}
-        return loss * frac, metrics
-
-    @partial(jax.jit, static_argnames=("train",))
-    def train_step(state, obs, task, pad_mask, head_inputs, guide_input=None, train=True):
-        """Full multi-head train step: fwd transformer once, loss per head, sum grads.
-
-        Args:
-            state: TrainStateRng (params are {"model": ..., "guide": ...} or flat).
-            obs: observation dict.
-            task: task dict.
-            pad_mask: (B, W) timestep pad mask.
-            head_inputs: tuple of (actions, dof_ids, chunk_steps, slot_pos, emb_mask)
-                per head — each array has shape (B, ...).
-            guide_input: optional (B, S, D) guidance signal.
-            train: bool.
-
-        Returns:
-            (state, update_info).
-        """
-        rng = jax.random.fold_in(state.rng, state.step)
-
-        def _total_loss(params):
-            model_params = params["model"] if guide_module is not None else params
-
-            bound = module.bind({"params": model_params}, rngs={"dropout": rng})
-            transformer_outputs = bound.crossformer_transformer(obs, task, pad_mask, train=train)
-
-            guidance_tokens = None
-            if guide_module is not None and guide_input is not None:
-                guidance_tokens = guide_module.apply(
-                    {"params": params["guide"]},
-                    guide_input,
-                    deterministic=not train,
-                )
-
-            total = jnp.float32(0.0)
-            head_losses = []
-            head_metrics = []
-            for hi in head_inputs:
-                loss_h, metrics_h = _loss_one_head(model_params, transformer_outputs, hi, guidance_tokens, rng, train)
-                total = total + loss_h
-                head_losses.append(loss_h)
-                head_metrics.append(metrics_h)
-
-            return total, (jnp.stack(head_losses), tuple(head_metrics))
-
-        (total_loss, (head_losses, head_metrics)), grads = jax.value_and_grad(_total_loss, has_aux=True)(state.params)
-        updates, _ = state.tx.update(grads, state.opt_state, state.params)
-        update_info = {
-            "total_loss": total_loss,
-            "grad_norm": optax.global_norm(grads),
-            "update_norm": optax.global_norm(updates),
-            "param_norm": optax.global_norm(state.params),
-            "learning_rate": jnp.asarray(lr),
-        }
-        for head_name, head_loss, metrics in zip(head_names, head_losses, head_metrics):
-            update_info[head_name] = {"weighted_loss": head_loss, **metrics}
-        state = state.apply_gradients(grads=grads)
-        return state, update_info
-
-    return train_step
 
 
 # -- main ---------------------------------------------------------------------
@@ -312,18 +166,12 @@ def main(cfg: Config):
     dp_sharding = NamedSharding(mesh, PartitionSpec("batch"))
     replicated_sharding = NamedSharding(mesh, PartitionSpec())
 
-    print(Rule("XFlowHead + CrossFormerModel: real data", style="bold magenta"))
+    print(Rule("XFlowHead + CrossFormerModel: bundled actions", style="bold magenta"))
     print(f"  backend={jax.default_backend()} devices={len(devices)}")
     if cfg.batch_size % len(devices) != 0:
         raise ValueError(f"batch_size={cfg.batch_size} must be divisible by devices={len(devices)}")
 
-    # Resolve embodiments and compute max dims
-    head_info = resolve_heads(cfg.heads)
-    max_a = max(info["n_dofs"] for info in head_info.values())
     max_h = cfg.horizon
-    for h, info in head_info.items():
-        print(f"  {h:15s} -> {info['embodiment']:20s}  dofs={info['n_dofs']}")
-    print(f"  max_h={max_h}  max_a={max_a}")
     run = cfg.wandb.initialize(cfg)
 
     # Load data
@@ -348,9 +196,11 @@ def main(cfg: Config):
     obs_keys = resolve_obs_keys(example_batch["observation"], cfg.obs_keys)
     print(f"  obs_keys: {obs_keys}")
 
-    for h in cfg.heads:
-        act = example_batch["action"][h]
-        print(f"  action['{h}'] shape: {act.shape}")
+    # Get max_a from the bundled action shape
+    max_a = example_batch["act"]["id"].shape[-1]
+    print(f"  max_h={max_h}  max_a={max_a}")
+    print(f"  act.base shape: {example_batch['act']['base'].shape}")
+    print(f"  act.id   shape: {example_batch['act']['id'].shape}")
 
     # Build model
     print(Rule("building CrossFormerModel"))
@@ -369,7 +219,7 @@ def main(cfg: Config):
         {
             "example_batch_spec": spec(example_batch),
             "obs_keys": obs_keys,
-            "head_info": head_info,
+            "max_a": max_a,
             "model_config": config,
         },
         allow_val_change=True,
@@ -402,7 +252,6 @@ def main(cfg: Config):
         guide_example = flat(example_batch).get(cfg.guide_key)
         if guide_example is None:
             raise ValueError(f"guide_key={cfg.guide_key!r} not found in batch. check dot-path.")
-        # Flatten trailing dims if needed: (B, W, ...) → (B, W, D)
         if guide_example.ndim > 3:
             guide_example = guide_example.reshape(*guide_example.shape[:2], -1)
         print(f"  guide_key={cfg.guide_key} shape={guide_example.shape}")
@@ -420,21 +269,14 @@ def main(cfg: Config):
     # Optimizer + state
     combined_params = {"model": model.params, "guide": guide_params} if guide_module is not None else model.params
     tx = optax.adamw(cfg.lr, weight_decay=1e-4)
-    state = TrainStateRng.create(
-        apply_fn=model.module.apply,
-        params=combined_params,
-        tx=tx,
-        rng=train_rng,
-    )
-    train_step = make_train_step(model.module, cfg.heads, cfg.lr, guide_module=guide_module)
+    state = TrainState.create(model=model.replace(params=combined_params), tx=tx, rng=train_rng)
+    train_step = make_train_step(model.module, cfg.lr, guide_module=guide_module)
 
     # Train
     print(Rule("training"))
     table = Table(title="training")
     table.add_column("step", justify="right", style="cyan")
     table.add_column("loss", justify="right")
-    for h in cfg.heads:
-        table.add_column(f"{h}", justify="right")
     table.add_column("|grad|", justify="right", style="dim")
 
     losses = []
@@ -453,13 +295,7 @@ def main(cfg: Config):
                 if guide_input is not None and guide_input.ndim > 3:
                     guide_input = guide_input.reshape(*guide_input.shape[:2], -1)
 
-            head_inputs = []
-            for h in cfg.heads:
-                emb_name = head_info[h]["embodiment"]
-                inputs = prepare_head_inputs(batch, h, max_h, max_a, emb_name)
-                if inputs is None:
-                    raise ValueError(f"Head '{h}' not found in batch. got={tuple(batch['action'])}")
-                head_inputs.append(inputs)
+            actions, dof_ids, chunk_steps = extract_bundled_actions(batch, max_h)
 
         with timer("train"):
             state, update_info = train_step(
@@ -467,18 +303,19 @@ def main(cfg: Config):
                 obs,
                 task,
                 pad_mask,
-                tuple(head_inputs),
+                actions,
+                dof_ids,
+                chunk_steps,
                 guide_input=guide_input,
             )
         timer.tock("total")
         update_info = jax.device_get(update_info)
-        total_loss = float(update_info["total_loss"])
+        total_loss = float(update_info["loss"])
         losses.append(total_loss)
 
         if step % cfg.log_every == 0 or step == cfg.steps - 1:
             print(f"\n[bold]step={step} loss={total_loss}:[/]")
             row = [str(step), f"{total_loss:.4f}"]
-            row.extend(f"{float(update_info[h]['weighted_loss']):.4f}" for h in cfg.heads)
             row.append(f"{float(update_info['grad_norm']):.4f}")
             table.add_row(*row)
             cfg.wandb.log(
@@ -502,14 +339,15 @@ def main(cfg: Config):
     else:
         print("[bold yellow]loss did not decrease much — check lr or architecture[/]")
 
-    # -- denoise demo: Euler ODE solve per head --------------------------------
-    print(Rule("predict_action: full denoise per head"))
+    # -- denoise demo: Euler ODE solve -----------------------------------------
+    print(Rule("predict_action: full denoise"))
 
     batch = next(dsit)
     obs = normalize_obs(batch["observation"], obs_keys)
     task = batch.get("task", {"pad_mask_dict": {}})
 
-    model_params = state.params["model"] if guide_module is not None else state.params
+    params = state.model.params
+    model_params = params["model"] if guide_module is not None else params
     bound = model.module.bind({"params": model_params})
     transformer_outputs = bound.crossformer_transformer(
         obs,
@@ -526,65 +364,50 @@ def main(cfg: Config):
             if guide_eval.ndim > 3:
                 guide_eval = guide_eval.reshape(*guide_eval.shape[:2], -1)
             guide_tokens = guide_module.apply(
-                {"params": state.params["guide"]},
+                {"params": params["guide"]},
                 guide_eval,
                 deterministic=True,
             )
 
-    for i, h in enumerate(cfg.heads):
-        emb_name = head_info[h]["embodiment"]
-        n_dofs = head_info[h]["n_dofs"]
-        inputs = prepare_head_inputs(
-            batch,
-            h,
-            max_h,
-            max_a,
-            emb_name,
-        )
-        if inputs is None:
-            continue
-        actions, dof_ids, chunk_steps, slot_pos, _ = inputs
+    actions, dof_ids, chunk_steps = extract_bundled_actions(batch, max_h)
+    n_valid = int((dof_ids[0] != 0).sum())  # non-MASK DOFs in first sample
 
-        pred = bound.heads["xflow"].predict_action(
-            transformer_outputs,
-            rng=jax.random.fold_in(pred_rng, i),
-            dof_ids=dof_ids,
-            chunk_steps=chunk_steps,
-            slot_pos=slot_pos,
-            train=False,
-            guidance_tokens=guide_tokens,
-        )  # (B, W, max_h, max_a)
+    pred = bound.heads["xflow"].predict_action(
+        transformer_outputs,
+        rng=pred_rng,
+        dof_ids=dof_ids,
+        chunk_steps=chunk_steps,
+        train=False,
+        guidance_tokens=guide_tokens,
+    )  # (B, W, max_h, max_a)
 
-        # Extract valid region and compute MSE
-        q_mask = build_query_mask(chunk_steps, dof_ids, slot_pos)
-        pred_flat = pred.reshape(pred.shape[0], pred.shape[1], -1)
-        tgt_flat = actions.reshape(actions.shape[0], actions.shape[1], -1)
-        mask = jnp.broadcast_to(q_mask[:, None, :], pred_flat.shape)
-        sq_err = (pred_flat - tgt_flat) ** 2 * mask
-        mse = sq_err.sum() / mask.sum()
+    # Compute MSE on valid region
+    q_mask = build_query_mask(chunk_steps, dof_ids)
+    pred_flat = pred.reshape(pred.shape[0], pred.shape[1], -1)
+    tgt_flat = actions.reshape(actions.shape[0], actions.shape[1], -1)
+    mask = jnp.broadcast_to(q_mask[:, None, :], pred_flat.shape)
+    sq_err = (pred_flat - tgt_flat) ** 2 * mask
+    mse = sq_err.sum() / mask.sum()
 
-        pred_valid = pred[0, 0, : cfg.horizon, :n_dofs]
-        tgt_valid = actions[0, 0, : cfg.horizon, :n_dofs]
+    pred_valid = pred[0, 0, :max_h, :n_valid]
+    tgt_valid = actions[0, 0, :max_h, :n_valid]
 
-        print(f"\n  [bold]{h}[/] ({emb_name}, {n_dofs} DOFs)")
-        print(f"    pred shape: {pred.shape}")
-        print(f"    mse (valid): {float(mse):.4f}")
-        print(f"    pred range:  [{float(pred_valid.min()):.3f}, {float(pred_valid.max()):.3f}]")
-        print(f"    tgt  range:  [{float(tgt_valid.min()):.3f}, {float(tgt_valid.max()):.3f}]")
-        cfg.wandb.log(
-            {
-                "predict_action": {
-                    h: {
-                        "mse": float(mse),
-                        "pred_min": float(pred_valid.min()),
-                        "pred_max": float(pred_valid.max()),
-                        "tgt_min": float(tgt_valid.min()),
-                        "tgt_max": float(tgt_valid.max()),
-                    }
-                }
-            },
-            step=cfg.steps,
-        )
+    print(f"\n  pred shape: {pred.shape}  valid DOFs: {n_valid}")
+    print(f"  mse (valid): {float(mse):.4f}")
+    print(f"  pred range:  [{float(pred_valid.min()):.3f}, {float(pred_valid.max()):.3f}]")
+    print(f"  tgt  range:  [{float(tgt_valid.min()):.3f}, {float(tgt_valid.max()):.3f}]")
+    cfg.wandb.log(
+        {
+            "predict_action": {
+                "mse": float(mse),
+                "pred_min": float(pred_valid.min()),
+                "pred_max": float(pred_valid.max()),
+                "tgt_min": float(tgt_valid.min()),
+                "tgt_max": float(tgt_valid.max()),
+            }
+        },
+        step=cfg.steps,
+    )
 
     print("\n[bold green]done.[/]")
     run.finish()
