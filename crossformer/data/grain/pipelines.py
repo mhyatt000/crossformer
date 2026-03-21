@@ -697,12 +697,15 @@ def drop_str(batch):
 
 def add_mask(x: dict):
     flag = x["info"]["id"]["episode"] % 2  # 95% of data
-    x["mask"] = {
-        "action_head_masks": x["action_head_masks"],
-        # "action_pad_mask": x["action_pad_mask"],
-        "timestep_pad_mask": np.ones_like(x["observation"]["timestep"]).astype(np.bool_),
-        "only_adjustment": ~flag.astype(jnp.bool_),
-    }
+    # merge — embody_transform may have already written mask.act
+    x.setdefault("mask", {}).update(
+        {
+            "action_head_masks": x["action_head_masks"],
+            # "action_pad_mask": x["action_pad_mask"],
+            "timestep_pad_mask": np.ones_like(x["observation"]["timestep"]).astype(np.bool_),
+            "only_adjustment": ~flag.astype(jnp.bool_),
+        }
+    )
 
     # bwd compatibility
     x["observation"]["timestep_pad_mask"] = x["mask"]["timestep_pad_mask"]
@@ -853,84 +856,3 @@ def make_single_dataset(
 
     print("Dataset created... please be very patient while threads start up")
     return GrainDataLoader(dataset=ds, statistics=stats, config=config)
-
-
-def make_interleaved_dataset(
-    configs: Sequence[builders.GrainDatasetConfig],
-    *,
-    train: bool,
-    sample_weights: Sequence[float] | None = None,
-    shuffle_buffer_size: int = 1,
-    traj_transform_kwargs: dict[str, Any] | None = None,
-    frame_transforms: Sequence[ModuleSpec | Callable] = (),
-    resize_frames_to: int | tuple[int, int] | None = None,
-    resize_frame_keys: Sequence[str] | None = None,
-    resize_interpolation: str = "bilinear",
-    batch_size: int | None = None,
-    drop_remainder: bool = False,
-    seed: int = 0,
-) -> GrainDataLoader:
-    """Creates a weighted mixture of datasets similar to the TensorFlow pipeline.
-
-    Resizing is performed independently for every dataset when
-    ``resize_frames_to`` is specified.
-    """
-
-    if not configs:
-        raise ValueError("At least one dataset configuration must be provided.")
-
-    datasets = []
-    statistics = {}
-    for cfg in configs:
-        ds = make_single_dataset(
-            cfg,
-            train=train,
-            traj_transform_kwargs=traj_transform_kwargs,
-            frame_transforms=frame_transforms,
-            resize_frames_to=resize_frames_to,
-            resize_frame_keys=resize_frame_keys,
-            resize_interpolation=resize_interpolation,
-            shuffle_buffer_size=None,
-            batch_size=None,
-            seed=seed,
-        )
-        datasets.append(ds.dataset)
-        statistics[cfg.name] = ds.statistics
-
-    if sample_weights is None:
-        weights = np.ones(len(datasets), dtype=np.float32)
-    else:
-        weights = np.asarray(sample_weights, dtype=np.float32)
-        if weights.shape[0] != len(datasets):
-            raise ValueError("Number of sample weights must match number of datasets.")
-    weights = weights / weights.sum()
-
-    class _MixtureIterDataset(gp.IterDataset):
-        def __init__(self, children: Sequence[gp.IterDataset], probs: np.ndarray):
-            super().__init__(children)
-            self._children = children
-            self._probs = probs
-
-        def __iter__(self):
-            rng = np.random.default_rng(seed)
-            child_iters = [iter(child) for child in self._children]
-            while True:
-                choice = rng.choice(len(child_iters), p=self._probs)
-                try:
-                    yield next(child_iters[choice])
-                except StopIteration:
-                    return
-
-    mixture_dataset: gp.IterDataset = _MixtureIterDataset(datasets, weights)
-
-    if shuffle_buffer_size and shuffle_buffer_size > 1:
-        mixture_dataset = _BufferShuffleIterDataset(mixture_dataset, buffer_size=shuffle_buffer_size, seed=seed)
-
-    if train:
-        mixture_dataset = mixture_dataset.repeat()
-
-    if batch_size is not None:
-        mixture_dataset = mixture_dataset.batch(batch_size, drop_remainder=drop_remainder)
-
-    mixture_dataset.dataset_statistics = statistics  # type: ignore[attr-defined]
-    return GrainDataLoader(dataset=mixture_dataset, statistics=statistics)

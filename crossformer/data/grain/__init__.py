@@ -7,7 +7,6 @@ from crossformer.data.grain.pipelines import (
     apply_frame_transforms,
     apply_trajectory_transforms,
     GrainDataLoader,
-    make_interleaved_dataset,
     make_single_dataset,
 )
 from crossformer.data.grain.util import remap
@@ -17,6 +16,5 @@ __all__ = [
     "GrainDatasetConfig",
     "apply_frame_transforms",
     "apply_trajectory_transforms",
-    "make_interleaved_dataset",
     "make_single_dataset",
 ]
