@@ -96,6 +96,17 @@ class SourceType(Enum):
     LEROBOT = auto()
 
 
+class Frame(str, Enum):
+    RELATIVE = "relative"
+    ABSOLUTE = "absolute"
+
+
+class PartKind(str, Enum):
+    SPATIAL2D = "spatial2d"
+    SPATIAL3D = "spatial3d"
+    INNATE = "innate"
+
+
 # ---------------------------------------------------------------------------
 # Observation keys
 # ---------------------------------------------------------------------------
@@ -129,13 +140,15 @@ class ProprioObs:
 class BodyPart:
     """Named group of DOFs — the reuse primitive.
 
-    >>> arm = BodyPart("arm_7dof", ("j0","j1","j2","j3","j4","j5","j6"))
+    >>> arm = BodyPart("arm_7dof", ("j0","j1","j2","j3","j4","j5","j6"), Frame.ABSOLUTE, PartKind.INNATE)
     >>> arm.action_dim
     7
     """
 
     name: str
     dof_names: tuple[str, ...]
+    frame: Frame
+    kind: PartKind
 
     @property
     def dof_ids(self) -> tuple[int, ...]:
@@ -154,18 +167,30 @@ class BodyPart:
 # ---------------------------------------------------------------------------
 
 # Arm + effector (shared DOF IDs — slot embedding distinguishes instances)
-ARM_7DOF = BodyPart("arm_7dof", ("j0", "j1", "j2", "j3", "j4", "j5", "j6"))
-GRIPPER = BodyPart("gripper", ("gripper",))
-CART_POSE = BodyPart("cart_pose", ("ee_x", "ee_y", "ee_z", "ee_rx", "ee_ry", "ee_rz"))
-CART_POS = BodyPart("cart_pos", ("ee_x", "ee_y", "ee_z"))
+ARM_7DOF = BodyPart(
+    "arm_7dof",
+    ("j0", "j1", "j2", "j3", "j4", "j5", "j6"),
+    Frame.ABSOLUTE,
+    PartKind.INNATE,
+)
+GRIPPER = BodyPart("gripper", ("gripper",), Frame.ABSOLUTE, PartKind.INNATE)
+CART_POSE = BodyPart(
+    "cart_pose",
+    ("ee_x", "ee_y", "ee_z", "ee_rx", "ee_ry", "ee_rz"),
+    Frame.ABSOLUTE,
+    PartKind.SPATIAL3D,
+)
+CART_POS = BodyPart("cart_pos", ("ee_x", "ee_y", "ee_z"), Frame.ABSOLUTE, PartKind.SPATIAL3D)
+CART_ORI = BodyPart("cart_ori", ("ee_rx", "ee_ry", "ee_rz"), Frame.ABSOLUTE, PartKind.SPATIAL3D)
 
 # Hands
-HAND_11 = BodyPart("hand_11", tuple(f"hand_j{i}" for i in range(11)))
-HAND_16 = BodyPart("hand_16", tuple(f"hand_j{i}" for i in range(16)))
-MANO_7 = BodyPart("mano_7", tuple(f"mano_{i}" for i in range(7)))
+HAND_11 = BodyPart("hand_11", tuple(f"hand_j{i}" for i in range(11)), Frame.ABSOLUTE, PartKind.INNATE)
+HAND_16 = BodyPart("hand_16", tuple(f"hand_j{i}" for i in range(16)), Frame.ABSOLUTE, PartKind.INNATE)
+MANO_7 = BodyPart("mano_7", tuple(f"mano_{i}" for i in range(7)), Frame.ABSOLUTE, PartKind.SPATIAL3D)
+MANO_48 = BodyPart("mano_48", tuple(f"mano_{i}" for i in range(48)), Frame.ABSOLUTE, PartKind.SPATIAL3D)
 
 # Mobile base
-BASE_2D = BodyPart("base_2d", ("base_vx", "base_vy", "base_wz"))
+BASE_2D = BodyPart("base_2d", ("base_vx", "base_vy", "base_wz"), Frame.RELATIVE, PartKind.SPATIAL2D)
 
 
 # ---------------------------------------------------------------------------
@@ -233,10 +258,11 @@ Embodiment.REGISTRY = {}
 # Embodiment catalog
 # ---------------------------------------------------------------------------
 
-SINGLE = Embodiment("single", (ARM_7DOF, GRIPPER))
+# this defines bodyparts in embodiment. whether or not they exist and available in all datasets
+SINGLE = Embodiment("single", (ARM_7DOF, GRIPPER, CART_POS, CART_ORI))
 BIMANUAL = Embodiment("bimanual", (ARM_7DOF, GRIPPER, ARM_7DOF, GRIPPER))
 CART_GRIPPER = Embodiment("cart_gripper", (CART_POSE, GRIPPER))
-HUMAN_SINGLE = Embodiment("human_single", (CART_POSE, MANO_7))
+HUMAN_SINGLE = Embodiment("human_single", (CART_POSE, MANO_48))
 NAV = Embodiment("nav", (BASE_2D,))
 XARM_RUKA = Embodiment("xarm_ruka", (ARM_7DOF, HAND_11))
 POSE_RUKA = Embodiment("pose_ruka", (CART_POSE, HAND_11))
