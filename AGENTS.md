@@ -4,6 +4,28 @@ Refer to `docs/` for repo specific context
 If looking undirected for fixes to make, start with `roadmap/*` for info. remove items from the
 roadmap once completed.
 
+# SURPRISES
+
+## uvx tools
+
+uv is first class for environment, but use uvx to install and use ruff, pre-commit, etc
+
+## RUF003
+
+RUF003 Comment contains ambiguous (MULTIPLICATION SIGN). Did you mean `x` (LATIN SMALL LETTER X)?
+use letter x in codebase so this doesnt happen
+
+# TIPS
+
+## findimports
+
+uvx findimports -N -q a/b
+use this to parse dependency graph
+
+# BOILERPLATE
+
+# MAIN
+
 # THINGS I LIKE
 
 * I prefer very concise docstrings. and concise code. the purpose of the code
