@@ -13,7 +13,7 @@ share the *same* BodyPart instance, so the DOF embeddings are identical.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import auto, Enum
+from enum import auto, Enum, StrEnum
 from typing import ClassVar, Iterator, Protocol, runtime_checkable, Sequence
 
 # ---------------------------------------------------------------------------
@@ -96,12 +96,12 @@ class SourceType(Enum):
     LEROBOT = auto()
 
 
-class Frame(str, Enum):
+class Frame(StrEnum):
     RELATIVE = "relative"
     ABSOLUTE = "absolute"
 
 
-class PartKind(str, Enum):
+class PartKind(StrEnum):
     SPATIAL2D = "spatial2d"
     SPATIAL3D = "spatial3d"
     INNATE = "innate"
@@ -189,6 +189,9 @@ HAND_16 = BodyPart("hand_16", tuple(f"hand_j{i}" for i in range(16)), Frame.ABSO
 MANO_7 = BodyPart("mano_7", tuple(f"mano_{i}" for i in range(7)), Frame.ABSOLUTE, PartKind.SPATIAL3D)
 MANO_48 = BodyPart("mano_48", tuple(f"mano_{i}" for i in range(48)), Frame.ABSOLUTE, PartKind.SPATIAL3D)
 
+# 3D hand keypoints (21 joints x 3 coords = 63 DOFs)
+KP3D_21 = BodyPart("kp3d_21", tuple(f"k3d_{i}" for i in range(63)), Frame.ABSOLUTE, PartKind.SPATIAL3D)
+
 # Mobile base
 BASE_2D = BodyPart("base_2d", ("base_vx", "base_vy", "base_wz"), Frame.RELATIVE, PartKind.SPATIAL2D)
 
@@ -262,7 +265,9 @@ Embodiment.REGISTRY = {}
 SINGLE = Embodiment("single", (ARM_7DOF, GRIPPER, CART_POS, CART_ORI))
 BIMANUAL = Embodiment("bimanual", (ARM_7DOF, GRIPPER, ARM_7DOF, GRIPPER))
 CART_GRIPPER = Embodiment("cart_gripper", (CART_POSE, GRIPPER))
-HUMAN_SINGLE = Embodiment("human_single", (CART_POSE, MANO_48))
+# TODO ... we need to add these after fixing the disk dataset
+# HUMAN_SINGLE = Embodiment("human_single", (CART_POSE, MANO_48))
+HUMAN_SINGLE = Embodiment("human_single", (CART_POS, KP3D_21))
 NAV = Embodiment("nav", (BASE_2D,))
 XARM_RUKA = Embodiment("xarm_ruka", (ARM_7DOF, HAND_11))
 POSE_RUKA = Embodiment("pose_ruka", (CART_POSE, HAND_11))

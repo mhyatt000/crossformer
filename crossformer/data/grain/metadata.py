@@ -233,7 +233,7 @@ NORM_MASK = {
     "position": [True] * 3,  # TODO rename to pose
     "pose": [True] * 6,
     "gripper": [False],  # raw is better if mostly one of open/closed
-    "k3ds": [[True] * 4] * 21,
+    "k3ds": [True] * 63,  # 21 keypoints x 3 coords (homogeneous stripped)
 }
 NORM_MASK = jax.tree.map(np.array, NORM_MASK, is_leaf=lambda x: isinstance(x, list))
 NORM_MASK = jax.tree.map(lambda x: x.astype(bool), NORM_MASK)
@@ -288,14 +288,6 @@ def normalize_action_and_proprio(
             continue
         if key not in metadata.proprio:
             continue
-        value = obs[key]
-        stats = metadata.proprio[key]
-        if normalization_type == NormalizationType.NORMAL:
-            mean = stats.mean
-            std = np.maximum(stats.std, EPS)
-            obs[key] = (value - mean) / std
-        else:
-            span = np.maximum(stats.maximum - stats.minimum, EPS)
-            obs[key] = 2.0 * (value - stats.minimum) / span - 1.0
+        obs[key] = _norm(obs[key], metadata.proprio[key])
     step["observation"] = obs
     return step

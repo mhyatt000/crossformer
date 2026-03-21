@@ -17,7 +17,6 @@ import numpy as np
 
 from crossformer.data.grain import metadata
 from crossformer.utils.jax_utils import str2jax
-from crossformer.utils.mytyping import DeprecatedError
 from crossformer.utils.spec import ModuleSpec
 
 log = logging.getLogger(__name__)
@@ -111,28 +110,10 @@ def _restructure_trajectory(
     step["info"]["id"] = {"step": sid, "episode": eid}  # patch
     step["observation"]["timestep"] = sid
 
-    """
-    step["observation"]["proprio"]["single_arm"] = np.concatenate(
-        [
-            step["observation"]["proprio"]["gripper"],
-            step["observation"]["proprio"]["joints"],
-            step["observation"]["proprio"]["position"],
-        ],
-        axis=-1,
-    )
-
-
-    # concat proprio joints and proprio gripper
-    proprio = step["observation"]["proprio"]
-    action = {
-            'single': np.concatenate([proprio["joints"], proprio["gripper"]], axis=-1),
-            'position': proprio["position"],
-            }
-    """
-
     task = {}
     task[config.keys.lang] = step[config.keys.lang]  # simple
     if False:
+        """
         raise DeprecatedError("opaque")
         if config.keys.lang is not None:
             language = _sample_match_key(step, config.keys.lang)
@@ -142,6 +123,7 @@ def _restructure_trajectory(
             if language.shape[0] != traj_len:
                 language = np.broadcast_to(language, (traj_len,))
             task[config.keys.lang] = language  # .astype(object)
+        """
 
     return {
         "observation": step["observation"],
@@ -153,40 +135,6 @@ def _restructure_trajectory(
             "id": {k.replace("_id", ""): np.array([v]).reshape(-1) for k, v in step.items() if "_id" in k},
         }
         | step.get("info", {}),
-    }
-
-    old_obs = traj["observation"]
-    new_obs: dict[str, Any] = {}
-
-    for new, old in config.image_obs_keys.items():
-        key = f"image_{new}"
-        if old is None:
-            new_obs[key] = np.full((traj_len,), "", dtype=object)
-        else:
-            new_obs[key] = np.asarray(old_obs[old])
-    for new, old in config.depth_obs_keys.items():
-        key = f"depth_{new}"
-        if old is None:
-            new_obs[key] = np.full((traj_len,), "", dtype=object)
-        else:
-            new_obs[key] = np.asarray(old_obs[old])
-    if config.proprio_obs_keys is not None:
-        if config.proprio_obs_dims is None:
-            raise ValueError("proprio_obs_dims must be provided when proprio_obs_keys is set.")
-        for new, old in config.proprio_obs_keys.items():
-            key = f"proprio_{new}"
-            if old is None:
-                new_obs[key] = np.zeros((traj_len, config.proprio_obs_dims[new]), dtype=np.float32)
-            else:
-                new_obs[key] = np.asarray(old_obs[old], dtype=np.float32)
-
-    new_obs["timestep"] = np.arange(traj_len, dtype=np.int32)
-
-    return {
-        "observation": new_obs,
-        "task": task,
-        "action": action,
-        "dataset_name": np.repeat(name, traj_len),
     }
 
 
@@ -203,6 +151,14 @@ def _restructure_step_mano(x: dict, *, name: str, config: GrainDatasetConfig) ->
     x["task"] = task
 
     x["observation"]["timestep"] = x["info"]["id"]["step"]
+
+    # k3ds: (H, 21, 4) → strip homogeneous coord → (H, 21, 3)
+    # derive cart_pos from palm keypoint (index 0) before flatten
+    k3ds = np.array(x["action"]["k3ds"])  # (H, 21, 4)
+    k3ds = k3ds[..., :3]  # (H, 21, 3) drop homogeneous w
+    x["action"]["position"] = k3ds[:, 0, :]  # (H, 3) palm = cart_pos
+    x["action"]["k3ds"] = k3ds.reshape(k3ds.shape[0], -1)  # (H, 63)
+
     x = jax.tree.map(lambda y: np.array(y), x)  # ensure numpy arrays
     return x
 
