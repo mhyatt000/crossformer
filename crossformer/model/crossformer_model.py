@@ -244,6 +244,8 @@ class CrossFormerModel:
                 raise ValueError("You can't set config['pretrained_step'] when loading from HuggingFace.")
             checkpoint_path = _download_from_huggingface(checkpoint_path.removeprefix("hf://"))
 
+        checkpoint_path = Path(checkpoint_path).expanduser().resolve()
+
         # load config
         with open(os.path.join(checkpoint_path, "config.json"), "r") as f:
             config = json.load(f)
@@ -279,15 +281,33 @@ class CrossFormerModel:
         )
         target_params = jax.tree.map(lambda x: jax.device_put(x, sharding), target_params)
 
-        from crossformer.utils.callbacks.save import SaveCallback
+        checkpoint_path = Path(checkpoint_path).expanduser().resolve()
 
-        # SaveCallback expects the experiment root; load_pretrained gets the params dir.
-        save_dir = Path(checkpoint_path).expanduser().resolve().parent
+        # Check if this is a HuggingFace-style checkpoint (has step dirs at root level)
+        # vs a local checkpoint (has params/ and state/ subdirectories)
+        has_params_subdir = (checkpoint_path / "params").exists()
 
-        try:
-            params = SaveCallback(save_dir=save_dir, new_api=True).load_params(target_params, step=step)
-        except Exception:
-            params = SaveCallback(save_dir=save_dir, new_api=False).load_params(target_params, step=step)
+        if has_params_subdir:
+            # Local checkpoint format: use SaveCallback which expects params/ subdirectory
+            from crossformer.utils.callbacks.save import SaveCallback
+
+            try:
+                params = SaveCallback(save_dir=checkpoint_path, new_api=True).load_params(target_params, step=step)
+            except Exception:
+                params = SaveCallback(save_dir=checkpoint_path, new_api=False).load_params(target_params, step=step)
+        else:
+            # HuggingFace format: step directories at root level, load directly with orbax
+            mngr = orbax.checkpoint.CheckpointManager(checkpoint_path)
+            if step is None:
+                step = mngr.latest_step()
+            if step is None:
+                raise ValueError("No checkpoint found in directory")
+
+            abstract = jax.tree.map(
+                lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=x.sharding),
+                target_params,
+            )
+            params = mngr.restore(step, args=orbax.checkpoint.args.StandardRestore(abstract))
 
         config["text_processor"] = None
         if config["text_processor"] is not None:
