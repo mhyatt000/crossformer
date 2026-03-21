@@ -149,6 +149,7 @@ class BodyPart:
     dof_names: tuple[str, ...]
     frame: Frame
     kind: PartKind
+    norm_mask: tuple[bool, ...] | None = None
 
     @property
     def dof_ids(self) -> tuple[int, ...]:
@@ -157,6 +158,14 @@ class BodyPart:
     @property
     def action_dim(self) -> int:
         return len(self.dof_names)
+
+    @property
+    def action_norm_mask(self) -> tuple[bool, ...]:
+        if self.norm_mask is None:
+            return (True,) * self.action_dim
+        if len(self.norm_mask) != self.action_dim:
+            raise ValueError(f"{self.name}: norm_mask len {len(self.norm_mask)} != action_dim {self.action_dim}")
+        return self.norm_mask
 
     def __repr__(self) -> str:
         return f"BodyPart({self.name!r}, dim={self.action_dim})"
@@ -173,7 +182,7 @@ ARM_7DOF = BodyPart(
     Frame.ABSOLUTE,
     PartKind.INNATE,
 )
-GRIPPER = BodyPart("gripper", ("gripper",), Frame.ABSOLUTE, PartKind.INNATE)
+GRIPPER = BodyPart("gripper", ("gripper",), Frame.ABSOLUTE, PartKind.INNATE, norm_mask=(False,))
 CART_POSE = BodyPart(
     "cart_pose",
     ("ee_x", "ee_y", "ee_z", "ee_rx", "ee_ry", "ee_rz"),

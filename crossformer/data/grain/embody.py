@@ -154,6 +154,33 @@ def extract_part_actions(
     return out
 
 
+def build_action_norm_mask(
+    action_dict: dict[str, np.ndarray],
+    embodiment: Embodiment,
+    key_map: dict[str, str] | None = None,
+) -> dict[str, np.ndarray]:
+    """Build per-action-key normalization masks from the embodiment."""
+    km = key_map or PART_TO_ACTION_KEY
+    parts_by_key: dict[str, list[BodyPart]] = {}
+    for part in embodiment.parts:
+        key = km.get(part.name)
+        if key is None:
+            raise KeyError(f"no action key mapping for body part {part.name!r}")
+        parts_by_key.setdefault(key, []).append(part)
+
+    masks: dict[str, np.ndarray] = {}
+    for key, value in action_dict.items():
+        parts = parts_by_key.get(key)
+        if not parts:
+            masks[key] = np.ones(value.shape[-1], dtype=bool)
+            continue
+        mask = np.concatenate([np.asarray(part.action_norm_mask, dtype=bool) for part in parts])
+        if mask.shape[-1] != value.shape[-1]:
+            raise ValueError(f"{key!r}: norm mask len {mask.shape[-1]} != action dim {value.shape[-1]}")
+        masks[key] = mask
+    return masks
+
+
 def build_embodiment_action(
     action_dict: dict[str, np.ndarray],
     embodiment: Embodiment,
