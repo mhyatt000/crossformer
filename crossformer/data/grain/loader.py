@@ -24,6 +24,7 @@ from crossformer.data.grain.datasets import (
     EpisodeInfo,
     unpack_record,
 )
+from crossformer.data.grain.embody import embody_transform
 from crossformer.data.grain.pipelines import (
     _infer_observation_mappings,
     add_mask,
@@ -264,7 +265,7 @@ class GrainDataFactory:
     stats: dict[str, Any] = field(init=False, default_factory=dict)
     mp: int = 8  # of processes for mp prefetch. set to 0 to disable mp prefetch
 
-    def source2ds(self, dconfig, tfconfig, cfg: cn.Train) -> GrainDataLoader:
+    def source2ds(self, dconfig, tfconfig, cfg: cn.Train, dataset: Arec, max_a: int = 0) -> GrainDataLoader:
         ds, stats = make_single_dataset(
             dconfig,
             train=True,
@@ -272,6 +273,10 @@ class GrainDataFactory:
             shuffle_buffer_size=1,
             seed=cfg.seed,
         )
+        if max_a > 0:
+            embody_fn = partial(embody_transform, embodiment=dataset.embodiment, max_a=max_a, mask_prob=0.25)
+            ds = ds.map(embody_fn)
+            log.debug("applied embody transform: %s (max_a=%d)", dconfig.name, max_a)
         self.stats[dconfig.name] = stats
         return ds
 
@@ -322,15 +327,20 @@ class GrainDataFactory:
 
         sources = [make_source_by_mix(m, cfg) for m in mix]
 
+        # compute max action dim across all embodiments in the mix
+        embodiments = [m.embodiment for m in mix]
+        max_a = max(e.action_dim for e in embodiments)
+        log.info("embodiment max_a=%d from %s", max_a, [e.name for e in embodiments])
+
         # if single then make single source and single dataset
         if len(sources) == 1:
             _, dconfig, tfconfig = sources[0]
-            ds = self.source2ds(dconfig, tfconfig, cfg)
+            ds = self.source2ds(dconfig, tfconfig, cfg, dataset=mix[0], max_a=max_a)
 
         # if multi then make sources for each
         # then interleave them
         else:
-            dsets = [self.source2ds(dc, tc, cfg) for s, dc, tc in sources]
+            dsets = [self.source2ds(dc, tc, cfg, dataset=m, max_a=max_a) for (s, dc, tc), m in zip(sources, mix)]
             ds = self.pad_and_mix(dsets)
 
         ds = ds.seed(cfg.seed).shuffle()  # shuffle before iter

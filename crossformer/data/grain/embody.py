@@ -2,24 +2,26 @@
 
 Per-sample transform that builds a padded action block (`act.base`),
 DOF identity vector (`act.id`), and boolean mask (`mask.act`) by
-randomly sampling which body parts to include, mask, or anonymize.
+randomly sampling which body parts to include or mask, in random order.
 
-Not wired into the grain pipeline yet — call `build_embodiment_action`
-directly for testing.
+Wired into the grain pipeline via GrainDataFactory in loader.py.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from crossformer.embody import BodyPart, Embodiment
+from crossformer.embody import (
+    BodyPart,
+    Embodiment,
+    MASK_ID,
+)
 
 # ---------------------------------------------------------------------------
 # DOF ID sentinels (in act.id)
 # ---------------------------------------------------------------------------
 
-MASK_DOF = -1  # body part excluded — zeros in act.base, masked in loss
-ANY_DOF = 0  # body part included but identity-erased
+MASK_DOF = MASK_ID  # body part excluded — zeros in act.base, masked in loss
 
 # ---------------------------------------------------------------------------
 # Sampling modes per body part
@@ -27,16 +29,15 @@ ANY_DOF = 0  # body part included but identity-erased
 
 INCLUDE = 0  # real DOF vocab IDs
 MASK = 1  # excluded
-ANY = 2  # included, identity-erased
 
 
 def sample_modes(
     n_parts: int,
     rng: np.random.Generator,
-    probs: tuple[float, float, float] = (0.50, 0.25, 0.25),
+    mask_prob: float = 0.25,
 ) -> list[int]:
-    """Sample INCLUDE/MASK/ANY per body part, at least one non-masked."""
-    modes = rng.choice([INCLUDE, MASK, ANY], size=n_parts, p=probs).tolist()
+    """Sample INCLUDE/MASK per body part, at least one included."""
+    modes = rng.choice([INCLUDE, MASK], size=n_parts, p=[1 - mask_prob, mask_prob]).tolist()
     if all(m == MASK for m in modes):
         modes[rng.integers(n_parts)] = INCLUDE
     return modes
@@ -47,46 +48,41 @@ def sample_modes(
 # ---------------------------------------------------------------------------
 
 
-def compute_max_action_dim(embodiments: list[Embodiment]) -> int:
-    """Max total DOFs across a set of embodiments."""
-    return max(e.action_dim for e in embodiments)
-
-
 def build_action_block(
     parts: list[BodyPart],
     actions: list[np.ndarray],
     modes: list[int],
+    order: list[int],
     max_a: int,
 ) -> dict[str, np.ndarray]:
-    """Build act.base, act.id, mask.act from body parts and sampled modes.
+    """Build act.base, act.id, mask.act from body parts in random order.
 
     Args:
         parts: body parts for this embodiment.
         actions: per-part arrays, each (H, D_i) float.
-        modes: per-part INCLUDE/MASK/ANY from sample_modes.
-        max_a: pad width (from compute_max_action_dim).
+        modes: per-part INCLUDE/MASK from sample_modes.
+        order: permutation indices for body part ordering.
+        max_a: max action dim. pad width
 
     Returns:
         dict with act.base (H, max_a) float32,
                   act.id  (max_a,)   int32,
                   mask.act (max_a,)  bool.
     """
-    assert len(parts) == len(actions) == len(modes)
+    assert len(parts) == len(actions) == len(modes) == len(order)
     H = actions[0].shape[0]
 
     act_chunks: list[np.ndarray] = []
     id_chunks: list[np.ndarray] = []
 
-    for part, act, mode in zip(parts, actions, modes):
+    for idx in order:
+        part, act, mode = parts[idx], actions[idx], modes[idx]
         D = part.action_dim
         assert act.shape == (H, D), f"{part.name}: expected ({H},{D}), got {act.shape}"
 
         if mode == MASK:
             act_chunks.append(np.zeros((H, D), dtype=np.float32))
             id_chunks.append(np.full(D, MASK_DOF, dtype=np.int32))
-        elif mode == ANY:
-            act_chunks.append(act.astype(np.float32))
-            id_chunks.append(np.full(D, ANY_DOF, dtype=np.int32))
         else:  # INCLUDE
             act_chunks.append(act.astype(np.float32))
             id_chunks.append(np.array(part.dof_ids, dtype=np.int32))
@@ -101,7 +97,7 @@ def build_action_block(
         act_base = np.pad(act_base, ((0, 0), (0, pad_d)))
         act_id = np.pad(act_id, (0, pad_d), constant_values=MASK_DOF)
 
-    mask_act = act_id >= 0
+    mask_act = act_id != MASK_DOF
 
     return {
         "act.base": act_base,
@@ -122,6 +118,7 @@ PART_TO_ACTION_KEY: dict[str, str] = {
     "cart_pos": "position",
     "cart_ori": "orientation",
     "cart_pose": "pose",
+    "kp3d_21": "k3ds",
     "mano_7": "mano",
     "mano_48": "mano",
     "hand_11": "hand",
@@ -162,18 +159,18 @@ def build_embodiment_action(
     embodiment: Embodiment,
     max_a: int,
     rng: np.random.Generator,
-    probs: tuple[float, float, float] = (0.50, 0.25, 0.25),
+    mask_prob: float = 0.25,
     key_map: dict[str, str] | None = None,
 ) -> dict[str, np.ndarray]:
-    """End-to-end: extract actions, sample modes, build padded block.
+    """End-to-end: extract actions, sample modes, shuffle order, build block.
 
     Args:
         action_dict: decoded sample's action sub-dict,
             e.g. {"joints": (H,7), "gripper": (H,1), "position": (H,3), ...}
         embodiment: this dataset's embodiment.
         max_a: global pad width.
-        rng: numpy generator for mode sampling.
-        probs: (include, mask, any) probabilities.
+        rng: numpy generator for mode sampling and shuffling.
+        mask_prob: probability of masking each body part (default 0.25).
         key_map: optional override for body-part-name → action-dict-key.
 
     Returns:
@@ -181,5 +178,31 @@ def build_embodiment_action(
     """
     parts = list(embodiment.parts)
     actions = extract_part_actions(action_dict, embodiment, key_map)
-    modes = sample_modes(len(parts), rng, probs)
-    return build_action_block(parts, actions, modes, max_a)
+    modes = sample_modes(len(parts), rng, mask_prob)
+    order = rng.permutation(len(parts)).tolist()
+    return build_action_block(parts, actions, modes, order, max_a)
+
+
+# ---------------------------------------------------------------------------
+# Grain-compatible per-sample transform
+# ---------------------------------------------------------------------------
+
+
+def embody_transform(
+    sample: dict,
+    *,
+    embodiment: Embodiment,
+    max_a: int,
+    mask_prob: float = 0.25,
+) -> dict:
+    """Grain .map() transform: adds act.base, act.id, mask.act to sample."""
+    rng = np.random.default_rng()
+    block = build_embodiment_action(
+        sample["action"],
+        embodiment,
+        max_a,
+        rng,
+        mask_prob,
+    )
+    sample.update(block)
+    return sample
