@@ -12,7 +12,7 @@ Usage:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 import re
 
@@ -29,6 +29,7 @@ import tensorflow as tf
 from tqdm import tqdm
 import tyro
 
+import crossformer.cn as cn
 from crossformer.embody import slot_positions
 from crossformer.model.components.guidance import TokenGuidance
 from crossformer.model.components.heads.dof import (
@@ -45,7 +46,9 @@ from crossformer.model.components.transformer import common_transformer_sizes
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec, spec
+from crossformer.utils.train_utils import Timer
 from crossformer.utils.tree.core import flat
+import wandb
 
 # -- embodiment mapping -------------------------------------------------------
 
@@ -63,6 +66,7 @@ HEAD_TO_EMBODIMENT = {
 class Config:
     """XFlowHead end-to-end training config."""
 
+    name: str = ""
     steps: int = 1  # training steps (1 for debug)
     lr: float = 1e-3  # learning rate
     log_every: int = 1  # log interval
@@ -80,6 +84,7 @@ class Config:
     guide_key: str = "action.pose"  # dot-path into batch for guidance signal
 
     mp: int = 1  # grain multiproc (for data loading)
+    wandb: cn.Wandb = field(default_factory=cn.Wandb)
 
 
 # -- helpers ------------------------------------------------------------------
@@ -201,7 +206,7 @@ class TrainStateRng(TrainState):
 # -- train / eval steps ------------------------------------------------------
 
 
-def make_train_step(module, num_heads, guide_module=None):
+def make_train_step(module, head_names, lr, guide_module=None):
     """Build a fully compiled multi-head train step.
 
     Runs the transformer once, then computes loss + grads for each head
@@ -210,7 +215,8 @@ def make_train_step(module, num_heads, guide_module=None):
 
     Args:
         module: CrossFormerModel module.
-        num_heads: number of action heads (determines scan length).
+        head_names: action heads to report metrics for.
+        lr: optimizer learning rate.
         guide_module: optional TokenGuidance module.
 
     Returns:
@@ -231,7 +237,8 @@ def make_train_step(module, num_heads, guide_module=None):
             guidance_tokens=guidance_tokens,
         )
         frac = emb_mask.mean()
-        return loss * frac, {k: v * frac for k, v in metrics.items()}
+        metrics = {k: v * frac for k, v in metrics.items()}
+        return loss * frac, metrics
 
     @partial(jax.jit, static_argnames=("train",))
     def train_step(state, obs, task, pad_mask, head_inputs, guide_input=None, train=True):
@@ -248,7 +255,7 @@ def make_train_step(module, num_heads, guide_module=None):
             train: bool.
 
         Returns:
-            (state, total_loss, head_losses, grad_norm).
+            (state, update_info).
         """
         rng = jax.random.fold_in(state.rng, state.step)
 
@@ -268,17 +275,28 @@ def make_train_step(module, num_heads, guide_module=None):
 
             total = jnp.float32(0.0)
             head_losses = []
+            head_metrics = []
             for hi in head_inputs:
-                loss_h, _ = _loss_one_head(model_params, transformer_outputs, hi, guidance_tokens, rng, train)
+                loss_h, metrics_h = _loss_one_head(model_params, transformer_outputs, hi, guidance_tokens, rng, train)
                 total = total + loss_h
                 head_losses.append(loss_h)
+                head_metrics.append(metrics_h)
 
-            return total, jnp.stack(head_losses)
+            return total, (jnp.stack(head_losses), tuple(head_metrics))
 
-        (total_loss, head_losses), grads = jax.value_and_grad(_total_loss, has_aux=True)(state.params)
+        (total_loss, (head_losses, head_metrics)), grads = jax.value_and_grad(_total_loss, has_aux=True)(state.params)
+        updates, _ = state.tx.update(grads, state.opt_state, state.params)
+        update_info = {
+            "total_loss": total_loss,
+            "grad_norm": optax.global_norm(grads),
+            "update_norm": optax.global_norm(updates),
+            "param_norm": optax.global_norm(state.params),
+            "learning_rate": jnp.asarray(lr),
+        }
+        for head_name, head_loss, metrics in zip(head_names, head_losses, head_metrics):
+            update_info[head_name] = {"weighted_loss": head_loss, **metrics}
         state = state.apply_gradients(grads=grads)
-        grad_norm = optax.global_norm(grads)
-        return state, total_loss, head_losses, grad_norm
+        return state, update_info
 
     return train_step
 
@@ -306,10 +324,10 @@ def main(cfg: Config):
     for h, info in head_info.items():
         print(f"  {h:15s} -> {info['embodiment']:20s}  dofs={info['n_dofs']}")
     print(f"  max_h={max_h}  max_a={max_a}")
+    run = cfg.wandb.initialize(cfg)
 
     # Load data
     print(Rule("loading data"))
-    import crossformer.cn as cn
     from crossformer.cn.dataset import DataSourceE
     from crossformer.cn.dataset.dataset import Loader
     from crossformer.data.grain.loader import _apply_fd_limit, GrainDataFactory
@@ -347,6 +365,15 @@ def main(cfg: Config):
         "observation": example_obs,
         "task": example_batch.get("task", {"pad_mask_dict": {}}),
     }
+    wandb.config.update(
+        {
+            "example_batch_spec": spec(example_batch),
+            "obs_keys": obs_keys,
+            "head_info": head_info,
+            "model_config": config,
+        },
+        allow_val_change=True,
+    )
 
     rng = jax.random.PRNGKey(42)
     init_rng, train_rng, pred_rng = jax.random.split(rng, 3)
@@ -365,6 +392,7 @@ def main(cfg: Config):
     n_params = sum(x.size for x in jax.tree.leaves(model.params))
     print(f"  params: {n_params:,}")
     print(f"  heads: {list(model.module.heads.keys())}")
+    wandb.config.update({"n_params": n_params}, allow_val_change=True)
 
     # Guidance encoder
     guide_module = None
@@ -387,6 +415,7 @@ def main(cfg: Config):
         guide_params = jax.tree.map(lambda x: jax.device_put(x, replicated_sharding), guide_vars["params"])
         n_guide = sum(x.size for x in jax.tree.leaves(guide_params))
         print(f"  guide params: {n_guide:,}  compress={cfg.compress_guidance}")
+        wandb.config.update({"n_guide_params": n_guide}, allow_val_change=True)
 
     # Optimizer + state
     combined_params = {"model": model.params, "guide": guide_params} if guide_module is not None else model.params
@@ -397,7 +426,7 @@ def main(cfg: Config):
         tx=tx,
         rng=train_rng,
     )
-    train_step = make_train_step(model.module, len(cfg.heads), guide_module=guide_module)
+    train_step = make_train_step(model.module, cfg.heads, cfg.lr, guide_module=guide_module)
 
     # Train
     print(Rule("training"))
@@ -409,45 +438,56 @@ def main(cfg: Config):
     table.add_column("|grad|", justify="right", style="dim")
 
     losses = []
+    timer = Timer()
     for step in tqdm(range(cfg.steps)):
-        batch = next(dsit)
-        obs = normalize_obs(batch["observation"], obs_keys)
-        task = batch.get("task", {"pad_mask_dict": {}})
-        pad_mask = obs["timestep_pad_mask"]
+        timer.tick("total")
+        with timer("dataset"):
+            batch = next(dsit)
+            obs = normalize_obs(batch["observation"], obs_keys)
+            task = batch.get("task", {"pad_mask_dict": {}})
+            pad_mask = obs["timestep_pad_mask"]
 
-        # Extract guidance signal
-        guide_input = None
-        if cfg.use_guidance:
-            guide_input = flat(batch).get(cfg.guide_key)
-            if guide_input is not None and guide_input.ndim > 3:
-                guide_input = guide_input.reshape(*guide_input.shape[:2], -1)
+            guide_input = None
+            if cfg.use_guidance:
+                guide_input = flat(batch).get(cfg.guide_key)
+                if guide_input is not None and guide_input.ndim > 3:
+                    guide_input = guide_input.reshape(*guide_input.shape[:2], -1)
 
-        # Prepare all head inputs (Python-side, pre-JIT)
-        head_inputs = []
-        for h in cfg.heads:
-            emb_name = head_info[h]["embodiment"]
-            inputs = prepare_head_inputs(batch, h, max_h, max_a, emb_name)
-            if inputs is None:
-                raise ValueError(f"Head '{h}' not found in batch. got={tuple(batch['action'])}")
-            head_inputs.append(inputs)
+            head_inputs = []
+            for h in cfg.heads:
+                emb_name = head_info[h]["embodiment"]
+                inputs = prepare_head_inputs(batch, h, max_h, max_a, emb_name)
+                if inputs is None:
+                    raise ValueError(f"Head '{h}' not found in batch. got={tuple(batch['action'])}")
+                head_inputs.append(inputs)
 
-        state, total_loss, per_head_losses, grad_norm = train_step(
-            state,
-            obs,
-            task,
-            pad_mask,
-            tuple(head_inputs),
-            guide_input=guide_input,
-        )
-        total_loss = float(total_loss)
+        with timer("train"):
+            state, update_info = train_step(
+                state,
+                obs,
+                task,
+                pad_mask,
+                tuple(head_inputs),
+                guide_input=guide_input,
+            )
+        timer.tock("total")
+        update_info = jax.device_get(update_info)
+        total_loss = float(update_info["total_loss"])
         losses.append(total_loss)
 
         if step % cfg.log_every == 0 or step == cfg.steps - 1:
             print(f"\n[bold]step={step} loss={total_loss}:[/]")
             row = [str(step), f"{total_loss:.4f}"]
-            row.extend(f"{float(per_head_losses[i]):.4f}" for i in range(len(cfg.heads)))
-            row.append(f"{float(grad_norm):.4f}")
+            row.extend(f"{float(update_info[h]['weighted_loss']):.4f}" for h in cfg.heads)
+            row.append(f"{float(update_info['grad_norm']):.4f}")
             table.add_row(*row)
+            cfg.wandb.log(
+                {
+                    "training": update_info,
+                    "timer": timer.get_average_times(),
+                },
+                step=step,
+            )
 
     print(table)
 
@@ -455,6 +495,7 @@ def main(cfg: Config):
     last = sum(losses[-10:]) / min(10, len(losses))
     ratio = last / first if first > 0 else float("inf")
     print(f"\nloss: {first:.4f} -> {last:.4f}  ({ratio:.2%} of initial)")
+    cfg.wandb.log({"summary": {"loss_first": first, "loss_last": last, "loss_ratio": ratio}}, step=cfg.steps - 1)
 
     if ratio < 0.5:
         print("[bold green]loss decreased — training works[/]")
@@ -530,8 +571,23 @@ def main(cfg: Config):
         print(f"    mse (valid): {float(mse):.4f}")
         print(f"    pred range:  [{float(pred_valid.min()):.3f}, {float(pred_valid.max()):.3f}]")
         print(f"    tgt  range:  [{float(tgt_valid.min()):.3f}, {float(tgt_valid.max()):.3f}]")
+        cfg.wandb.log(
+            {
+                "predict_action": {
+                    h: {
+                        "mse": float(mse),
+                        "pred_min": float(pred_valid.min()),
+                        "pred_max": float(pred_valid.max()),
+                        "tgt_min": float(tgt_valid.min()),
+                        "tgt_max": float(tgt_valid.max()),
+                    }
+                }
+            },
+            step=cfg.steps,
+        )
 
     print("\n[bold green]done.[/]")
+    run.finish()
 
 
 if __name__ == "__main__":
