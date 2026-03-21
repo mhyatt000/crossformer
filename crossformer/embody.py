@@ -267,7 +267,7 @@ BIMANUAL = Embodiment("bimanual", (ARM_7DOF, GRIPPER, ARM_7DOF, GRIPPER))
 CART_GRIPPER = Embodiment("cart_gripper", (CART_POSE, GRIPPER))
 # TODO ... we need to add these after fixing the disk dataset
 # HUMAN_SINGLE = Embodiment("human_single", (CART_POSE, MANO_48))
-HUMAN_SINGLE = Embodiment("human_single", (CART_POS, KP3D_21))
+HUMAN_SINGLE = Embodiment("human_single", (CART_POS,))  # , KP3D_21))
 NAV = Embodiment("nav", (BASE_2D,))
 XARM_RUKA = Embodiment("xarm_ruka", (ARM_7DOF, HAND_11))
 POSE_RUKA = Embodiment("pose_ruka", (CART_POSE, HAND_11))
