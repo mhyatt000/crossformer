@@ -30,7 +30,7 @@ def test_continuous_loss_mse_and_l1():
 
     mse_loss, metrics = continuous_loss(pred, target, mask, loss_type="mse")
     assert mse_loss == pytest.approx(3.0, rel=1e-5)
-    assert set(metrics.keys()) == {"loss", "mse", "lsign"}
+    assert set(metrics.keys()) == {"loss", "mse", "sample_mse", "lsign"}
 
     l1_loss, _ = continuous_loss(pred, target, mask, loss_type="l1")
     assert l1_loss < mse_loss
