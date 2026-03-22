@@ -19,6 +19,7 @@ import jax
 from jax.experimental import multihost_utils
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+import numpy as np
 import optax
 from rich import print
 from rich.rule import Rule
@@ -28,6 +29,7 @@ from tqdm import tqdm
 import tyro
 
 import crossformer.cn as cn
+from crossformer.data.grain.embody import decode_embody_name
 from crossformer.model.components.guidance import TokenGuidance
 from crossformer.model.components.heads.dof import build_query_mask
 from crossformer.model.components.heads.xflow import XFlowHead
@@ -148,6 +150,20 @@ def extract_bundled_actions(batch, max_h):
     chunk_steps = jnp.tile(jnp.arange(H, dtype=jnp.float32)[None], (B, 1))
 
     return actions, dof_ids, chunk_steps
+
+
+def per_embodiment_metrics(batch, update_info):
+    """Compute per-embodiment loss from sample_mse and act.embody.
+
+    Returns dict like {"embodiment/single": mse, "embodiment/dual_arm": mse, ...}.
+    """
+    embody_arr = np.array(batch["act"]["embody"])  # (B, 32) uint8
+    sample_mse = np.array(update_info["sample_mse"])  # (B,)
+    names = [decode_embody_name(embody_arr[i]) for i in range(embody_arr.shape[0])]
+    groups: dict[str, list[float]] = {}
+    for name, mse in zip(names, sample_mse):
+        groups.setdefault(name, []).append(float(mse))
+    return {f"embodiment/{k}": sum(v) / len(v) for k, v in groups.items()}
 
 
 def shard_batch(batch, mesh):
@@ -314,7 +330,13 @@ def main(cfg: Config):
         losses.append(total_loss)
 
         if step % cfg.log_every == 0 or step == cfg.steps - 1:
+            embody_metrics = {}
+            if "embody" in batch.get("act", {}):
+                embody_metrics = per_embodiment_metrics(batch, update_info)
             print(f"\n[bold]step={step} loss={total_loss}:[/]")
+            if embody_metrics:
+                for k, v in sorted(embody_metrics.items()):
+                    print(f"  {k}: {v:.4f}")
             row = [str(step), f"{total_loss:.4f}"]
             row.append(f"{float(update_info['grad_norm']):.4f}")
             table.add_row(*row)
@@ -322,6 +344,7 @@ def main(cfg: Config):
                 {
                     "training": update_info,
                     "timer": timer.get_average_times(),
+                    **embody_metrics,
                 },
                 step=step,
             )
