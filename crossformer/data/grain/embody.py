@@ -215,6 +215,19 @@ def build_embodiment_action(
 # ---------------------------------------------------------------------------
 
 
+def _encode_name(name: str, length: int = 32) -> np.ndarray:
+    """Encode a string as a fixed-length uint8 array, zero-padded."""
+    raw = np.frombuffer(name.encode("utf-8")[:length], dtype=np.uint8)
+    out = np.zeros(length, dtype=np.uint8)
+    out[: len(raw)] = raw
+    return out
+
+
+def decode_embody_name(arr: np.ndarray) -> str:
+    """Decode a uint8 array (from act.embody) back to a string."""
+    return arr.astype(np.uint8).tobytes().rstrip(b"\x00").decode("utf-8")
+
+
 def embody_transform(
     sample: dict,
     *,
@@ -222,7 +235,7 @@ def embody_transform(
     max_a: int,
     mask_prob: float = 0.25,
 ) -> dict:
-    """Grain .map() transform: adds act.base, act.id, mask.act to sample."""
+    """Grain .map() transform: adds act.base, act.id, act.embody, mask.act."""
     rng = np.random.default_rng()
     block = build_embodiment_action(
         sample["action"],
@@ -231,5 +244,6 @@ def embody_transform(
         rng,
         mask_prob,
     )
+    block["act.embody"] = _encode_name(embodiment.name)
     sample.update(block)
     return sample
