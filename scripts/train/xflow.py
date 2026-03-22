@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from functools import partial
 import re
 
+from einops import rearrange
 import jax
 from jax.experimental import multihost_utils
 import jax.numpy as jnp
@@ -62,6 +63,7 @@ class Config:
 
     # Token guidance
     use_guidance: bool = True  # enable guidance tokens
+    guidance_prob: float = 1.0  # prob of using guidance each step (0-1, for dropout sweep)
     compress_guidance: bool = False  # compress via perceiver latents
     num_guidance_latents: int = 4  # latent count when compress=True
     guide_key: str = "action.pose"  # dot-path into batch for guidance signal
@@ -268,8 +270,10 @@ def main(cfg: Config):
         guide_example = flat(example_batch).get(cfg.guide_key)
         if guide_example is None:
             raise ValueError(f"guide_key={cfg.guide_key!r} not found in batch. check dot-path.")
+        # TokenGuidance expects (B, W, D); flatten trailing dims for higher-rank signals
+        # e.g. action.pose may be (B, W, H, A) from the embody pipeline
         if guide_example.ndim > 3:
-            guide_example = guide_example.reshape(*guide_example.shape[:2], -1)
+            guide_example = rearrange(guide_example, "b w ... -> b w (...)")
         print(f"  guide_key={cfg.guide_key} shape={guide_example.shape}")
         guide_module = TokenGuidance(
             embed_dim=256,
@@ -297,6 +301,7 @@ def main(cfg: Config):
 
     losses = []
     timer = Timer()
+    guide_rng = np.random.default_rng(42)
     for step in tqdm(range(cfg.steps)):
         timer.tick("total")
         with timer("dataset"):
@@ -308,8 +313,12 @@ def main(cfg: Config):
             guide_input = None
             if cfg.use_guidance:
                 guide_input = flat(batch).get(cfg.guide_key)
+                # Flatten trailing dims to (B, W, D) for TokenGuidance
                 if guide_input is not None and guide_input.ndim > 3:
-                    guide_input = guide_input.reshape(*guide_input.shape[:2], -1)
+                    guide_input = rearrange(guide_input, "b w ... -> b w (...)")
+                # Guidance dropout: skip with (1 - guidance_prob) probability
+                if guide_input is not None and cfg.guidance_prob < 1.0 and guide_rng.random() > cfg.guidance_prob:
+                    guide_input = None
 
             actions, dof_ids, chunk_steps = extract_bundled_actions(batch, max_h)
 
@@ -344,6 +353,7 @@ def main(cfg: Config):
                 {
                     "training": update_info,
                     "timer": timer.get_average_times(),
+                    "guidance_active": guide_input is not None,
                     **embody_metrics,
                 },
                 step=step,
@@ -363,8 +373,6 @@ def main(cfg: Config):
         print("[bold yellow]loss did not decrease much — check lr or architecture[/]")
 
     # -- denoise demo: Euler ODE solve -----------------------------------------
-    print(Rule("predict_action: full denoise"))
-
     batch = next(dsit)
     obs = normalize_obs(batch["observation"], obs_keys)
     task = batch.get("task", {"pad_mask_dict": {}})
@@ -379,58 +387,63 @@ def main(cfg: Config):
         train=False,
     )
 
-    # Encode guidance tokens for inference
-    guide_tokens = None
-    if guide_module is not None:
-        guide_eval = flat(batch).get(cfg.guide_key)
-        if guide_eval is not None:
-            if guide_eval.ndim > 3:
-                guide_eval = guide_eval.reshape(*guide_eval.shape[:2], -1)
-            guide_tokens = guide_module.apply(
-                {"params": params["guide"]},
-                guide_eval,
-                deterministic=True,
-            )
-
     actions, dof_ids, chunk_steps = extract_bundled_actions(batch, max_h)
     n_valid = int((dof_ids[0] != 0).sum())  # non-MASK DOFs in first sample
-
-    pred = bound.heads["xflow"].predict_action(
-        transformer_outputs,
-        rng=pred_rng,
-        dof_ids=dof_ids,
-        chunk_steps=chunk_steps,
-        train=False,
-        guidance_tokens=guide_tokens,
-    )  # (B, W, max_h, max_a)
-
-    # Compute MSE on valid region
     q_mask = build_query_mask(chunk_steps, dof_ids)
-    pred_flat = pred.reshape(pred.shape[0], pred.shape[1], -1)
-    tgt_flat = actions.reshape(actions.shape[0], actions.shape[1], -1)
-    mask = jnp.broadcast_to(q_mask[:, None, :], pred_flat.shape)
-    sq_err = (pred_flat - tgt_flat) ** 2 * mask
-    mse = sq_err.sum() / mask.sum()
 
-    pred_valid = pred[0, 0, :max_h, :n_valid]
-    tgt_valid = actions[0, 0, :max_h, :n_valid]
+    # Eval with and without guidance to measure robustness
+    eval_modes = ["no_guidance"]
+    if guide_module is not None:
+        eval_modes.append("with_guidance")
 
-    print(f"\n  pred shape: {pred.shape}  valid DOFs: {n_valid}")
-    print(f"  mse (valid): {float(mse):.4f}")
-    print(f"  pred range:  [{float(pred_valid.min()):.3f}, {float(pred_valid.max()):.3f}]")
-    print(f"  tgt  range:  [{float(tgt_valid.min()):.3f}, {float(tgt_valid.max()):.3f}]")
-    cfg.wandb.log(
-        {
-            "predict_action": {
-                "mse": float(mse),
-                "pred_min": float(pred_valid.min()),
-                "pred_max": float(pred_valid.max()),
-                "tgt_min": float(tgt_valid.min()),
-                "tgt_max": float(tgt_valid.max()),
-            }
-        },
-        step=cfg.steps,
-    )
+    for mode in eval_modes:
+        print(Rule(f"predict_action: {mode}"))
+        guide_tokens = None
+        if mode == "with_guidance":
+            guide_eval = flat(batch).get(cfg.guide_key)
+            if guide_eval is not None:
+                if guide_eval.ndim > 3:
+                    guide_eval = rearrange(guide_eval, "b w ... -> b w (...)")
+                guide_tokens = guide_module.apply(
+                    {"params": params["guide"]},
+                    guide_eval,
+                    deterministic=True,
+                )
+
+        pred = bound.heads["xflow"].predict_action(
+            transformer_outputs,
+            rng=pred_rng,
+            dof_ids=dof_ids,
+            chunk_steps=chunk_steps,
+            train=False,
+            guidance_tokens=guide_tokens,
+        )  # (B, W, max_h, max_a)
+
+        pred_flat = pred.reshape(pred.shape[0], pred.shape[1], -1)
+        tgt_flat = actions.reshape(actions.shape[0], actions.shape[1], -1)
+        mask = jnp.broadcast_to(q_mask[:, None, :], pred_flat.shape)
+        sq_err = (pred_flat - tgt_flat) ** 2 * mask
+        mse = sq_err.sum() / mask.sum()
+
+        pred_valid = pred[0, 0, :max_h, :n_valid]
+        tgt_valid = actions[0, 0, :max_h, :n_valid]
+
+        print(f"\n  pred shape: {pred.shape}  valid DOFs: {n_valid}")
+        print(f"  mse (valid): {float(mse):.4f}")
+        print(f"  pred range:  [{float(pred_valid.min()):.3f}, {float(pred_valid.max()):.3f}]")
+        print(f"  tgt  range:  [{float(tgt_valid.min()):.3f}, {float(tgt_valid.max()):.3f}]")
+        cfg.wandb.log(
+            {
+                f"predict_action/{mode}": {
+                    "mse": float(mse),
+                    "pred_min": float(pred_valid.min()),
+                    "pred_max": float(pred_valid.max()),
+                    "tgt_min": float(tgt_valid.min()),
+                    "tgt_max": float(tgt_valid.max()),
+                }
+            },
+            step=cfg.steps,
+        )
 
     print("\n[bold green]done.[/]")
     run.finish()
