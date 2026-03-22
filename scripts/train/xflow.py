@@ -59,7 +59,13 @@ class Config:
     mix: str = "xgym_sweep"  # dataset mix name
     horizon: int = 20  # action horizon from data pipeline
     transformer_size: str = "dummy"  # transformer size preset
-    obs_keys: tuple[str, ...] = ("proprio_.*", "time", "timestep")  # lowdim obs keys to tokenize
+    obs_keys: tuple[str, ...] = ("proprio_.*",)  # lowdim obs keys to tokenize
+
+    # Vision backbone
+    use_vision: bool = True  # enable image tokenizer
+    vision_encoder: str = "small_stem"  # small_stem | resnet26
+    image_keys: tuple[str, ...] = ("image_primary", "image_side", "image_left_wrist")  # image obs keys to tokenize
+    head_heads: int = 8  # num_heads
 
     # Token guidance
     use_guidance: bool = True  # enable guidance tokens
@@ -86,14 +92,26 @@ def make_model_config(cfg, max_h, max_a, max_w, guide_dim=None):
     token_dim, transformer_kwargs = common_transformer_sizes(cfg.transformer_size)
     readout_name = "xflow"
     readout_key = f"readout_{readout_name}"
+
+    obs_tokenizers = {
+        "lowdim": ModuleSpec.create(
+            LowdimObsTokenizer,
+            obs_keys=list(cfg.obs_keys),
+        ),
+    }
+    if cfg.use_vision:
+        encoder_cls = VISION_ENCODERS.get(cfg.vision_encoder)
+        if encoder_cls is None:
+            raise ValueError(f"Unknown vision_encoder={cfg.vision_encoder!r}, choose from {list(VISION_ENCODERS)}")
+        obs_tokenizers["image"] = ModuleSpec.create(
+            ImageTokenizer,
+            obs_stack_keys=list(cfg.image_keys),
+            encoder=ModuleSpec.create(encoder_cls),
+        )
+
     return {
         "model": {
-            "observation_tokenizers": {
-                "lowdim": ModuleSpec.create(
-                    LowdimObsTokenizer,
-                    obs_keys=list(cfg.obs_keys),
-                ),
-            },
+            "observation_tokenizers": obs_tokenizers,
             "task_tokenizers": {},
             "heads": {
                 "xflow": ModuleSpec.create(
@@ -248,8 +266,14 @@ def main(cfg: Config):
         LowdimObsTokenizer,
         obs_keys=[f"^{re.escape(k)}$" for k in obs_keys],
     )
+    init_obs = dict(example_obs)
+    if cfg.use_vision:
+        init_obs |= {
+            k: v for k, v in example_batch["observation"].items() if any(re.fullmatch(pat, k) for pat in cfg.image_keys)
+        }
+        print(f"  image keys in init_obs: {[k for k in init_obs if 'image' in k or 'depth' in k]}")
     init_batch = {
-        "observation": example_obs,
+        "observation": init_obs,
         "task": example_batch.get("task", {"pad_mask_dict": {}}),
     }
     wandb.config.update(
