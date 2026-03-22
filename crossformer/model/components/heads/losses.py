@@ -41,8 +41,16 @@ def continuous_loss(
 
     loss = masked_mean(loss, mask)
 
-    mse = jnp.square(pred_value - ground_truth_value)
-    mse = masked_mean(mse, mask)
+    mse_raw = jnp.square(pred_value - ground_truth_value)
+    mse = masked_mean(mse_raw, mask)
+
+    # per-sample mse: mean over all dims except batch
+    mask_b = jnp.broadcast_to(mask, mse_raw.shape)
+    axes = tuple(range(1, mse_raw.ndim))
+    sample_mse = jnp.sum(mse_raw * mask_b, axis=axes) / jnp.clip(
+        jnp.sum(mask_b, axis=axes),
+        a_min=1e-5,
+    )
 
     sign_deltas = jnp.logical_or(
         jnp.logical_and(ground_truth_value > 0, pred_value <= 0),
@@ -52,6 +60,7 @@ def continuous_loss(
     return loss, {
         "loss": loss,
         "mse": mse,
+        "sample_mse": sample_mse,
         "lsign": lsign,
     }
 
