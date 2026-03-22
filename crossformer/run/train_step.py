@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import optax
 
 
-def make_train_step(module, lr, guide_module=None):
+def make_train_step(module, lr):
     """Build a compiled train step using bundled action format.
 
     Expects actions as (B, W, H, max_a) with dof_ids from act.id.
@@ -16,8 +16,6 @@ def make_train_step(module, lr, guide_module=None):
     Args:
         module: CrossFormerModel module.
         lr: optimizer learning rate.
-        guide_module: optional TokenGuidance module.
-
     Returns:
         Compiled train_step(state, obs, task, pad_mask, actions, dof_ids, chunk_steps, guide_input).
     """
@@ -44,18 +42,8 @@ def make_train_step(module, lr, guide_module=None):
         params = state.model.params
 
         def _total_loss(params):
-            model_params = params["model"] if guide_module is not None else params
-
-            bound = module.bind({"params": model_params}, rngs={"dropout": rng})
+            bound = module.bind({"params": params}, rngs={"dropout": rng})
             transformer_outputs = bound.crossformer_transformer(obs, task, pad_mask, train=train)
-
-            guidance_tokens = None
-            if guide_module is not None and guide_input is not None:
-                guidance_tokens = guide_module.apply(
-                    {"params": params["guide"]},
-                    guide_input,
-                    deterministic=not train,
-                )
 
             loss, metrics = bound.heads["xflow"].loss(
                 transformer_outputs,
@@ -63,7 +51,7 @@ def make_train_step(module, lr, guide_module=None):
                 dof_ids,
                 chunk_steps,
                 train=train,
-                guidance_tokens=guidance_tokens,
+                guide_input=guide_input,
             )
             return loss, metrics
 

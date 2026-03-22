@@ -31,11 +31,11 @@ import tyro
 
 import crossformer.cn as cn
 from crossformer.data.grain.embody import decode_embody_name
-from crossformer.model.components.guidance import TokenGuidance
 from crossformer.model.components.heads.dof import build_query_mask
 from crossformer.model.components.heads.xflow import XFlowHead
 from crossformer.model.components.tokenizers import LowdimObsTokenizer
 from crossformer.model.components.transformer import common_transformer_sizes
+from crossformer.model.components.vit_encoders import ResNet26FILM, SmallStem
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.run.train_step import make_train_step
 from crossformer.utils.jax_utils import initialize_compilation_cache
@@ -75,7 +75,13 @@ class Config:
 # -- helpers ------------------------------------------------------------------
 
 
-def make_model_config(cfg, max_h, max_a, max_w):
+VISION_ENCODERS = {
+    "small_stem": SmallStem,
+    "resnet26": ResNet26FILM,
+}
+
+
+def make_model_config(cfg, max_h, max_a, max_w, guide_dim=None):
     """Build CrossFormerModel config with XFlowHead."""
     token_dim, transformer_kwargs = common_transformer_sizes(cfg.transformer_size)
     readout_name = "xflow"
@@ -99,6 +105,11 @@ def make_model_config(cfg, max_h, max_a, max_w):
                     num_heads=8,
                     num_self_attend_layers=2,
                     flow_steps=10,
+                    use_guidance=cfg.use_guidance,
+                    guidance_embed_dim=token_dim,
+                    guidance_input_dim=guide_dim,
+                    compress_guidance=cfg.compress_guidance,
+                    num_guidance_latents=cfg.num_guidance_latents,
                 ),
             },
             "readouts": {readout_name: 4},
@@ -214,6 +225,14 @@ def main(cfg: Config):
     obs_keys = resolve_obs_keys(example_batch["observation"], cfg.obs_keys)
     print(f"  obs_keys: {obs_keys}")
 
+    guide_example = None
+    if cfg.use_guidance:
+        guide_example = flat(example_batch).get(cfg.guide_key)
+        if guide_example is None:
+            raise ValueError(f"guide_key={cfg.guide_key!r} not found in batch. check dot-path.")
+        if guide_example.ndim > 3:
+            guide_example = rearrange(guide_example, "b w ... -> b w (...)")
+
     # Get max_a from the bundled action shape
     max_a = example_batch["act"]["id"].shape[-1]
     print(f"  max_h={max_h}  max_a={max_a}")
@@ -224,7 +243,7 @@ def main(cfg: Config):
     print(Rule("building CrossFormerModel"))
     max_w = example_batch["observation"]["timestep_pad_mask"].shape[1]
     example_obs = normalize_obs(example_batch["observation"], obs_keys)
-    config = make_model_config(cfg, max_h, max_a, max_w)
+    config = make_model_config(cfg, max_h, max_a, max_w, None if guide_example is None else guide_example.shape[-1])
     config["model"]["observation_tokenizers"]["lowdim"] = ModuleSpec.create(
         LowdimObsTokenizer,
         obs_keys=[f"^{re.escape(k)}$" for k in obs_keys],
@@ -262,35 +281,15 @@ def main(cfg: Config):
     print(f"  heads: {list(model.module.heads.keys())}")
     wandb.config.update({"n_params": n_params}, allow_val_change=True)
 
-    # Guidance encoder
-    guide_module = None
-    guide_params = None
+    # Guidance config sanity check
     if cfg.use_guidance:
         print(Rule("guidance encoder"))
-        guide_example = flat(example_batch).get(cfg.guide_key)
-        if guide_example is None:
-            raise ValueError(f"guide_key={cfg.guide_key!r} not found in batch. check dot-path.")
-        # TokenGuidance expects (B, W, D); flatten trailing dims for higher-rank signals
-        # e.g. action.pose may be (B, W, H, A) from the embody pipeline
-        if guide_example.ndim > 3:
-            guide_example = rearrange(guide_example, "b w ... -> b w (...)")
         print(f"  guide_key={cfg.guide_key} shape={guide_example.shape}")
-        guide_module = TokenGuidance(
-            embed_dim=256,
-            compress=cfg.compress_guidance,
-            num_latents=cfg.num_guidance_latents,
-        )
-        guide_vars = guide_module.init(init_rng, guide_example)
-        guide_params = jax.tree.map(lambda x: jax.device_put(x, replicated_sharding), guide_vars["params"])
-        n_guide = sum(x.size for x in jax.tree.leaves(guide_params))
-        print(f"  guide params: {n_guide:,}  compress={cfg.compress_guidance}")
-        wandb.config.update({"n_guide_params": n_guide}, allow_val_change=True)
 
     # Optimizer + state
-    combined_params = {"model": model.params, "guide": guide_params} if guide_module is not None else model.params
     tx = optax.adamw(cfg.lr, weight_decay=1e-4)
-    state = TrainState.create(model=model.replace(params=combined_params), tx=tx, rng=train_rng)
-    train_step = make_train_step(model.module, cfg.lr, guide_module=guide_module)
+    state = TrainState.create(model=model, tx=tx, rng=train_rng)
+    train_step = make_train_step(model.module, cfg.lr)
 
     # Train
     print(Rule("training"))
@@ -378,8 +377,7 @@ def main(cfg: Config):
     task = batch.get("task", {"pad_mask_dict": {}})
 
     params = state.model.params
-    model_params = params["model"] if guide_module is not None else params
-    bound = model.module.bind({"params": model_params})
+    bound = model.module.bind({"params": params})
     transformer_outputs = bound.crossformer_transformer(
         obs,
         task,
@@ -393,22 +391,16 @@ def main(cfg: Config):
 
     # Eval with and without guidance to measure robustness
     eval_modes = ["no_guidance"]
-    if guide_module is not None:
+    if cfg.use_guidance:
         eval_modes.append("with_guidance")
 
     for mode in eval_modes:
         print(Rule(f"predict_action: {mode}"))
-        guide_tokens = None
+        guide_input = None
         if mode == "with_guidance":
-            guide_eval = flat(batch).get(cfg.guide_key)
-            if guide_eval is not None:
-                if guide_eval.ndim > 3:
-                    guide_eval = rearrange(guide_eval, "b w ... -> b w (...)")
-                guide_tokens = guide_module.apply(
-                    {"params": params["guide"]},
-                    guide_eval,
-                    deterministic=True,
-                )
+            guide_input = flat(batch).get(cfg.guide_key)
+            if guide_input is not None and guide_input.ndim > 3:
+                guide_input = rearrange(guide_input, "b w ... -> b w (...)")
 
         pred = bound.heads["xflow"].predict_action(
             transformer_outputs,
@@ -416,7 +408,7 @@ def main(cfg: Config):
             dof_ids=dof_ids,
             chunk_steps=chunk_steps,
             train=False,
-            guidance_tokens=guide_tokens,
+            guide_input=guide_input,
         )  # (B, W, max_h, max_a)
 
         pred_flat = pred.reshape(pred.shape[0], pred.shape[1], -1)

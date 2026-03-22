@@ -12,6 +12,7 @@ import numpy as np
 
 from crossformer.model.components.base import TokenGroup
 from crossformer.model.components.diffusion import FourierFeatures
+from crossformer.model.components.guidance import TokenGuidance
 from crossformer.model.components.transformer import MAPHead
 from crossformer.utils.mytyping import PRNGKey
 
@@ -90,7 +91,7 @@ class XFlowHead(nn.Module, ActionHead):
         dof_ids:            (B, max_A) int — per-sample DOF vocab IDs, MASK-padded
         chunk_steps:        (B, max_H) float — per-sample temporal positions, padded
         actions:            (B, W, max_H, max_A) — padded with zeros
-        guidance_tokens:    (B, G, E) — optional
+        guide_input:        (B, S, D) — optional raw guidance input
     """
 
     # Identity
@@ -118,6 +119,13 @@ class XFlowHead(nn.Module, ActionHead):
 
     # Pooling strategy for transformer outputs
     pool_strategy: str = "mean"
+
+    # Guidance
+    use_guidance: bool = False
+    guidance_embed_dim: int | None = None
+    guidance_input_dim: int | None = None
+    compress_guidance: bool = False
+    num_guidance_latents: int = 4
 
     def setup(self):
         D = self.num_query_channels
@@ -152,6 +160,17 @@ class XFlowHead(nn.Module, ActionHead):
             name="decoder",
         )
         self.output_proj = nn.Dense(1, name="output_proj")
+        if self.use_guidance:
+            if self.guidance_embed_dim is None:
+                raise ValueError("guidance_embed_dim must be set when use_guidance=True")
+            if self.guidance_input_dim is None:
+                raise ValueError("guidance_input_dim must be set when use_guidance=True")
+            self.guidance = TokenGuidance(
+                embed_dim=self.guidance_embed_dim,
+                compress=self.compress_guidance,
+                num_latents=self.num_guidance_latents,
+                name="guidance",
+            )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -201,6 +220,12 @@ class XFlowHead(nn.Module, ActionHead):
 
         return pos_q + act_cond + t_cond
 
+    def _encode_guidance(self, guide_input: ArrayLike | None, train: bool) -> Array | None:
+        """Encode raw guidance input to context-width tokens."""
+        if not self.use_guidance or guide_input is None:
+            return None
+        return self.guidance(guide_input, deterministic=not train)
+
     # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
@@ -214,7 +239,7 @@ class XFlowHead(nn.Module, ActionHead):
         chunk_steps: ArrayLike | None = None,
         slot_pos: ArrayLike | None = None,
         train: bool = True,
-        guidance_tokens: ArrayLike | None = None,
+        guide_input: ArrayLike | None = None,
         guidance_mask: ArrayLike | None = None,
     ) -> Array:
         """Predict action velocities.
@@ -226,7 +251,7 @@ class XFlowHead(nn.Module, ActionHead):
             dof_ids: (B, max_A) int — MASK-padded DOF vocab IDs.
             chunk_steps: (B, max_H) float — padded temporal positions.
             slot_pos: (B, max_A) float — ordinal position in action vector.
-            guidance_tokens: (B, G, E) optional extra conditioning tokens.
+            guide_input: (B, S, D) optional raw guidance signal.
             guidance_mask: (B, G) int mask (1=keep, 0=drop for CFG).
 
         Returns:
@@ -244,8 +269,12 @@ class XFlowHead(nn.Module, ActionHead):
             slot_pos = jnp.zeros((B, max_A), dtype=jnp.float32)
             time = jnp.zeros((B, W, 1))
             a_t = jnp.zeros((B, W, max_H, max_A))
+            if self.use_guidance and guide_input is None:
+                guide_input = jnp.zeros((B, 1, self.guidance_input_dim), dtype=embeddings.dtype)
         elif time is None or a_t is None or dof_ids is None or chunk_steps is None:
             raise ValueError("Must provide time, a_t, dof_ids, chunk_steps")
+
+        guidance_tokens = self._encode_guidance(guide_input, train=train)
 
         if slot_pos is None:
             slot_pos = jnp.broadcast_to(
@@ -324,7 +353,7 @@ class XFlowHead(nn.Module, ActionHead):
         chunk_steps: ArrayLike,
         slot_pos: ArrayLike | None = None,
         train: bool = True,
-        guidance_tokens: ArrayLike | None = None,
+        guide_input: ArrayLike | None = None,
         guidance_mask: ArrayLike | None = None,
     ) -> tuple[Array, dict[str, Array]]:
         """Compute flow matching loss.
@@ -355,7 +384,7 @@ class XFlowHead(nn.Module, ActionHead):
             chunk_steps=chunk_steps,
             slot_pos=slot_pos,
             train=train,
-            guidance_tokens=guidance_tokens,
+            guide_input=guide_input,
             guidance_mask=guidance_mask,
         )
 
@@ -380,7 +409,7 @@ class XFlowHead(nn.Module, ActionHead):
         train: bool = False,
         *args,
         sample_shape: tuple[int, ...] = (),
-        guidance_tokens: ArrayLike | None = None,
+        guide_input: ArrayLike | None = None,
         guidance_mask: ArrayLike | None = None,
         cfg_scale: float | None = None,
         **kwargs,
@@ -415,7 +444,7 @@ class XFlowHead(nn.Module, ActionHead):
                     chunk_steps=chunk_steps,
                     slot_pos=slot_pos,
                     train=train,
-                    guidance_tokens=guidance_tokens,
+                    guide_input=guide_input,
                     guidance_mask=guidance_mask,
                 )
 
@@ -434,7 +463,7 @@ class XFlowHead(nn.Module, ActionHead):
                         chunk_steps=chunk_steps,
                         slot_pos=slot_pos,
                         train=train,
-                        guidance_tokens=guidance_tokens,
+                        guide_input=guide_input,
                         guidance_mask=zero_mask,
                     )
                     velocity = v_uncond + cfg_scale * (v_cond - v_uncond)
