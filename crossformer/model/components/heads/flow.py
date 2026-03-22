@@ -144,7 +144,7 @@ class FlowMatchingActionHead(ContinuousActionHead):
         rng: PRNGKey,
         train: bool = True,
         *args,
-        sample_shape: tuple[int, ...] = (),
+        sample_shape: tuple[int, ...] = (1,),
         **kwargs,
     ) -> jax.Array:
         """Predict actions by solving ODE through flow."""
