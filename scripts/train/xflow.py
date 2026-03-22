@@ -65,6 +65,10 @@ class Config:
     use_vision: bool = True  # enable image tokenizer
     vision_encoder: str = "small_stem"  # small_stem | resnet26
     image_keys: tuple[str, ...] = ("image_primary", "image_side", "image_left_wrist")  # image obs keys to tokenize
+
+    # XFlowHead sizing
+    head_channels: int = 256  # num_query_channels
+    head_depth: int = 2  # num_self_attend_layers
     head_heads: int = 8  # num_heads
 
     # Token guidance
@@ -119,9 +123,9 @@ def make_model_config(cfg, max_h, max_a, max_w, guide_dim=None):
                     readout_key=readout_key,
                     max_dofs=max_a,
                     max_horizon=max_h,
-                    num_query_channels=256,
-                    num_heads=8,
-                    num_self_attend_layers=2,
+                    num_query_channels=cfg.head_channels,
+                    num_heads=cfg.head_heads,
+                    num_self_attend_layers=cfg.head_depth,
                     flow_steps=10,
                     use_guidance=cfg.use_guidance,
                     guidance_embed_dim=token_dim,
