@@ -36,7 +36,7 @@ from crossformer.cn.optim import Optimizer
 from crossformer.cn.rollout import Rollout
 from crossformer.cn.wab import Wandb
 from crossformer.data.oxe.oxe_dataset_configs import ActionDim
-from crossformer.data.oxe.oxe_dataset_mixes import HEAD_TO_DATASET
+from crossformer.data.oxe.oxe_dataset_mixes import DATASET_TO_HEAD, HEAD_TO_DATASET
 from crossformer.model.components.heads import (
     ActionHead,
     AdjFlowHead,
@@ -319,6 +319,8 @@ class Train(CN):
 
     def __post_init__(self):
         self.set_log_level()
+        self._sync_model_heads_to_mix()
+
         if self.data.transform.traj.action_horizon != self.model.max_horizon():
             log.debug(
                 "action horizon mismatch: "
@@ -344,6 +346,34 @@ class Train(CN):
         # TODO: propogate from the main cfg down to children
         # TODO: assert all keys that appear twice are the same
         # TODO: is update_config for model arch only?
+
+    @staticmethod
+    def _canonical_head_name(name: str) -> str:
+        return "single" if name == "single_arm" else name
+
+    def _sync_model_heads_to_mix(self) -> None:
+        configured = [self._canonical_head_name(h) for h in self.model.heads]
+        configured = list(dict.fromkeys(configured))
+        if configured != list(self.model.heads):
+            self.model.heads = configured
+
+        mix = getattr(self.data.mix, "value", None)
+        if mix is None or not hasattr(mix, "flatten"):
+            return
+
+        datasets = [name for name, _ in mix.flatten()]
+        inferred = {self._canonical_head_name(DATASET_TO_HEAD[name]) for name in datasets if name in DATASET_TO_HEAD}
+        if not inferred:
+            return
+
+        selected = [h for h in self.model.heads if h in inferred]
+        if not selected:
+            all_heads = set(self.model.get_all_heads().keys())
+            selected = [h for h in sorted(inferred) if h in all_heads]
+
+        if selected and selected != list(self.model.heads):
+            log.info("Auto-selecting model heads from data mix: %s -> %s", list(self.model.heads), selected)
+            self.model.heads = selected
 
     def transform_schema(self) -> dict[str, Any]:
         """

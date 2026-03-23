@@ -233,32 +233,43 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         unsqueeze = lambda x: jnp.expand_dims(x, axis=1)
         batch["action"] = jax.tree.map(unsqueeze, batch["action"])
         # fix k3ds
-
-        batch["action"]["k3ds"] = rearrange(batch["action"]["k3ds"], "b w h x y -> b w h (x y)")
+        if "k3ds" in batch["action"]:
+            batch["action"]["k3ds"] = rearrange(batch["action"]["k3ds"], "b w h x y -> b w h (x y)")
         squeeze = lambda x: jnp.squeeze(x, axis=-1)
         batch["embodiment"] = jax.tree.map(squeeze, batch["embodiment"])
         # end patch
         cfg.vprint("-> end patch")
 
         action_loss, action_metrics = 0, {}
+        matched_heads = 0
         for head_name, head in bound_module.heads.items():
+            if head_name not in batch["action"] or head_name not in batch["embodiment"]:
+                continue
             cfg.vprint(f"[DEBUG] Processing head: {head_name}")
-            # if head_name == "single_arm":
-            # head_loss, head_metrics = head.loss(embeddings=transformer_embeddings, batch=batch, train=True)
-            # else:
-            head_loss, head_metrics = head.loss(
-                transformer_embeddings,
-                batch["action"][head_name],
-                batch["observation"]["timestep_pad_mask"],
-                action_pad_mask=jnp.ones_like(batch["action"][head_name], dtype=jnp.bool_),
-                action_head_mask=batch["embodiment"][head_name],
-                train=train,
-            )
+            if head_name == "single_arm":
+                head_loss, head_metrics = head.loss(embeddings=transformer_embeddings, batch=batch, train=True)
+                action_metrics[head_name] = head_metrics
+                matched_heads += 1
+            else:
+                head_loss, head_metrics = head.loss(
+                    transformer_embeddings,
+                    batch["action"][head_name],
+                    batch["observation"]["timestep_pad_mask"],
+                    action_pad_mask=jnp.ones_like(batch["action"][head_name], dtype=jnp.bool_),
+                    action_head_mask=batch["embodiment"][head_name],
+                    train=train,
+                )
 
-            # head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(batch["action"])
-            head_sample_fraction = batch["embodiment"][head_name].mean()
-            action_loss += head_loss * head_sample_fraction * head.loss_weight
-            action_metrics[head_name] = head_metrics
+                # head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(batch["action"])
+                head_sample_fraction = batch["embodiment"][head_name].mean()
+                action_loss += head_loss * head_sample_fraction * head.loss_weight
+                action_metrics[head_name] = head_metrics
+                matched_heads += 1
+        if matched_heads == 0:
+            raise ValueError(
+                f"No overlapping heads between model={tuple(bound_module.heads.keys())} and "
+                f"batch.action={tuple(batch['action'].keys())}"
+            )
         action_metrics["total_loss"] = action_loss
 
         return action_loss, action_metrics
