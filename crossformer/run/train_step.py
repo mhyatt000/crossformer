@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 from functools import partial
+from typing import Callable
 
 import jax
-import jax.numpy as jnp
 import optax
 
+from crossformer.utils.mytyping import Params
 
-def make_train_step(module, lr):
+
+def make_train_step(
+    module,
+    lr_callable: float | Callable[[int], float] = 1e-3,
+    param_norm_callable: Callable[[Params], float] = optax.global_norm,
+):
     """Build a compiled train step using bundled action format.
 
     Expects actions as (B, W, H, max_a) with dof_ids from act.id.
@@ -15,10 +21,14 @@ def make_train_step(module, lr):
 
     Args:
         module: CrossFormerModel module.
-        lr: optimizer learning rate.
+        lr_callable: learning rate schedule fn(step) -> lr, or constant float.
+        param_norm_callable: fn(params) -> scalar norm (respects frozen keys).
     Returns:
         Compiled train_step(state, obs, task, pad_mask, actions, dof_ids, chunk_steps, guide_input).
     """
+    if not callable(lr_callable):
+        _lr = lr_callable
+        lr_callable = lambda _: _lr
 
     @partial(jax.jit, static_argnames=("train",))
     def train_step(state, obs, task, pad_mask, actions, dof_ids, chunk_steps, guide_input=None, train=True):
@@ -61,8 +71,8 @@ def make_train_step(module, lr):
             "loss": loss,
             "grad_norm": optax.global_norm(grads),
             "update_norm": optax.global_norm(updates),
-            "param_norm": optax.global_norm(params),
-            "learning_rate": jnp.asarray(lr),
+            "param_norm": param_norm_callable(params),
+            "learning_rate": lr_callable(state.step),
             **metrics,
         }
         _, new_rng = jax.random.split(state.rng)

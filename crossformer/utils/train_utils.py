@@ -297,7 +297,8 @@ def create_optimizer(params_or_params_shape: Params, **kwargs: dict) -> optax.Gr
     if isinstance(kwargs["learning_rate"], dict):
         lr_callable = create_lr_schedule(**kwargs["learning_rate"])
     else:
-        lr_callable = lambda _: kwargs["learning_rate"]
+        lr = kwargs["learning_rate"]
+        lr_callable = lambda _, lr=lr: lr
     kwargs["learning_rate"] = lr_callable
 
     # Following ViT, timm, MAE: this mask skips weight decay on biases and LayerNorm parameters
