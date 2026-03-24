@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import partial
+from pathlib import Path
 import re
 
 from einops import rearrange
@@ -21,7 +22,6 @@ from jax.experimental import multihost_utils
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 import numpy as np
-import optax
 from rich import print
 from rich.rule import Rule
 from rich.table import Table
@@ -33,14 +33,15 @@ import crossformer.cn as cn
 from crossformer.data.grain.embody import decode_embody_name
 from crossformer.model.components.heads.dof import build_query_mask
 from crossformer.model.components.heads.xflow import XFlowHead
-from crossformer.model.components.tokenizers import LowdimObsTokenizer
+from crossformer.model.components.tokenizers import ImageTokenizer, LowdimObsTokenizer
 from crossformer.model.components.transformer import common_transformer_sizes
 from crossformer.model.components.vit_encoders import ResNet26FILM, SmallStem
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.run.train_step import make_train_step
+from crossformer.utils.callbacks.save import SaveCallback
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec, spec
-from crossformer.utils.train_utils import Timer, TrainState
+from crossformer.utils.train_utils import create_optimizer, Timer, TrainState
 from crossformer.utils.tree.core import flat
 import wandb
 
@@ -52,10 +53,10 @@ class Config:
     """XFlowHead end-to-end training config."""
 
     name: str = ""
-    steps: int = 1  # training steps (1 for debug)
+    steps: int = 1_000_000  # training steps (1 for debug)
     lr: float = 1e-3  # learning rate
     log_every: int = 1  # log interval
-    batch_size: int = 4  # global batch size
+    batch_size: int = 256  # global batch size
     mix: str = "xgym_sweep"  # dataset mix name
     horizon: int = 20  # action horizon from data pipeline
     transformer_size: str = "dummy"  # transformer size preset
@@ -71,12 +72,23 @@ class Config:
     head_depth: int = 2  # num_self_attend_layers
     head_heads: int = 8  # num_heads
 
+    # Optimizer
+    weight_decay: float = 1e-4  # adamw weight decay
+    warmup_steps: int = 0  # lr warmup steps (0 = no warmup)
+    lr_schedule: str = "constant"  # constant | cosine | rsqrt
+    clip_gradient: float | None = 1.0  # global gradient clipping (None to disable)
+    frozen_keys: tuple[str, ...] = ()  # fnmatch patterns for frozen params
+
     # Token guidance
     use_guidance: bool = True  # enable guidance tokens
     guidance_prob: float = 1.0  # prob of using guidance each step (0-1, for dropout sweep)
     compress_guidance: bool = False  # compress via perceiver latents
     num_guidance_latents: int = 4  # latent count when compress=True
     guide_key: str = "action.pose"  # dot-path into batch for guidance signal
+
+    # Checkpointing
+    save_dir: str | None = Path().home().expanduser()  # checkpoint root dir (None to disable)
+    save_interval: int = 25_000  # save every N steps
 
     mp: int = 1  # grain multiproc (for data loading)
     wandb: cn.Wandb = field(default_factory=cn.Wandb)
@@ -307,6 +319,8 @@ def main(cfg: Config):
     n_params = sum(x.size for x in jax.tree.leaves(model.params))
     print(f"  params: {n_params:,}")
     print(f"  heads: {list(model.module.heads.keys())}")
+    if cfg.frozen_keys:
+        print(f"  frozen_keys: {list(cfg.frozen_keys)}")
     wandb.config.update({"n_params": n_params}, allow_val_change=True)
 
     # Guidance config sanity check
@@ -315,9 +329,43 @@ def main(cfg: Config):
         print(f"  guide_key={cfg.guide_key} shape={guide_example.shape}")
 
     # Optimizer + state
-    tx = optax.adamw(cfg.lr, weight_decay=1e-4)
+    lr_kwargs: dict = {
+        "learning_rate": (
+            {
+                "name": cfg.lr_schedule,
+                "init_value": 0.0,
+                "peak_value": cfg.lr,
+                "warmup_steps": cfg.warmup_steps,
+                **({"decay_steps": cfg.steps} if cfg.lr_schedule == "cosine" else {}),
+            }
+            if cfg.warmup_steps > 0
+            else cfg.lr
+        ),
+        "weight_decay": cfg.weight_decay,
+    }
+    if cfg.clip_gradient is not None:
+        lr_kwargs["clip_gradient"] = cfg.clip_gradient
+    if cfg.frozen_keys:
+        lr_kwargs["frozen_keys"] = list(cfg.frozen_keys)
+    tx, lr_callable, param_norm_callable = create_optimizer(model.params, **lr_kwargs)
     state = TrainState.create(model=model, tx=tx, rng=train_rng)
-    train_step = make_train_step(model.module, cfg.lr)
+    train_step = make_train_step(model.module, lr_callable, param_norm_callable)
+
+    # Checkpointing
+    if cfg.save_dir is not None:
+        save_dir = tf.io.gfile.join(
+            cfg.save_dir,
+            cfg.wandb.project,
+            cfg.wandb.group or "",
+            cfg.name,
+        )
+        wandb.config.update({"save_dir": save_dir}, allow_val_change=True)
+        print(f"  save_dir: {save_dir}")
+        save_callback = SaveCallback(save_dir)
+    else:
+        save_dir = None
+        save_callback = SaveCallback(None)
+        print("  [dim]no save_dir — checkpoints disabled[/]")
 
     # Train
     print(Rule("training"))
@@ -385,6 +433,15 @@ def main(cfg: Config):
                 },
                 step=step,
             )
+
+        if (step + 1) % cfg.save_interval == 0 and save_dir is not None:
+            with timer("ckpt"):
+                save_callback(state, step + 1)
+
+    # Final checkpoint
+    if save_dir is not None:
+        save_callback(state, cfg.steps)
+        save_callback.wait()
 
     print(table)
 
