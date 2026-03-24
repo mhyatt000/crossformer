@@ -44,9 +44,19 @@ DOF: dict[str, int] = {
     "base_wz": 33,
     **{f"mano_{i}": 34 + i for i in range(7)},
     **{f"k3d_{i}": 41 + i for i in range(84)},
+    # Robot kinematic chain 3D keypoints (Cartesian position at each joint)
+    **{
+        f"kp_{loc}_{ax}": 125 + i * 3 + j
+        for i, loc in enumerate(["base", "j0", "j1", "j2", "j3", "j4", "j5", "j6", "grip_l", "grip_r"])
+        for j, ax in enumerate(["x", "y", "z"])
+    },
+    # Hand fingertip 3D keypoints (thumb, index, middle, ring, pinky x xyz)
+    **{f"ftip_{i}": 155 + i for i in range(15)},
+    # Hand finger joint 3D keypoints (3 non-tip joints per finger x 5 fingers x xyz)
+    **{f"fjoint_{i}": 170 + i for i in range(45)},
 }
 
-VOCAB_SIZE = 128
+VOCAB_SIZE = 256
 
 
 def ids(*names: str) -> tuple[int, ...]:
@@ -198,8 +208,32 @@ HAND_16 = BodyPart("hand_16", tuple(f"hand_j{i}" for i in range(16)), Frame.ABSO
 MANO_7 = BodyPart("mano_7", tuple(f"mano_{i}" for i in range(7)), Frame.ABSOLUTE, PartKind.SPATIAL3D)
 MANO_48 = BodyPart("mano_48", tuple(f"mano_{i}" for i in range(48)), Frame.ABSOLUTE, PartKind.SPATIAL3D)
 
-# 3D hand keypoints (21 joints x 3 coords = 63 DOFs)
+# 3D hand keypoints (21 joints x 3 coords = 63 DOFs) — legacy generic block
 KP3D_21 = BodyPart("kp3d_21", tuple(f"k3d_{i}" for i in range(63)), Frame.ABSOLUTE, PartKind.SPATIAL3D)
+
+# Robot kinematic chain 3D keypoints (Cartesian positions at each joint)
+KP_BASE = BodyPart("kp_base", ("kp_base_x", "kp_base_y", "kp_base_z"), Frame.ABSOLUTE, PartKind.SPATIAL3D)
+KP_ARM = BodyPart(
+    "kp_arm",
+    tuple(f"kp_j{i}_{ax}" for i in range(7) for ax in ["x", "y", "z"]),
+    Frame.ABSOLUTE,
+    PartKind.SPATIAL3D,
+)
+KP_GRIP = BodyPart(
+    "kp_grip",
+    tuple(f"kp_grip_{side}_{ax}" for side in ["l", "r"] for ax in ["x", "y", "z"]),
+    Frame.ABSOLUTE,
+    PartKind.SPATIAL3D,
+)
+
+# Human hand - TCP (palm/wrist) shares DOF IDs with robot ee_x/y/z
+HUMAN_TCP = BodyPart("human_tcp", ("ee_x", "ee_y", "ee_z"), Frame.ABSOLUTE, PartKind.SPATIAL3D)
+# Fingertips: thumb, index, middle, ring, pinky (5 x xyz = 15 DOFs)
+KP_FINGERTIPS = BodyPart("kp_fingertips", tuple(f"ftip_{i}" for i in range(15)), Frame.ABSOLUTE, PartKind.SPATIAL3D)
+# Remaining finger joints: 3 non-tip joints per finger x 5 fingers (15 x xyz = 45 DOFs)
+KP_FINGER_JOINTS = BodyPart(
+    "kp_finger_joints", tuple(f"fjoint_{i}" for i in range(45)), Frame.ABSOLUTE, PartKind.SPATIAL3D
+)
 
 # Mobile base
 BASE_2D = BodyPart("base_2d", ("base_vx", "base_vy", "base_wz"), Frame.RELATIVE, PartKind.SPATIAL2D)
@@ -274,9 +308,7 @@ Embodiment.REGISTRY = {}
 SINGLE = Embodiment("single", (ARM_7DOF, GRIPPER, CART_POS, CART_ORI))
 BIMANUAL = Embodiment("bimanual", (ARM_7DOF, GRIPPER, ARM_7DOF, GRIPPER))
 CART_GRIPPER = Embodiment("cart_gripper", (CART_POSE, GRIPPER))
-# TODO ... we need to add these after fixing the disk dataset
-# HUMAN_SINGLE = Embodiment("human_single", (CART_POSE, MANO_48))
-HUMAN_SINGLE = Embodiment("human_single", (CART_POS,))  # , KP3D_21))
+HUMAN_SINGLE = Embodiment("human_single", (CART_POS,))  #  HUMAN_TCP, KP_FINGERTIPS, KP_FINGER_JOINTS))
 NAV = Embodiment("nav", (BASE_2D,))
 XARM_RUKA = Embodiment("xarm_ruka", (ARM_7DOF, HAND_11))
 POSE_RUKA = Embodiment("pose_ruka", (CART_POSE, HAND_11))
