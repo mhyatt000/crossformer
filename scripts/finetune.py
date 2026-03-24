@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import partial
 import logging
 from typing import Any
+from pathlib import Path
 
 from box import Box
 from einops import rearrange
@@ -25,6 +26,7 @@ from crossformer.data.oxe.oxe_standardization_transforms import (
 )
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.utils.callbacks.inspect import InspectCallback
+from crossformer.utils.callbacks.viz import VizCallback
 from crossformer.utils.deco import deprecate
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec, spec
@@ -323,6 +325,10 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     #
 
     log.info("val_callback disabled for now")
+    viz_cb = VizCallback(
+        flow_key=("pred_flow",),
+        base_key=("gt_action",),
+    )
 
     #
     # Train loop
@@ -356,7 +362,53 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
             )
 
         if (i) % cfg.eval_interval == 0:
-            log.info("Evaluating...")
+            log.info(f"Evaluating at step {i}...")
+            try:
+                viz_batch = next(dsit)
+                viz_rng = jax.random.fold_in(rng, i)
+                bound = model.module.bind({"params": train_state.model.params}, rngs={"dropout": viz_rng})
+
+                embeddings = bound.crossformer_transformer(
+                    viz_batch["observation"],
+                    viz_batch["task"],
+                    viz_batch["observation"]["timestep_pad_mask"],
+                    train=False,
+                )
+
+                flow_head_name = next(
+                    (name for name, head in bound.heads.items() if hasattr(head, "flow_steps") and name in viz_batch["action"]),
+                    None,
+                )
+
+                if flow_head_name is not None:
+                    pred_flow = bound.heads[flow_head_name].predict_action(
+                        embeddings, train=False, rng=viz_rng, sample_shape=(1,)
+                    )
+                    pred_flow = jax.device_get(pred_flow)
+
+                    if pred_flow.shape[0] == 1:
+                        pred_flow = pred_flow.squeeze(0)
+
+                    gt_action = jax.device_get(viz_batch["action"][flow_head_name])
+                    gt_action = gt_action[..., :7]
+
+                    frames = viz_cb(
+                        {
+                            "pred_flow": pred_flow,
+                            "gt_action": gt_action,
+                        }
+                    )
+
+                    out_path = Path(f"/tmp/flow_pca_step_{i}.gif")
+                    viz_cb.save(frames, out_path, fps=10)
+
+                    wandb.log(
+                        {"eval/flow_pca": wandb.Video(str(out_path), fps=10, format="gif")},
+                        step=i,
+                    )
+                    log.info("Successfully logged flow GIF to WandB!")
+            except Exception as e:
+                log.exception(f"VizCallback failed at step {i}: {e}")
 
         if (i + 1) % cfg.save_interval == 0 and save_dir is not None:
             cfg.vprint("Saving checkpoint...")

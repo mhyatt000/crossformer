@@ -1,7 +1,6 @@
 """Pure functions for flow-matching PCA visualization.
 
-Data prep, vectorised FK, PCA fitting, and Matplotlib rendering —
-all stateless, composable, and independent of the callback wrapper.
+Data prep, vectorised FK, PCA fitting, and Matplotlib rendering.
 """
 
 from __future__ import annotations
