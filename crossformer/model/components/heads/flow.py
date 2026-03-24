@@ -178,15 +178,15 @@ class FlowMatchingActionHead(ContinuousActionHead):
                 updated = a_t + dt * velocity
                 if self.clip_pred:
                     updated = jnp.clip(updated, -self.max_action, self.max_action)
-                return updated, updated 
+                return updated, updated
 
             steps = jnp.arange(self.flow_steps)
-            _a_t_final, history = jax.lax.scan(scan_fn, a_t, steps)
+            a_t_final, history = jax.lax.scan(scan_fn, a_t, steps)
             full_traj = jnp.concatenate([a_t[None, ...], history], axis=0)
 
             actions = rearrange(
                 full_traj,
-                "f, w, (h, a) -> f b w h a",
+                "f b w (h a) -> f b w h a",
                 h=self.action_horizon,
                 a=self.action_dim,
             )
