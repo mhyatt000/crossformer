@@ -73,7 +73,7 @@ def standardize(ep: dict, threshold=1e-3) -> dict:
     ep["proprio.position"] = ep["proprio.pose"][:, :3]
     ep["proprio.orientation"] = ep["proprio.pose"][:, 3:]
 
-    ep["proprio.gripper"] /= 850
+    # ep["proprio.gripper"] /= 850 # no need. current data is already [0,1]
     _binarize = partial(binarize, open=0.95, close=0.4)  # doesnt fully close
     ep["proprio.gripper"] = np.array(_binarize(jnp.array(ep["proprio.gripper"])))
 
