@@ -73,7 +73,7 @@ def standardize(ep: dict, threshold=1e-3) -> dict:
     ep["proprio.position"] = ep["proprio.pose"][:, :3]
     ep["proprio.orientation"] = ep["proprio.pose"][:, 3:]
 
-    ep["proprio.gripper"] /= 850
+    # ep["proprio.gripper"] /= 850 # no need. current data is already [0,1]
     _binarize = partial(binarize, open=0.95, close=0.4)  # doesnt fully close
     ep["proprio.gripper"] = np.array(_binarize(jnp.array(ep["proprio.gripper"])))
 
@@ -83,7 +83,6 @@ def standardize(ep: dict, threshold=1e-3) -> dict:
     mask = ~noops
     # filter noop joints
     jpos = np.concatenate([ep["proprio.joints"], ep["proprio.gripper"]], axis=1)
-    ep["proprio.single"] = jpos
     jnoop = np.array(scan_noop(jnp.array(jpos), threshold=threshold))
     jmask = ~jnoop
     mask = np.logical_and(mask, jmask)
@@ -99,7 +98,8 @@ def standardize(ep: dict, threshold=1e-3) -> dict:
     actid = (sid + 1).clip(max=len(sid) - 1)
 
     ep = {"observation": unflat(ep), "info": {"step": sid}}
-    ep["action"] = jax.tree.map(lambda x: x[actid], ep["observation"]["proprio"])
+    action_keys = ["joints", "gripper", "position", "orientation"]
+    ep["action"] = jax.tree.map(lambda x: x[actid], {k: ep["observation"]["proprio"][k] for k in action_keys})
 
     c = 20
     chunk = acroll_stacked(sid, c)

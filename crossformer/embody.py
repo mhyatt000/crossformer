@@ -445,7 +445,7 @@ xgym_sweep = Dataset(
     SourceType.AREC,
     images=_XGYM_IMG,
     proprio=_XGYM_PROPRIO,
-    version="0.5.0",
+    version="0.5.2",
     branch="to_step",
 )
 my_dataset = Dataset("my_dataset", SINGLE, SourceType.AREC, images=_XGYM_IMG, proprio=_XGYM_PROPRIO, version="0.5.3")

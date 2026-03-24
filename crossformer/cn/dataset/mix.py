@@ -149,7 +149,7 @@ XGYM = [
 ]
 
 NEW = [
-    Arec(name="xgym_sweep_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.0", branch="to_step"),
+    Arec(name="xgym_sweep_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.2", branch="to_step"),
     Arec(name="my_dataset", head=Head.SINGLE, embodiment=SINGLE, version="0.5.3"),
     Arec(name="sweep_mano", head=Head.MANO, embodiment=HUMAN_SINGLE, version="0.0.2", branch="to_step"),
 ]
