@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from functools import partial
 import logging
+from pathlib import Path
 from typing import Any
 
 from box import Box
 from einops import rearrange
 import flax
+import imageio.v2 as imageio
 import jax
 from jax.experimental import multihost_utils
 import jax.numpy as jnp
@@ -25,6 +27,7 @@ from crossformer.data.oxe.oxe_standardization_transforms import (
 )
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.utils.callbacks.inspect import InspectCallback
+from crossformer.utils.callbacks.viz import VizCallback
 from crossformer.utils.deco import deprecate
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec, spec
@@ -262,6 +265,13 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
 
                 # head_sample_fraction = (batch["action_head_masks"][head_name].sum()) / len(batch["action"])
                 head_sample_fraction = batch["embodiment"][head_name].mean()
+                jax.debug.print(
+                    "Head: {} | Fraction: {} | Head Loss: {} | Total Loss: {}",
+                    head_name,
+                    head_sample_fraction,
+                    head_loss,
+                    action_loss,
+                )
                 action_loss += head_loss * head_sample_fraction * head.loss_weight
                 action_metrics[head_name] = head_metrics
                 matched_heads += 1
@@ -339,6 +349,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     # Train loop
     #
     cfg.vprint("== starting training ==")
+    viz_cb = VizCallback()
     # quit() # DEVSTOP: before training loop
 
     timer = Timer()
@@ -366,8 +377,104 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
                 step=i,
             )
 
-        if (i) % cfg.eval_interval == 0:
+        if (i + 1) % cfg.eval_interval == 0:
             log.info("Evaluating...")
+            step = i + 1
+            try:
+                val_batch = next(dsit)
+                viz_rng = jax.random.fold_in(train_state.rng, step)
+                bound_module = model.module.bind({"params": train_state.model.params}, rngs={"dropout": viz_rng})
+                transformer_embeddings = bound_module.crossformer_transformer(
+                    val_batch["observation"],
+                    val_batch["task"],
+                    val_batch["observation"]["timestep_pad_mask"],
+                    train=False,
+                )
+
+                flow_head_name = next(
+                    (
+                        name
+                        for name, head in bound_module.heads.items()
+                        if hasattr(head, "flow_steps") and name in val_batch["action"]
+                    ),
+                    None,
+                )
+                if flow_head_name is None:
+                    flow_head_name = next((name for name in bound_module.heads if name in val_batch["action"]), None)
+                if flow_head_name is None:
+                    raise ValueError(
+                        f"No model head available for viz. model_heads={tuple(bound_module.heads.keys())}, "
+                        f"batch_action={tuple(val_batch['action'].keys())}"
+                    )
+
+                pred_flow_trajectory = bound_module.heads[flow_head_name].predict_action(
+                    transformer_embeddings,
+                    train=False,
+                    rng=viz_rng,
+                    sample_shape=(1,),
+                )
+                pred_flow_trajectory = jax.device_get(pred_flow_trajectory)
+                if pred_flow_trajectory.ndim not in (5, 6):
+                    raise ValueError(
+                        f"Expected flow trajectory with ndim 5 or 6, got shape {pred_flow_trajectory.shape} "
+                        f"from head {flow_head_name}"
+                    )
+
+                def pick_joints(x):
+                    if x is None:
+                        return None
+                    d = x.shape[-1]
+                    if d >= 13:
+                        return x[..., 6:13]
+                    if d >= 8:
+                        return x[..., :7]
+                    if d >= 7:
+                        return x[..., :7]
+                    return None
+
+                obs = val_batch.get("observation", {})
+                joints = None
+                prop = obs.get("proprio")
+                if isinstance(prop, dict):
+                    if "joints" in prop:
+                        joints = pick_joints(prop["joints"])
+                    elif "single" in prop:
+                        joints = pick_joints(prop["single"])
+                    elif "single_arm" in prop:
+                        joints = pick_joints(prop["single_arm"])
+                elif prop is not None:
+                    joints = pick_joints(prop)
+                elif "proprio_single" in obs:
+                    joints = pick_joints(obs["proprio_single"])
+                elif "proprio_single_arm" in obs:
+                    joints = pick_joints(obs["proprio_single_arm"])
+
+                if joints is not None and joints.shape[-1] >= 7:
+                    joints = jax.device_get(joints)
+                    if joints.ndim == 2:
+                        joints = joints[:, None, None, :]
+                    elif joints.ndim == 3:
+                        joints = joints[:, :, None, :]
+                else:
+                    joints = pred_flow_trajectory[:, 0] if pred_flow_trajectory.ndim == 6 else pred_flow_trajectory[0]
+                    cfg.vprint("VizCallback fallback: using predicted flow as base joints (no usable proprio joints).")
+
+                viz_batch = {
+                    "action": pred_flow_trajectory,
+                    "observation": {
+                        "proprio": {
+                            "joints": joints,
+                        }
+                    },
+                }
+
+                frames = viz_cb(viz_batch)
+                out_path = Path(f"/tmp/crossformer/flow_pca_step_{step}.gif")
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                imageio.mimsave(out_path, frames, fps=10, loop=0)
+                cfg.vprint(f"Saved flow PCA GIF to: {out_path}")
+            except Exception as e:
+                log.warning("VizCallback failed at step %d: %s", step, e, exc_info=True)
 
         if (i + 1) % cfg.save_interval == 0 and save_dir is not None:
             cfg.vprint("Saving checkpoint...")
