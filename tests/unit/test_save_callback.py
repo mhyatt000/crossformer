@@ -7,6 +7,7 @@ from flax import struct
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 import pytest
 
@@ -188,6 +189,51 @@ class TestSaveExtra:
         cb.save_extra(_minimal_state())  # second call must not overwrite
         assert json.loads(config_path.read_text()) == {"v": 99}
 
+    def test_dataset_statistics_not_null_when_present(self, tmp_path):
+        """When dataset_statistics has real data, the JSON must not be null."""
+        stats = {
+            "my_dataset": {
+                "action": {
+                    "mean": np.array([0.1, 0.2, 0.3]),
+                    "std": np.array([1.0, 1.0, 1.0]),
+                },
+                "proprio": {
+                    "joints": {"mean": np.array([0.0]), "std": np.array([1.0])},
+                },
+            }
+        }
+        state = _minimal_state()
+        state = state.replace(model=state.model.replace(dataset_statistics=stats))
+        cb = SaveCallback(save_dir=tmp_path)
+        cb.save_extra(state)
+        raw = json.loads((tmp_path / "params" / "dataset_statistics.json").read_text())
+        assert raw is not None
+        assert "my_dataset" in raw
+        assert raw["my_dataset"]["action"]["mean"] == [0.1, 0.2, 0.3]
+
+    def test_dataset_statistics_null_when_none(self, tmp_path):
+        """When dataset_statistics is None, the JSON contains null."""
+        state = _minimal_state()
+        state = state.replace(model=state.model.replace(dataset_statistics=None))
+        cb = SaveCallback(save_dir=tmp_path)
+        cb.save_extra(state)
+        raw = json.loads((tmp_path / "params" / "dataset_statistics.json").read_text())
+        assert raw is None
+
+    def test_dataset_statistics_round_trip(self, tmp_path):
+        """Stats survive save_extra → load_pretrained parse cycle."""
+        from crossformer.model.crossformer_model import _stats_to_arrays, _stats_to_jsonable
+
+        stats = {
+            "ds": {
+                "action": {"mean": np.array([1.0, 2.0]), "std": np.array([0.5, 0.5])},
+            }
+        }
+        jsonable = _stats_to_jsonable(stats)
+        restored = _stats_to_arrays(jsonable)
+        np.testing.assert_array_almost_equal(restored["ds"]["action"]["mean"], [1.0, 2.0])
+        np.testing.assert_array_almost_equal(restored["ds"]["action"]["std"], [0.5, 0.5])
+
 
 # ---------------------------------------------------------------------------
 # load()
@@ -252,7 +298,6 @@ class TestLoad:
 
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-import numpy as np
 
 
 @pytest.fixture
