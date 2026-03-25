@@ -385,7 +385,11 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
 
                 if flow_head_name is not None:
                     pred_flow = bound.heads[flow_head_name].predict_action(
-                        embeddings, train=False, rng=viz_rng, sample_shape=(1,)
+                        embeddings,
+                        train=False,
+                        rng=viz_rng,
+                        sample_shape=(1,),
+                        accumulate=True,
                     )
                     pred_flow = jax.device_get(pred_flow)
 
