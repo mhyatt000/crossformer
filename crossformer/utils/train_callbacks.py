@@ -10,9 +10,11 @@ import jax.numpy as jnp
 import numpy as np
 import tqdm
 
+from crossformer.data.dataset import make_single_dataset
+
 # from xgym.rlds.util import apply_persp, perspective_projection
 # from xgym.viz.mano import overlay_palm
-from crossformer.data.dataset import make_single_dataset
+from crossformer.data.grain.metadata import ArrayStatistics
 from crossformer.data.oxe import HEAD_TO_DATASET
 from crossformer.data.utils.text_processing import TextProcessor
 from crossformer.utils.callbacks.base import Callback
@@ -192,11 +194,8 @@ class VisCallback(ValidationCallback):
 
     def denormalize(self, thing, name, key="action"):
         """denormalizes the thing with mean and std where mask is True"""
-        mask = self.stats[name][key]["mask"]
-        mean = self.stats[name][key]["mean"]
-        std = self.stats[name][key]["std"]
-        thing = np.where(mask, (thing * std + mean), thing)
-        return thing
+        stats = ArrayStatistics.from_json(self.stats[name][key])
+        return stats.unnormalize(thing)
 
     def plot(self, batch, vis: dict, name):
         """returns list of wandb Video objects"""

@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
 
+from crossformer.data.grain.metadata import ArrayStatistics
 from crossformer.data.oxe import ActionDim
 
 # from manotorch.manolayer import ManoLayer
@@ -226,11 +227,7 @@ def viz_a_seq( oi_seq: OakInkImageSequence, draw_mode="wireframe", render=None, 
 
 def denormalize(thing, stats, ds_key="rlds_oakink", key="action"):
     """denormalizes the thing with mean and std where mask is True"""
-    mask = stats[ds_key][key]["mask"]
-    mean = stats[ds_key][key]["mean"]
-    std = stats[ds_key][key]["std"]
-    thing = np.where(mask, (thing * std + mean), thing)
-    return thing
+    return ArrayStatistics.from_json(stats[ds_key][key]).unnormalize(thing)
 
 
 class SequenceViz:
