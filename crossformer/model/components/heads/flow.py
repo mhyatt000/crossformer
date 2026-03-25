@@ -144,10 +144,16 @@ class FlowMatchingActionHead(ContinuousActionHead):
         rng: PRNGKey,
         train: bool = True,
         *args,
-        sample_shape: tuple[int, ...] = (),
+        sample_shape: tuple[int, ...] = (1,),
+        accumulate: bool = False,
         **kwargs,
     ) -> jax.Array:
-        """Predict actions by solving ODE through flow."""
+        """Predict actions by solving ODE through flow.
+
+        Args:
+            accumulate: If True, return full trajectory [F+1, B, W, H, A].
+                If False (default), return only final prediction [B, W, H, A].
+        """
         module, variables = self.unbind()
 
         def sample_actions(rng):
@@ -178,14 +184,21 @@ class FlowMatchingActionHead(ContinuousActionHead):
                 updated = a_t + dt * velocity
                 if self.clip_pred:
                     updated = jnp.clip(updated, -self.max_action, self.max_action)
-                return updated, ()
+                return updated, updated if accumulate else ()
 
             steps = jnp.arange(self.flow_steps)
-            a_t, _ = jax.lax.scan(scan_fn, a_t, steps)
+            a_t, history = jax.lax.scan(scan_fn, a_t, steps)
+
+            if accumulate:
+                source = jnp.concatenate([a_t[None, ...], history], axis=0)
+                fmt = "f b w (h a) -> f b w h a"
+            else:
+                source = a_t
+                fmt = "b w (h a) -> b w h a"
 
             actions = rearrange(
-                a_t,
-                "b w (h a) -> b w h a",
+                source,
+                fmt,
                 h=self.action_horizon,
                 a=self.action_dim,
             )
