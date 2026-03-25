@@ -16,7 +16,6 @@ from functools import partial
 from pathlib import Path
 import re
 
-from einops import rearrange
 import jax
 from jax.experimental import multihost_utils
 import jax.numpy as jnp
@@ -37,12 +36,11 @@ from crossformer.model.components.tokenizers import ImageTokenizer, LowdimObsTok
 from crossformer.model.components.transformer import common_transformer_sizes
 from crossformer.model.components.vit_encoders import ResNet26FILM, SmallStem
 from crossformer.model.crossformer_model import CrossFormerModel
-from crossformer.run.train_step import make_train_step
+from crossformer.run.train_step import lookup_guide, make_train_step
 from crossformer.utils.callbacks.save import SaveCallback
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec, spec
 from crossformer.utils.train_utils import create_optimizer, Timer, TrainState
-from crossformer.utils.tree.core import flat
 import wandb
 
 # -- config -------------------------------------------------------------------
@@ -84,7 +82,7 @@ class Config:
     guidance_prob: float = 1.0  # prob of using guidance each step (0-1, for dropout sweep)
     compress_guidance: bool = False  # compress via perceiver latents
     num_guidance_latents: int = 4  # latent count when compress=True
-    guide_key: str = "action.pose"  # dot-path into batch for guidance signal
+    guide_keys: tuple[str, ...] = ("action.position", "action.orientation")  # dot-paths into batch for guidance signal
 
     # Checkpointing
     save_dir: str | None = Path().home().expanduser()  # checkpoint root dir (None to disable)
@@ -261,11 +259,7 @@ def main(cfg: Config):
 
     guide_example = None
     if cfg.use_guidance:
-        guide_example = flat(example_batch).get(cfg.guide_key)
-        if guide_example is None:
-            raise ValueError(f"guide_key={cfg.guide_key!r} not found in batch. check dot-path.")
-        if guide_example.ndim > 3:
-            guide_example = rearrange(guide_example, "b w ... -> b w (...)")
+        guide_example = lookup_guide(example_batch, cfg.guide_keys)
 
     # Get max_a from the bundled action shape
     max_a = example_batch["act"]["id"].shape[-1]
@@ -327,7 +321,7 @@ def main(cfg: Config):
     # Guidance config sanity check
     if cfg.use_guidance:
         print(Rule("guidance encoder"))
-        print(f"  guide_key={cfg.guide_key} shape={guide_example.shape}")
+        print(f"  guide_keys={cfg.guide_keys} shape={guide_example.shape}")
 
     # Optimizer + state
     lr_kwargs: dict = {
@@ -388,12 +382,9 @@ def main(cfg: Config):
 
             guide_input = None
             if cfg.use_guidance:
-                guide_input = flat(batch).get(cfg.guide_key)
-                # Flatten trailing dims to (B, W, D) for TokenGuidance
-                if guide_input is not None and guide_input.ndim > 3:
-                    guide_input = rearrange(guide_input, "b w ... -> b w (...)")
+                guide_input = lookup_guide(batch, cfg.guide_keys)
                 # Guidance dropout: skip with (1 - guidance_prob) probability
-                if guide_input is not None and cfg.guidance_prob < 1.0 and guide_rng.random() > cfg.guidance_prob:
+                if cfg.guidance_prob < 1.0 and guide_rng.random() > cfg.guidance_prob:
                     guide_input = None
 
             actions, dof_ids, chunk_steps = extract_bundled_actions(batch, max_h)
@@ -484,9 +475,7 @@ def main(cfg: Config):
         print(Rule(f"predict_action: {mode}"))
         guide_input = None
         if mode == "with_guidance":
-            guide_input = flat(batch).get(cfg.guide_key)
-            if guide_input is not None and guide_input.ndim > 3:
-                guide_input = rearrange(guide_input, "b w ... -> b w (...)")
+            guide_input = lookup_guide(batch, cfg.guide_keys)
 
         pred = bound.heads["xflow"].predict_action(
             transformer_outputs,

@@ -3,10 +3,27 @@ from __future__ import annotations
 from functools import partial
 from typing import Callable
 
+from einops import rearrange
 import jax
+import jax.numpy as jnp
 import optax
 
 from crossformer.utils.mytyping import Params
+from crossformer.utils.tree.core import flat
+
+
+def lookup_guide(batch: dict, keys: tuple[str, ...]) -> jnp.ndarray:
+    """Look up guide keys from batch and concat along last dim."""
+    f = flat(batch)
+    parts = []
+    for k in keys:
+        if k not in f:
+            raise KeyError(f"guide key {k!r} not found in batch. available: {sorted(f)}")
+        v = f[k]
+        if v.ndim > 3:
+            v = rearrange(v, "b w ... -> b w (...)")
+        parts.append(v)
+    return jnp.concatenate(parts, axis=-1)
 
 
 def make_train_step(
