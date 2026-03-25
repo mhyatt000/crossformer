@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from functools import partial
 import logging
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 from box import Box
 from einops import rearrange
@@ -364,19 +364,22 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         if (i) % cfg.eval_interval == 0:
             log.info(f"Evaluating at step {i}...")
             try:
-                viz_batch = next(dsit)
                 viz_rng = jax.random.fold_in(rng, i)
                 bound = model.module.bind({"params": train_state.model.params}, rngs={"dropout": viz_rng})
 
                 embeddings = bound.crossformer_transformer(
-                    viz_batch["observation"],
-                    viz_batch["task"],
-                    viz_batch["observation"]["timestep_pad_mask"],
+                    batch["observation"],
+                    batch["task"],
+                    batch["observation"]["timestep_pad_mask"],
                     train=False,
                 )
 
                 flow_head_name = next(
-                    (name for name, head in bound.heads.items() if hasattr(head, "flow_steps") and name in viz_batch["action"]),
+                    (
+                        name
+                        for name, head in bound.heads.items()
+                        if hasattr(head, "flow_steps") and name in batch["action"]
+                    ),
                     None,
                 )
 
@@ -389,7 +392,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
                     if pred_flow.shape[0] == 1:
                         pred_flow = pred_flow.squeeze(0)
 
-                    gt_action = jax.device_get(viz_batch["action"][flow_head_name])
+                    gt_action = jax.device_get(batch["action"][flow_head_name])
                     gt_action = gt_action[..., :7]
 
                     frames = viz_cb(
