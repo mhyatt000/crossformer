@@ -311,6 +311,7 @@ def main(cfg: Config):
         text_processor=None,
         verbose=False,
         rng=init_rng,
+        dataset_statistics=dataset.dataset_statistics,
     )
     model = model.replace(
         params=jax.tree.map(lambda x: jax.device_put(x, replicated_sharding), model.params),
