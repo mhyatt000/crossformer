@@ -45,6 +45,11 @@ def drop(tree: dict, keys: list[str]) -> dict:
     return {k: v for k, v in tree.items() if k not in keys}
 
 
+def drop_fn(tree: dict, fn: Callable) -> dict:
+    """Drop leaves from a nested dict where fn(leaf) is True."""
+    return unflat({k: v for k, v in flat(tree).items() if not fn(v)})
+
+
 def do_fn_key(x: dict, keymatch: str, fn: Callable):
     """apply fn to keys that match keymatch. glob pattern"""
     matches = fnmatch.filter(flat(x).keys(), keymatch)
