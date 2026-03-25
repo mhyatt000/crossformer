@@ -38,6 +38,7 @@ from crossformer.model.components.vit_encoders import ResNet26FILM, SmallStem
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.run.train_step import lookup_guide, make_train_step
 from crossformer.utils.callbacks.save import SaveCallback
+from crossformer.utils.callbacks.viz import HistVizCallback
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec, spec
 from crossformer.utils.train_utils import create_optimizer, Timer, TrainState
@@ -53,7 +54,7 @@ class Config:
     name: str = ""
     steps: int = 1_000_000  # training steps (1 for debug)
     lr: float = 1e-3  # learning rate
-    log_every: int = 1  # log interval
+    log_every: int = 100  # log interval
     batch_size: int = 256  # global batch size
     mix: str = "xgym_sweep"  # dataset mix name
     horizon: int = 20  # action horizon from data pipeline
@@ -88,7 +89,8 @@ class Config:
     save_dir: str | None = Path().home().expanduser()  # checkpoint root dir (None to disable)
     save_interval: int = 25_000  # save every N steps
 
-    mp: int = 1  # grain multiproc (for data loading)
+    mp: int = 8  # grain multiproc (for data loading)
+    hist_every: int = 500  # histogram log interval
     wandb: cn.Wandb = field(default_factory=cn.Wandb)
 
 
@@ -362,6 +364,8 @@ def main(cfg: Config):
         save_callback = SaveCallback(None)
         print("  [dim]no save_dir — checkpoints disabled[/]")
 
+    hist_cb = HistVizCallback(stats=dataset.dataset_statistics)
+
     # Train
     print(Rule("training"))
     table = Table(title="training")
@@ -416,9 +420,30 @@ def main(cfg: Config):
             row = [str(step), f"{total_loss:.4f}"]
             row.append(f"{float(update_info['grad_norm']):.4f}")
             table.add_row(*row)
+            hist_metrics = {}
+            if cfg.hist_every > 0 and (step % cfg.hist_every == 0 or step == cfg.steps - 1):
+                bound = model.module.bind({"params": state.model.params})
+                transformer_outputs = bound.crossformer_transformer(
+                    obs,
+                    task,
+                    pad_mask,
+                    train=False,
+                )
+                pred = bound.heads["xflow"].predict_action(
+                    transformer_outputs,
+                    rng=pred_rng,
+                    dof_ids=dof_ids,
+                    chunk_steps=chunk_steps,
+                    train=False,
+                    guide_input=guide_input,
+                )
+                hist_metrics = hist_cb(
+                    batch, {"predict": jax.device_get(pred.reshape(pred.shape[0], pred.shape[1], -1))}
+                )
             cfg.wandb.log(
                 {
                     "training": update_info,
+                    **hist_metrics,
                     "timer": timer.get_average_times(),
                     "guidance_active": guide_input is not None,
                     **embody_metrics,
