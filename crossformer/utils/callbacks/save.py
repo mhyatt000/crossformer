@@ -138,8 +138,7 @@ class SaveCallback:
 
         dataset_statistics_path = self.params_path / "dataset_statistics.json"
         if not dataset_statistics_path.exists():
+            from crossformer.model.crossformer_model import _stats_to_jsonable
+
             with dataset_statistics_path.open("w") as f:
-                json.dump(
-                    jax.tree_map(lambda x: x.tolist(), model.dataset_statistics),
-                    f,
-                )
+                json.dump(_stats_to_jsonable(model.dataset_statistics), f)
