@@ -291,8 +291,6 @@ class CrossFormerModel:
         )
         target_params = jax.tree.map(lambda x: jax.device_put(x, sharding), target_params)
 
-        checkpoint_path = Path(checkpoint_path).expanduser().resolve()
-
         # Check if this is a HuggingFace-style checkpoint (has step dirs at root level)
         # vs a local checkpoint (has params/ and state/ subdirectories)
         has_params_subdir = (checkpoint_path / "params").exists()
