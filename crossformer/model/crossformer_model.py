@@ -172,6 +172,8 @@ class CrossFormerModel:
         rng: PRNGKey | None = None,
         temperature: float = 1.0,
         head_name: str = "action",
+        dof_ids: ArrayLike | None = None,
+        chunk_steps: ArrayLike | None = None,
     ):
         """Samples actions from the model. See `action_heads.py` for more info.
 
@@ -183,6 +185,8 @@ class CrossFormerModel:
             normalization_type: type of normalization applied to the actions
             timestep_pad_mask: (batch_size, window_size) Boolean mask that is False when the timestep corresponds to padding
             train: whether to run in train mode
+            dof_ids: (batch_size, max_a) DOF vocab IDs (required for XFlowHead).
+            chunk_steps: (batch_size, max_h) temporal positions (required for XFlowHead).
             ...see `action_heads.py` for the rest of the kwargs.
         Returns:
             actions: (*sample_shape, batch_size, action_horizon, action_dim)
@@ -192,17 +196,23 @@ class CrossFormerModel:
 
         transformer_outputs = self.run_transformer(observations, tasks, timestep_pad_mask, train=train)
         action_head: ActionHead = self.module.bind({"params": self.params}).heads[head_name]
-        action = action_head.predict_action(
-            transformer_outputs,
-            train=train,
-            argmax=argmax,
-            sample_shape=sample_shape,
-            rng=rng,
-            temperature=temperature,
-            embodiment_action_dim=(
+
+        head_kwargs = {
+            "train": train,
+            "argmax": argmax,
+            "sample_shape": sample_shape,
+            "rng": rng,
+            "temperature": temperature,
+            "embodiment_action_dim": (
                 len(unnormalization_statistics["mean"]) if unnormalization_statistics is not None else None
             ),
-        )
+        }
+        if dof_ids is not None:
+            head_kwargs["dof_ids"] = dof_ids
+        if chunk_steps is not None:
+            head_kwargs["chunk_steps"] = chunk_steps
+
+        action = action_head.predict_action(transformer_outputs, **head_kwargs)
         if unnormalization_statistics is not None:
             if normalization_type == NormalizationType.NORMAL:
                 mask = unnormalization_statistics.get(
