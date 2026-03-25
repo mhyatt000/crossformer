@@ -181,7 +181,7 @@ class FlowMatchingActionHead(ContinuousActionHead):
                 return updated, updated
 
             steps = jnp.arange(self.flow_steps)
-            a_t_final, history = jax.lax.scan(scan_fn, a_t, steps)
+            a_t_final, history = jax.lax.scan(scan_fn, a_t, steps)  # noqa: RUF059
             full_traj = jnp.concatenate([a_t[None, ...], history], axis=0)
 
             actions = rearrange(
