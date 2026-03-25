@@ -112,6 +112,12 @@ class Policy(BasePolicy):
         self.cfg = cfg
 
         self.model: CrossFormerModel = CrossFormerModel.load_pretrained(cfg.path, step=cfg.step)
+        if self.model.dataset_statistics is None:
+            raise ValueError(
+                f"Checkpoint at {cfg.path} has no dataset_statistics. "
+                "Re-save the checkpoint with dataset_statistics attached to the model."
+            )
+
         heads = tuple(self.model.module.heads.keys())
         self.head_name = "single" if "single" in heads else next(iter(heads))
 
@@ -123,6 +129,12 @@ class Policy(BasePolicy):
         self.dataset_name = TASKS[cfg.task]["dataset_name"]
         self.text = TASKS[cfg.task]["text"]
         self.text = None
+
+        from crossformer.model.components.heads.xflow import XFlowHead
+
+        head = self.model.module.bind({"params": self.model.params}).heads[self.head_name]
+        self._is_xflow = isinstance(head, XFlowHead)
+
         self.img_hw = {
             k: tuple(v.shape[-3:-1])
             for k, v in self.model.example_batch["observation"].items()
@@ -136,9 +148,14 @@ class Policy(BasePolicy):
 
     def warmup(self):
         self.task = self.model.example_batch["task"]
+        warmup_batch = dict(self.model.example_batch)
+        if self._is_xflow:
+            head = self.model.module.bind({"params": self.model.params}).heads[self.head_name]
+            warmup_batch["dof_ids"] = np.arange(head.max_dofs)
+            warmup_batch["chunk_steps"] = np.arange(head.max_horizon, dtype=np.float32)
         for _ in range(self.horizon):
-            print(spec(self.model.example_batch))
-            print(self.step(self.model.example_batch))
+            print(spec(warmup_batch))
+            print(self.step(warmup_batch))
         self.reset_history()
 
     def reset_history(self):
@@ -177,10 +194,9 @@ class Policy(BasePolicy):
                 if expect_hw and got_hw != expect_hw:
                     obs[key] = resize(obs[key], expect_hw)
                     print(f"[debug] resized {key}: now={obs[key].shape[-3:-1]}")
-            # NOTE... single proprio might fail if not processed accordingly
-            # normalize proprioception expect for bimanual proprioception
+            # normalize proprioception except for bimanual proprioception
             if "proprio" in key and key != "proprio_bimanual":
-                k = key.replace("proprio_", "")  # TODO @agent fix for clarity, this is a bit hacky
+                k = key.replace("proprio_", "")
                 n = norm_stats.get(k)
                 if not n:
                     print(f"Warning: no normalization stats for {key}, skipping normalization")
@@ -194,7 +210,15 @@ class Policy(BasePolicy):
 
         name = payload.get("model", "crossformer")
 
-        unnorm_stats = self.model.dataset_statistics[self.dataset_name]["action"]
+        # XFlowHead outputs in raw DOF space — no per-head unnormalization needed.
+        # Legacy heads use per-head stats keyed by head_name.
+        unnorm_stats = None
+        if not self._is_xflow:
+            unnorm_stats = self.model.dataset_statistics[self.dataset_name]["action"]
+            unnorm_stats = drop_fn(unnorm_stats, lambda x: x is None or x.dtype == "O")
+            unnorm_stats = jax.tree.map(lambda x: jnp.array(x), unnorm_stats)
+            unnorm_stats = unnorm_stats[self.head_name]
+
         obs = self.preprocess(payload["observation"])
 
         self.history.append(obs)
@@ -202,19 +226,22 @@ class Policy(BasePolicy):
         obs = stack_and_pad(self.history, self.num_obs) if self.horizon > 1 else obs
         obs = jax.tree.map(lambda x: jax.device_put(jnp.asarray(x)), obs)
 
-        tspec = lambda a: jax.tree_map(lambda x: type(x), a)
-        unnorm_stats = drop_fn(unnorm_stats, lambda x: x.dtype == "O")
-        unnorm_stats = jax.tree.map(lambda x: jnp.array(x), unnorm_stats)
-        print(spec(unnorm_stats))
+        # XFlowHead expects dof_ids and chunk_steps from the client
+        xflow_kwargs = {}
+        if self._is_xflow:
+            if "dof_ids" not in payload or "chunk_steps" not in payload:
+                raise ValueError("XFlowHead requires 'dof_ids' and 'chunk_steps' in the payload")
+            xflow_kwargs["dof_ids"] = jnp.asarray(payload["dof_ids"])[None]  # (1, A)
+            xflow_kwargs["chunk_steps"] = jnp.asarray(payload["chunk_steps"])[None]  # (1, H)
 
-        jax.config.update("jax_disable_jit", True)
         self.rng, key = jax.random.split(self.rng)
         actions = self.model.sample_actions(
             observations=obs,
             tasks=self.task,
-            unnormalization_statistics=unnorm_stats[self.head_name],
+            unnormalization_statistics=unnorm_stats,
             head_name=self.head_name,
             rng=key,
+            **xflow_kwargs,
         )
         print(actions.shape)
         actions = actions[0, -1]  # one batch, last window
