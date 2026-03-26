@@ -32,12 +32,22 @@ from crossformer.utils.spec import spec
 PY
 ```
 
-## Grain multiprocessing
+## tyro booleans
 
-When the agent runs training scripts, always pass `--mp 0`. The sandbox environment
-causes Grain's multiprocessing workers to fail pickling JAX `Device` objects
-(`TypeError: cannot pickle 'Device' object`). This is a sandbox-only issue — humans
-running outside the sandbox can use the default `--mp` value.
+Tyro CLI args use kebab-case flag names like `--batch-size`. Boolean flags are
+toggles like `--flag` and `--no-flag`, not `--flag False`.
+
+Bad:
+```bash
+uv run scripts/train/xflow.py --wandb.use False
+uv run scripts/train/xflow.py --myflag True
+```
+
+Good:
+```bash
+uv run scripts/train/xflow.py --wandb.no-use
+uv run scripts/train/xflow.py --myflag
+```
 
 ## RUF003
 
