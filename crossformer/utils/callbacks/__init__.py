@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-from crossformer.utils.callbacks.inspect import InspectCallback
-from crossformer.utils.callbacks.save import SaveCallback
+from .inspect import InspectCallback
+from .save import SaveCallback
+from .viz_base import BaseVizCallback
+from .viz_dtw import DTWVizCallback
+from .viz_pca import PCAVizCallback
 
-__all__ = ["InspectCallback", "SaveCallback"]
+__al__ = [
+    "InspectCallback",
+    "SaveCallback",
+    "BaseVizCallback",
+    "PCAVizCallback",
+    "DTWVizCallback",
+]
