@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable, Mapping
@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 
-from crossformer.data.grain.metadata import DatasetStatistics
+from crossformer.data.grain.metadata import ArrayStatistics, DatasetStatistics
 from crossformer.embody import DOF, MASK_ID
 from crossformer.utils.jax_utils import jax2str
 from crossformer.utils.mytyping import Data
@@ -132,46 +132,12 @@ class VizCallback:
 
 
 @dataclass
-class HistVizCallback(VizCallback):
-    """Log action histograms by DOF for data and predictions."""
+class ActionBatchDenormalizer:
+    """Denormalize action batches by DOF."""
 
     stats: Mapping[str, DatasetStatistics | Mapping[str, Any]] | None = None
-    data_key: tuple[str, ...] = ("act", "base")
-    dof_key: tuple[str, ...] = ("act", "id")
-    ds_key: tuple[str, ...] = ("info", "dataset_name")
-    pred_key: tuple[str, ...] = ("predict",)
 
-    def __call__(
-        self, batch: Mapping[str, Any], predict: Mapping[str, Any] | np.ndarray | None = None
-    ) -> dict[str, Any]:
-        data = self._get(batch, self.data_key)
-        dof_ids = self._get(batch, self.dof_key)
-        ds_names = self._decode_dataset_names(self._get(batch, self.ds_key))
-        predict = self._get(predict, self.pred_key) if isinstance(predict, Mapping) else predict
-
-        out = {
-            "data": self._hist_tree(data, dof_ids, ds_names),
-        }
-        if predict is not None:
-            out["predict"] = self._hist_tree(predict, dof_ids, ds_names, horizon=data.shape[-2])
-        return out
-
-    def _hist_tree(
-        self,
-        arr: Any,
-        dof_ids: Any,
-        ds_names: list[str],
-        horizon: int | None = None,
-    ) -> dict[str, wandb.Histogram]:
-        vals = self._unnorm(arr, dof_ids, ds_names, horizon=horizon)
-        out = {}
-        for dof_name, xs in vals.items():
-            if xs.size == 0:
-                continue
-            out[dof_name] = wandb.Histogram(xs)
-        return out
-
-    def _unnorm(
+    def denormalize(
         self,
         arr: Any,
         dof_ids: Any,
@@ -195,14 +161,60 @@ class HistVizCallback(VizCallback):
                 if dof_id == MASK_ID:
                     continue
                 dof_name = self._dof_name(dof_id)
-                stat = self._dof_stat(stats, dof_name)
                 xs = arr[b, :, :, a]
+                stat = self._dof_array_stats(stats, dof_name)
                 if stat is not None:
-                    mean, std = stat
-                    xs = xs * std + mean
+                    xs = stat.unnormalize(xs)
                 vals.setdefault(dof_name, []).append(xs.reshape(-1))
 
         return {k: np.concatenate(v).astype(np.float32) for k, v in vals.items()}
+
+    def sample_lines(
+        self,
+        arr: Any,
+        dof_ids: Any,
+        ds_names: list[str],
+        sample_idx: int = 0,
+        horizon: int | None = None,
+    ) -> dict[str, np.ndarray]:
+        """Denormalize one sample and return ``{dof_name: (H,)}`` arrays."""
+        arr = np.asarray(arr, dtype=np.float32)
+        dof_ids = np.asarray(dof_ids)
+        if arr.ndim == 3 and horizon is None:
+            arr = arr[:, None, :, :]
+        arr = self._reshape_actions(arr, dof_ids.shape[-1], horizon=horizon)
+        dof_ids = self._reshape_dof_ids(dof_ids, arr.shape[0])
+        if len(ds_names) == 1 and arr.shape[0] > 1:
+            ds_names = ds_names * arr.shape[0]
+        if len(ds_names) != arr.shape[0]:
+            raise ValueError(f"Expected {arr.shape[0]} dataset names, got {len(ds_names)}")
+
+        b = min(sample_idx, arr.shape[0] - 1)
+        stats = self._action_stats(ds_names[b])
+        chunk = arr[b].mean(axis=0)
+
+        lines: dict[str, np.ndarray] = {}
+        for a, dof_id in enumerate(dof_ids[b]):
+            dof_id = int(dof_id)
+            if dof_id == MASK_ID:
+                continue
+            dof_name = self._dof_name(dof_id)
+            xs = chunk[:, a].copy()
+            stat = self._dof_array_stats(stats, dof_name)
+            if stat is not None:
+                xs = stat.unnormalize(xs)
+            lines[dof_name] = xs
+        return lines
+
+    def decode_dataset_names(self, arr: Any) -> list[str]:
+        arr = np.asarray(arr)
+        if arr.ndim == 1:
+            return [jax2str(arr).rstrip("\x00")]
+        names = [jax2str(x).rstrip("\x00") for x in arr]
+        known = sorted({x for x in names if x})
+        if len(known) == 1:
+            return [x or known[0] for x in names]
+        return names
 
     def _reshape_actions(self, arr: np.ndarray, max_a: int, horizon: int | None = None) -> np.ndarray:
         if arr.ndim == 4:
@@ -224,19 +236,9 @@ class HistVizCallback(VizCallback):
             raise ValueError(f"Expected dof_ids ndim 1 or 2, got {dof_ids.shape}")
         return dof_ids
 
-    def _decode_dataset_names(self, arr: Any) -> list[str]:
-        arr = np.asarray(arr)
-        if arr.ndim == 1:
-            return [jax2str(arr).rstrip("\x00")]
-        names = [jax2str(x).rstrip("\x00") for x in arr]
-        known = sorted({x for x in names if x})
-        if len(known) == 1:
-            return [x or known[0] for x in names]
-        return names
-
     def _action_stats(self, ds_name: str) -> Mapping[str, Any]:
         if self.stats is None:
-            raise ValueError("HistVizCallback.stats is required")
+            raise ValueError("ActionBatchDenormalizer.stats is required")
         if not ds_name:
             raise KeyError("dataset name is empty")
         stats = self.stats[ds_name]
@@ -245,16 +247,32 @@ class HistVizCallback(VizCallback):
         return stats["action"]
 
     def _dof_stat(self, stats: Mapping[str, Any], dof_name: str) -> tuple[np.ndarray, np.ndarray] | None:
+        stat = self._dof_array_stats(stats, dof_name)
+        if stat is None:
+            return None
+        return np.asarray(stat.mean, dtype=np.float32), np.asarray(stat.std, dtype=np.float32)
+
+    def _dof_array_stats(self, stats: Mapping[str, Any], dof_name: str) -> ArrayStatistics | None:
         part, idx = self._dof_part_idx(stats, dof_name)
         if part is None:
             return None
         stat = stats[part]
-        mean = np.asarray(stat.mean if hasattr(stat, "mean") else stat["mean"], dtype=np.float32).reshape(-1)[idx]
-        std = np.asarray(stat.std if hasattr(stat, "std") else stat["std"], dtype=np.float32).reshape(-1)[idx]
-        mask = stat.mask if hasattr(stat, "mask") else stat.get("mask")
-        if mask is not None and not bool(np.asarray(mask).reshape(-1)[idx]):
+        if not isinstance(stat, ArrayStatistics):
+            stat = ArrayStatistics.from_json(stat)
+        mean = np.asarray(stat.mean, dtype=np.float32).reshape(-1)
+        std = np.asarray(stat.std, dtype=np.float32).reshape(-1)
+        mask = None if stat.mask is None else np.asarray(stat.mask).reshape(-1)
+        if mask is not None and not bool(mask[idx]):
             return None
-        return mean, std
+        return ArrayStatistics(
+            mean=mean[idx : idx + 1],
+            std=std[idx : idx + 1],
+            minimum=np.asarray(stat.minimum, dtype=np.float32).reshape(-1)[idx : idx + 1],
+            maximum=np.asarray(stat.maximum, dtype=np.float32).reshape(-1)[idx : idx + 1],
+            mask=None if mask is None else mask[idx : idx + 1],
+            p99=None if stat.p99 is None else np.asarray(stat.p99, dtype=np.float32).reshape(-1)[idx : idx + 1],
+            p01=None if stat.p01 is None else np.asarray(stat.p01, dtype=np.float32).reshape(-1)[idx : idx + 1],
+        )
 
     def _dof_part_idx(self, stats: Mapping[str, Any], dof_name: str) -> tuple[str | None, int]:
         if dof_name.startswith("j") and dof_name[1:].isdigit():
@@ -281,3 +299,126 @@ class HistVizCallback(VizCallback):
             if idx == dof_id:
                 return name
         return f"dof_{dof_id}"
+
+
+@dataclass
+class HistVizCallback(VizCallback):
+    """Log action histograms by DOF for data and predictions."""
+
+    stats: Mapping[str, DatasetStatistics | Mapping[str, Any]] | None = None
+    data_key: tuple[str, ...] = ("act", "base")
+    dof_key: tuple[str, ...] = ("act", "id")
+    ds_key: tuple[str, ...] = ("info", "dataset_name")
+    pred_key: tuple[str, ...] = ("predict",)
+    denorm: ActionBatchDenormalizer = field(init=False)
+
+    def __post_init__(self):
+        self.denorm = ActionBatchDenormalizer(self.stats)
+
+    def __call__(
+        self, batch: Mapping[str, Any], predict: Mapping[str, Any] | np.ndarray | None = None
+    ) -> dict[str, Any]:
+        data = self._get(batch, self.data_key)
+        dof_ids = self._get(batch, self.dof_key)
+        ds_names = self.denorm.decode_dataset_names(self._get(batch, self.ds_key))
+        predict = self._get(predict, self.pred_key) if isinstance(predict, Mapping) else predict
+
+        out = {"data": self._hist_tree(data, dof_ids, ds_names)}
+        if predict is not None:
+            out["predict"] = self._hist_tree(predict, dof_ids, ds_names, horizon=data.shape[-2])
+        return out
+
+    def _hist_tree(
+        self,
+        arr: Any,
+        dof_ids: Any,
+        ds_names: list[str],
+        horizon: int | None = None,
+    ) -> dict[str, wandb.Histogram]:
+        vals = self.denorm.denormalize(arr, dof_ids, ds_names, horizon=horizon)
+        out = {}
+        for dof_name, xs in vals.items():
+            if xs.size == 0:
+                continue
+            out[dof_name] = wandb.Histogram(xs)
+        return out
+
+
+@dataclass
+class ChunkVizCallback(HistVizCallback):
+    """Plot denormalized action chunks: ground truth (dashed) vs predicted (solid).
+
+    One subplot per DOF so data vs prediction is easy to compare.
+    Returns ``dict[str, wandb.Image]`` keyed by DOF name for logging.
+    """
+
+    sample_idx: int = 0
+    subplot_w: float = 3.5  # width per subplot
+    subplot_h: float = 2.5  # height per subplot
+    max_cols: int = 4
+    dpi: int = 120
+
+    def __call__(
+        self, batch: Mapping[str, Any], predict: Mapping[str, Any] | np.ndarray | None = None
+    ) -> dict[str, wandb.Image]:
+        data = self._get(batch, self.data_key)
+        dof_ids = self._get(batch, self.dof_key)
+        ds_names = self.denorm.decode_dataset_names(self._get(batch, self.ds_key))
+        predict = self._get(predict, self.pred_key) if isinstance(predict, Mapping) else predict
+
+        data_lines = self.denorm.sample_lines(data, dof_ids, ds_names, sample_idx=self.sample_idx)
+        pred_lines = (
+            self.denorm.sample_lines(
+                predict,
+                dof_ids,
+                ds_names,
+                sample_idx=self.sample_idx,
+                horizon=np.asarray(data).shape[-2],
+            )
+            if predict is not None
+            else None
+        )
+        return self._render(data_lines, pred_lines)
+
+    def _render(
+        self,
+        data_lines: dict[str, np.ndarray],
+        pred_lines: dict[str, np.ndarray] | None,
+    ) -> dict[str, wandb.Image]:
+        names = list(data_lines)
+        n = len(names)
+        if n == 0:
+            return {}
+        ncols = min(n, self.max_cols)
+        nrows = (n + ncols - 1) // ncols
+        fig, axes = plt.subplots(
+            nrows,
+            ncols,
+            figsize=(self.subplot_w * ncols, self.subplot_h * nrows),
+            dpi=self.dpi,
+            squeeze=False,
+        )
+        for i, name in enumerate(names):
+            ax = axes[i // ncols, i % ncols]
+            h = np.arange(len(data_lines[name]))
+            ax.plot(h, data_lines[name], "--", color="C0", label="data")
+            if pred_lines is not None and name in pred_lines:
+                ax.plot(h, pred_lines[name], "-", color="C1", label="pred")
+            ax.set_title(name, fontsize=9)
+            ax.set_xlabel("H", fontsize=8)
+            ax.tick_params(labelsize=7)
+            if i == 0:
+                ax.legend(fontsize=7)
+        # hide unused axes
+        for i in range(n, nrows * ncols):
+            axes[i // ncols, i % ncols].set_visible(False)
+        fig.tight_layout()
+
+        # rasterise to numpy
+        fig.canvas.draw()
+        buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+        frame = buf.reshape((*fig.canvas.get_width_height()[::-1], 4))[..., :3].copy()
+        plt.close(fig)
+
+        # one combined image + per-dof crops are overkill; just return the grid
+        return {"grid": wandb.Image(frame)}
