@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from functools import partial
 import logging
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 from box import Box
+from crossformer.utils.callbacks.callbacks import DTWVizCallback, InspectCallback, PCAVizCallback, SaveCallback
 from einops import rearrange
 import flax
 import jax
@@ -19,18 +20,16 @@ import optax
 import tensorflow as tf
 import tqdm
 import tyro
+import wandb
 
 from crossformer import cn
 from crossformer.data.oxe.oxe_standardization_transforms import (
     OXE_STANDARDIZATION_TRANSFORMS,
 )
 from crossformer.model.crossformer_model import CrossFormerModel
-from crossformer.utils.callbacks.inspect import InspectCallback
-from crossformer.utils.callbacks.viz import VizCallback
 from crossformer.utils.deco import deprecate
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec, spec
-from crossformer.utils.train_callbacks import SaveCallback
 from crossformer.utils.train_utils import (
     check_config_diff,
     create_optimizer,
@@ -39,7 +38,6 @@ from crossformer.utils.train_utils import (
     Timer,
     TrainState,
 )
-import wandb
 
 log = logging.getLogger(__name__)
 
@@ -324,12 +322,19 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     # Build validation callback
     #
 
-    log.info("val_callback disabled for now")
-    viz_cb = VizCallback(
+    log.info("Setting up visualization callbacks")
+
+    pca_viz_cb = PCAVizCallback(
         flow_key=("pred_flow",),
         base_key=("gt_action",),
     )
 
+    dtw_viz_cb = DTWVizCallback(
+        flow_key=("pred_flow",),
+        base_key=("gt_action",),
+        joint_idx_to_plot=0,
+        band_radius=15,
+    )
     #
     # Train loop
     #
@@ -376,7 +381,11 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
                 )
 
                 flow_head_name = next(
-                    (name for name, head in bound.heads.items() if hasattr(head, "flow_steps") and name in viz_batch["action"]),
+                    (
+                        name
+                        for name, head in bound.heads.items()
+                        if hasattr(head, "flow_steps") and name in viz_batch["action"]
+                    ),
                     None,
                 )
 
@@ -392,21 +401,28 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
                     gt_action = jax.device_get(viz_batch["action"][flow_head_name])
                     gt_action = gt_action[..., :7]
 
-                    frames = viz_cb(
-                        {
-                            "pred_flow": pred_flow,
-                            "gt_action": gt_action,
-                        }
-                    )
+                    viz_payload = {
+                        "pred_flow": pred_flow,
+                        "gt_action": gt_action,
+                    }
 
-                    out_path = Path(f"/tmp/flow_pca_step_{i}.gif")
-                    viz_cb.save(frames, out_path, fps=10)
+                    pca_frames = pca_viz_cb(viz_payload)
+                    pca_out_path = Path(f"/tmp/flow_pca_step_{i}.gif")
+                    pca_viz_cb.save(pca_frames, pca_out_path, fps=10)
+
+                    dtw_frames = dtw_viz_cb(viz_payload)
+                    dtw_out_path = Path(f"/tmp/flow_dtw_step_{i}.png")
+                    dtw_viz_cb.save(dtw_frames, dtw_out_path)
 
                     wandb.log(
-                        {"eval/flow_pca": wandb.Video(str(out_path), fps=10, format="gif")},
+                        {
+                            "eval/flow_pca": wandb.Video(str(pca_out_path), fps=10, format="gif"),
+                            "eval/flow_dtw": wandb.Image(str(dtw_out_path)),
+                        },
                         step=i,
                     )
-                    log.info("Successfully logged flow GIF to WandB!")
+                    log.info("Successfully logged PCA GIF and DTW Plot to WandB!")
+
             except Exception as e:
                 log.exception(f"VizCallback failed at step {i}: {e}")
 
