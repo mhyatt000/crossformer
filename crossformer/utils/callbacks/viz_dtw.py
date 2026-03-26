@@ -6,7 +6,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from crossformer.callbacks.viz_base import BaseVizCallback
+from crossformer.utils.callbacks.viz_base import BaseVizCallback
 from crossformer.utils.dtw import batch_compute_dtw, compute_dtw_path
 from crossformer.viz.dtw_plot import render_dtw_alignment_figure
 

@@ -6,7 +6,7 @@ from typing import Any, Callable, Mapping
 
 import numpy as np
 
-from crossformer.callbacks.viz_base import BaseVizCallback
+from crossformer.utils.callbacks.viz_base import BaseVizCallback
 from crossformer.viz.flow_pca import compute_fk, fit_pca, make_fk_fn, prep_data, render_frames
 
 

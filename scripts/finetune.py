@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from box import Box
-from crossformer.utils.callbacks.callbacks import DTWVizCallback, InspectCallback, PCAVizCallback, SaveCallback
+from crossformer.utils.callbacks import DTWVizCallback, InspectCallback, PCAVizCallback, SaveCallback
 from einops import rearrange
 import flax
 import jax
