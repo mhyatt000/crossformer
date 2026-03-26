@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import os
+
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
 from functools import partial
 import logging
+from pathlib import Path
 from typing import Any
 
 from box import Box
@@ -24,11 +29,10 @@ from crossformer.data.oxe.oxe_standardization_transforms import (
     OXE_STANDARDIZATION_TRANSFORMS,
 )
 from crossformer.model.crossformer_model import CrossFormerModel
-from crossformer.utils.callbacks.inspect import InspectCallback
+from crossformer.utils.callbacks import DTWVizCallback, InspectCallback, PCAVizCallback, SaveCallback
 from crossformer.utils.deco import deprecate
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec, spec
-from crossformer.utils.train_callbacks import SaveCallback
 from crossformer.utils.train_utils import (
     check_config_diff,
     create_optimizer,
@@ -233,8 +237,8 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         unsqueeze = lambda x: jnp.expand_dims(x, axis=1)
         batch["action"] = jax.tree.map(unsqueeze, batch["action"])
         # fix k3ds
-
-        batch["action"]["k3ds"] = rearrange(batch["action"]["k3ds"], "b w h x y -> b w h (x y)")
+        if "k3ds" in batch["action"]:
+            batch["action"]["k3ds"] = rearrange(batch["action"]["k3ds"], "b w h x y -> b w h (x y)")
         squeeze = lambda x: jnp.squeeze(x, axis=-1)
         batch["embodiment"] = jax.tree.map(squeeze, batch["embodiment"])
         # end patch
@@ -245,7 +249,9 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
             cfg.vprint(f"[DEBUG] Processing head: {head_name}")
             # if head_name == "single_arm":
             # head_loss, head_metrics = head.loss(embeddings=transformer_embeddings, batch=batch, train=True)
-            # else:
+            if head_name not in batch["action"]:
+                cfg.vprint(f"[DEBUG] Skipping head `{head_name}'")
+                continue
             head_loss, head_metrics = head.loss(
                 transformer_embeddings,
                 batch["action"][head_name],
@@ -322,8 +328,19 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     # Build validation callback
     #
 
-    log.info("val_callback disabled for now")
+    log.info("Setting up visualization callbacks")
 
+    pca_viz_cb = PCAVizCallback(
+        flow_key=("pred_flow",),
+        base_key=("gt_action",),
+    )
+
+    dtw_viz_cb = DTWVizCallback(
+        flow_key=("pred_flow",),
+        base_key=("gt_action",),
+        joint_idx_to_plot=0,
+        band_radius=15,
+    )
     #
     # Train loop
     #
@@ -356,7 +373,64 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
             )
 
         if (i) % cfg.eval_interval == 0:
-            log.info("Evaluating...")
+            log.info(f"Evaluating at step {i}...")
+            try:
+                viz_batch = next(dsit)
+                viz_rng = jax.random.fold_in(rng, i)
+                bound = model.module.bind({"params": train_state.model.params}, rngs={"dropout": viz_rng})
+
+                embeddings = bound.crossformer_transformer(
+                    viz_batch["observation"],
+                    viz_batch["task"],
+                    viz_batch["observation"]["timestep_pad_mask"],
+                    train=False,
+                )
+
+                flow_head_name = next(
+                    (
+                        name
+                        for name, head in bound.heads.items()
+                        if hasattr(head, "flow_steps") and name in viz_batch["action"]
+                    ),
+                    None,
+                )
+
+                if flow_head_name is not None:
+                    pred_flow = bound.heads[flow_head_name].predict_action(
+                        embeddings, train=False, rng=viz_rng, sample_shape=(1,)
+                    )
+                    pred_flow = jax.device_get(pred_flow)
+
+                    if pred_flow.shape[0] == 1:
+                        pred_flow = pred_flow.squeeze(0)
+
+                    gt_action = jax.device_get(viz_batch["action"][flow_head_name])
+                    gt_action = gt_action[..., :7]
+
+                    viz_payload = {
+                        "pred_flow": pred_flow,
+                        "gt_action": gt_action,
+                    }
+
+                    pca_frames = pca_viz_cb(viz_payload)
+                    pca_out_path = Path(f"/tmp/flow_pca_step_{i}.gif")
+                    pca_viz_cb.save(pca_frames, pca_out_path, fps=10)
+
+                    dtw_frames = dtw_viz_cb(viz_payload)
+                    dtw_out_path = Path(f"/tmp/flow_dtw_step_{i}.png")
+                    dtw_viz_cb.save(dtw_frames, dtw_out_path)
+
+                    wandb.log(
+                        {
+                            "eval/flow_pca": wandb.Video(str(pca_out_path), fps=10, format="gif"),
+                            "eval/flow_dtw": wandb.Image(str(dtw_out_path)),
+                        },
+                        step=i,
+                    )
+                    log.info("Successfully logged PCA GIF and DTW Plot to WandB!")
+
+            except Exception as e:
+                log.exception(f"VizCallback failed at step {i}: {e}")
 
         if (i + 1) % cfg.save_interval == 0 and save_dir is not None:
             cfg.vprint("Saving checkpoint...")
