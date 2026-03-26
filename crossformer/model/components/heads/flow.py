@@ -151,8 +151,11 @@ class FlowMatchingActionHead(ContinuousActionHead):
         """Predict actions by solving ODE through flow.
 
         Args:
-            accumulate: If True, return full trajectory [F+1, B, W, H, A].
-                If False (default), return only final prediction [B, W, H, A].
+            N: arbitrary leading sample dimensions.
+            accumulate: If True, return full trajectory
+                (*N, F+1, B, W, H, A) where F = flow_steps.
+                If False (default), return only final prediction
+                (*N, B, W, H, A).
         """
         module, variables = self.unbind()
 
@@ -170,6 +173,7 @@ class FlowMatchingActionHead(ContinuousActionHead):
             )
 
             dt = 1.0 / max(self.flow_steps, 1)
+            a_0 = a_t
 
             def scan_fn(a_t, step):
                 t = (step + 0.5) * dt
@@ -190,7 +194,7 @@ class FlowMatchingActionHead(ContinuousActionHead):
             a_t, history = jax.lax.scan(scan_fn, a_t, steps)
 
             if accumulate:
-                source = jnp.concatenate([a_t[None, ...], history], axis=0)
+                source = jnp.concatenate([a_0[None, ...], history], axis=0)
                 fmt = "f b w (h a) -> f b w h a"
             else:
                 source = a_t
