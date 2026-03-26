@@ -23,10 +23,6 @@ def inspect_batch(batch: dict, prefix: str = "") -> None:
         key = f"{prefix}.{k}" if prefix else k
         if isinstance(v, dict):
             inspect_batch(v, key)
-        elif hasattr(v, "shape"):
-            print(f"  {key:50s} shape={shape:20s} dtype={v.dtype}")
-        else:
-            print(f"  {key:50s} type={type(v).__name__}")
 
 
 def debug_dtw(cfg: cn.Train):
