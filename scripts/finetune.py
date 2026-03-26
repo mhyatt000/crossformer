@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import os
+
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
 from functools import partial
 import logging
 from pathlib import Path
 from typing import Any
 
 from box import Box
-from crossformer.utils.callbacks import DTWVizCallback, InspectCallback, PCAVizCallback, SaveCallback
 from einops import rearrange
 import flax
 import jax
@@ -20,13 +23,13 @@ import optax
 import tensorflow as tf
 import tqdm
 import tyro
-import wandb
 
 from crossformer import cn
 from crossformer.data.oxe.oxe_standardization_transforms import (
     OXE_STANDARDIZATION_TRANSFORMS,
 )
 from crossformer.model.crossformer_model import CrossFormerModel
+from crossformer.utils.callbacks import DTWVizCallback, InspectCallback, PCAVizCallback, SaveCallback
 from crossformer.utils.deco import deprecate
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec, spec
@@ -38,6 +41,7 @@ from crossformer.utils.train_utils import (
     Timer,
     TrainState,
 )
+import wandb
 
 log = logging.getLogger(__name__)
 
@@ -233,8 +237,8 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         unsqueeze = lambda x: jnp.expand_dims(x, axis=1)
         batch["action"] = jax.tree.map(unsqueeze, batch["action"])
         # fix k3ds
-
-        batch["action"]["k3ds"] = rearrange(batch["action"]["k3ds"], "b w h x y -> b w h (x y)")
+        if "k3ds" in batch["action"]:
+            batch["action"]["k3ds"] = rearrange(batch["action"]["k3ds"], "b w h x y -> b w h (x y)")
         squeeze = lambda x: jnp.squeeze(x, axis=-1)
         batch["embodiment"] = jax.tree.map(squeeze, batch["embodiment"])
         # end patch
@@ -245,7 +249,9 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
             cfg.vprint(f"[DEBUG] Processing head: {head_name}")
             # if head_name == "single_arm":
             # head_loss, head_metrics = head.loss(embeddings=transformer_embeddings, batch=batch, train=True)
-            # else:
+            if head_name not in batch["action"]:
+                cfg.vprint(f"[DEBUG] Skipping head `{head_name}'")
+                continue
             head_loss, head_metrics = head.loss(
                 transformer_embeddings,
                 batch["action"][head_name],
