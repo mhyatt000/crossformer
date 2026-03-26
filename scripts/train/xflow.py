@@ -30,6 +30,7 @@ import tyro
 
 import crossformer.cn as cn
 from crossformer.data.grain.embody import decode_embody_name
+from crossformer.embody import DOF
 from crossformer.model.components.heads.dof import build_query_mask
 from crossformer.model.components.heads.xflow import XFlowHead
 from crossformer.model.components.tokenizers import ImageTokenizer, LowdimObsTokenizer
@@ -38,7 +39,7 @@ from crossformer.model.components.vit_encoders import ResNet26FILM, SmallStem
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.run.train_step import lookup_guide, make_train_step
 from crossformer.utils.callbacks.save import SaveCallback
-from crossformer.utils.callbacks.viz import HistVizCallback
+from crossformer.utils.callbacks.viz import ChunkVizCallback, HistVizCallback, VizCallback
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec, spec
 from crossformer.utils.train_utils import create_optimizer, Timer, TrainState
@@ -70,6 +71,7 @@ class Config:
     head_channels: int = 256  # num_query_channels
     head_depth: int = 2  # num_self_attend_layers
     head_heads: int = 8  # num_heads
+    flow_steps: int = 50  # high flow steps for now
 
     # Optimizer
     weight_decay: float = 1e-4  # adamw weight decay
@@ -91,6 +93,8 @@ class Config:
 
     mp: int = 8  # grain multiproc (for data loading)
     hist_every: int = 500  # histogram log interval
+    viz_every: int = 500  # trajectory video log interval (0 disables)
+    viz_fps: int = 12  # logged trajectory video fps
     wandb: cn.Wandb = field(default_factory=cn.Wandb)
 
 
@@ -101,6 +105,9 @@ VISION_ENCODERS = {
     "small_stem": SmallStem,
     "resnet26": ResNet26FILM,
 }
+JOINT_NAMES = tuple(f"j{i}" for i in range(7))
+JOINT_IDS = tuple(DOF[name] for name in JOINT_NAMES)
+JOINT_ID_TO_IDX = {dof_id: i for i, dof_id in enumerate(JOINT_IDS)}
 
 
 def make_model_config(cfg, max_h, max_a, max_w, guide_dim=None):
@@ -138,7 +145,7 @@ def make_model_config(cfg, max_h, max_a, max_w, guide_dim=None):
                     num_query_channels=cfg.head_channels,
                     num_heads=cfg.head_heads,
                     num_self_attend_layers=cfg.head_depth,
-                    flow_steps=10,
+                    flow_steps=cfg.flow_steps,
                     use_guidance=cfg.use_guidance,
                     guidance_embed_dim=token_dim,
                     guidance_input_dim=guide_dim,
@@ -197,6 +204,46 @@ def extract_bundled_actions(batch, max_h):
     chunk_steps = jnp.tile(jnp.arange(H, dtype=jnp.float32)[None], (B, 1))
 
     return actions, dof_ids, chunk_steps
+
+
+def adapt_viz_batch(act, flow):
+    """Map bundled actions to canonical j0..j6 order for VizCallback."""
+    base = np.asarray(act["base"], dtype=np.float32)
+    dof_ids = np.asarray(act["id"])
+    flow = np.asarray(flow, dtype=np.float32)
+    if base.ndim == 3:
+        base = base[:, None, :, :]
+    if base.ndim != 4:
+        raise ValueError(f"Expected act.base ndim 3 or 4, got {base.shape}")
+    if flow.ndim != 5:
+        raise ValueError(f"Expected flow ndim 5, got {flow.shape}")
+    if dof_ids.ndim != 2:
+        raise ValueError(f"Expected act.id ndim 2, got {dof_ids.shape}")
+    if base.shape[0] != dof_ids.shape[0] or flow.shape[1] != dof_ids.shape[0]:
+        raise ValueError(f"Batch mismatch: base={base.shape} flow={flow.shape} dof_ids={dof_ids.shape}")
+
+    keep = []
+    base_joint = np.zeros((*base.shape[:-1], len(JOINT_IDS)), dtype=np.float32)
+    flow_joint = np.zeros((*flow.shape[:-1], len(JOINT_IDS)), dtype=np.float32)
+    for b, row in enumerate(dof_ids):
+        has_joint = False
+        for src, dof_id in enumerate(row):
+            dst = JOINT_ID_TO_IDX.get(int(dof_id))
+            if dst is None:
+                continue
+            has_joint = True
+            base_joint[b, ..., dst] = base[b, ..., src]
+            flow_joint[:, b, ..., dst] = flow[:, b, ..., src]
+        if has_joint:
+            keep.append(b)
+
+    if not keep:
+        return None
+    keep = np.asarray(keep, dtype=np.int32)
+    return {
+        "act": {"base": base_joint[keep]},
+        "predict": flow_joint[:, keep],
+    }
 
 
 def per_embodiment_metrics(batch, update_info):
@@ -365,6 +412,8 @@ def main(cfg: Config):
         print("  [dim]no save_dir — checkpoints disabled[/]")
 
     hist_cb = HistVizCallback(stats=dataset.dataset_statistics)
+    chunk_cb = ChunkVizCallback(stats=dataset.dataset_statistics)
+    viz_cb = VizCallback(flow_key=("predict",), base_key=("act", "base"), fps=cfg.viz_fps)
 
     # Train
     print(Rule("training"))
@@ -421,7 +470,10 @@ def main(cfg: Config):
             row.append(f"{float(update_info['grad_norm']):.4f}")
             table.add_row(*row)
             hist_metrics = {}
-            if cfg.hist_every > 0 and (step % cfg.hist_every == 0 or step == cfg.steps - 1):
+            need_pred = (cfg.hist_every > 0 and (step % cfg.hist_every == 0 or step == cfg.steps - 1)) or (
+                cfg.viz_every > 0 and (step % cfg.viz_every == 0 or step == cfg.steps - 1)
+            )
+            if need_pred:
                 bound = model.module.bind({"params": state.model.params})
                 transformer_outputs = bound.crossformer_transformer(
                     obs,
@@ -437,9 +489,31 @@ def main(cfg: Config):
                     train=False,
                     guide_input=guide_input,
                 )
-                hist_metrics = hist_cb(
-                    batch, {"predict": jax.device_get(pred.reshape(pred.shape[0], pred.shape[1], -1))}
-                )
+                pred_np = jax.device_get(pred)
+                if cfg.hist_every > 0 and (step % cfg.hist_every == 0 or step == cfg.steps - 1):
+                    pred_flat = pred_np.reshape(pred_np.shape[0], pred_np.shape[1], -1)
+                    hist_metrics = hist_cb(batch, {"predict": pred_flat})
+                    chunk_imgs = chunk_cb(batch, {"predict": pred_flat})
+                    for k, v in chunk_imgs.items():
+                        hist_metrics[f"action_chunks/{k}"] = v
+                if cfg.viz_every > 0 and (step % cfg.viz_every == 0 or step == cfg.steps - 1):
+                    pred_flow = bound.heads["xflow"].predict_action(
+                        transformer_outputs,
+                        rng=pred_rng,
+                        dof_ids=dof_ids,
+                        chunk_steps=chunk_steps,
+                        train=False,
+                        guide_input=guide_input,
+                        accumulate=True,
+                    )
+                    pred_flow_np = jax.device_get(pred_flow)
+                    viz_batch = adapt_viz_batch(batch["act"], pred_flow_np)
+                    if viz_batch is not None:
+                        frames = viz_cb(viz_batch)
+                        hist_metrics["flow_pca/video"] = wandb.Video(
+                            np.moveaxis(frames, -1, 1),
+                            fps=cfg.viz_fps,
+                        )
             cfg.wandb.log(
                 {
                     "training": update_info,
