@@ -32,6 +32,9 @@ class DTWVizCallback(BaseVizCallback):
         # We want the final diffusion step [-1] for the target sample.
         robot_pred = flow[-1, self.sample_idx] if flow.ndim >= 4 else flow[self.sample_idx]
 
+        human_demo = human_demo.reshape(-1, human_demo.shape[-1])
+        robot_pred = robot_pred.reshape(-1, robot_pred.shape[-1])
+
         # Add batch dimension back for the JAX vmap: [1, Horizon, DOF]
         h_np = np.expand_dims(human_demo, axis=0)
         r_np = np.expand_dims(robot_pred, axis=0)
