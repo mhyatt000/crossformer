@@ -10,6 +10,35 @@ roadmap once completed.
 
 uv is first class for environment, but use uvx to install and use ruff, pre-commit, etc
 
+## uv run python
+
+Use `uv run python` instead of bare `python`, even for quick REPL checks. Bare
+`python` may use the system interpreter rather than the project environment and
+report missing deps incorrectly.
+
+Bad:
+```bash
+python
+python - <<'PY'
+from crossformer.utils.spec import spec
+PY
+```
+
+Good:
+```bash
+uv run python
+uv run python - <<'PY'
+from crossformer.utils.spec import spec
+PY
+```
+
+## Grain multiprocessing
+
+When the agent runs training scripts, always pass `--mp 0`. The sandbox environment
+causes Grain's multiprocessing workers to fail pickling JAX `Device` objects
+(`TypeError: cannot pickle 'Device' object`). This is a sandbox-only issue — humans
+running outside the sandbox can use the default `--mp` value.
+
 ## RUF003
 
 RUF003 Comment contains ambiguous (MULTIPLICATION SIGN). Did you mean `x` (LATIN SMALL LETTER X)?

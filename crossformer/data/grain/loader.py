@@ -287,11 +287,12 @@ class GrainDataFactory:
         samples = [next(iter(ds)) for ds in dsets]
         a = samples[0]
         d = {}
+        simple = True
         for b in samples[1:]:
             # ezdiff(a, b, simple=False)
 
-            _a, _b = spec(flat(a), simple=False), spec(flat(b), simple=False)
-            _d = diff(_a, _b, simple=False)
+            _a, _b = spec(flat(a), simple=simple), spec(flat(b), simple=simple)
+            _d = diff(_a, _b, simple=simple)
             assert not _d.get("changed"), ("mismatched shape on the same key", {"changed": _d["changed"]})
             d["added"] = {**d.get("added", {}), **_d["added"]}
             d["removed"] = {**d.get("removed", {}), **_d["removed"]}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import partial
 import importlib
 from typing import Any, Hashable, Iterable, TypedDict
@@ -8,7 +9,14 @@ from typing import Any, Hashable, Iterable, TypedDict
 import jax
 from orbax import checkpoint as ocp
 
-Spec = dict[Hashable, tuple[Iterable[int], Any]]
+
+@dataclass(frozen=True)
+class SimpleSpec:
+    shape: tuple[int, ...]
+    dtype: Any
+
+
+Spec = dict[Hashable, tuple[Iterable[int], Any] | SimpleSpec]
 
 
 def spec(tree: dict[str, Any], simple=True) -> Spec:
@@ -17,7 +25,9 @@ def spec(tree: dict[str, Any], simple=True) -> Spec:
     sd = ocp.utils.to_shape_dtype_struct
 
     def toshape(x):
-        return (x.shape, x.dtype) if getattr(x, "shape", None) else x
+        if not getattr(x, "shape", None):
+            return x
+        return SimpleSpec(tuple(x.shape), x.dtype)
 
     return jax.tree.map(sd if not simple else toshape, tree)
 
@@ -55,12 +65,8 @@ def diff(a: Spec, b: Spec, simple=True):
 
     changed = {}
     for k in keys_a & keys_b:
-        if simple:
-            sa, da = a[k][0], a[k][1]
-            sb, db = b[k][0], b[k][1]
-        else:
-            sa, da = a[k].shape, a[k].dtype
-            sb, db = b[k].shape, b[k].dtype
+        sa, da = a[k].shape, a[k].dtype
+        sb, db = b[k].shape, b[k].dtype
         if _norm_shape(sa) != _norm_shape(sb) or _norm_dtype(da) != _norm_dtype(db):
             changed[k] = {"from": a[k], "to": b[k]}
 
