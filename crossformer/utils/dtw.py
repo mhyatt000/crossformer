@@ -26,8 +26,8 @@ def compute_dtw_matrix_single(X, Y, R=15):
     N, M = C.shape
 
     # S-C Band masking
-    i_indices = jnp.arrange(N)[:, None]
-    j_indices = jnp.arrange(M)[None, :]
+    i_indices = jnp.arange(N)[:, None]
+    j_indices = jnp.arange(M)[None, :]
     valid_band_mask = jnp.abs(i_indices - j_indices) <= R
 
     # Inject infinite cost in corners
@@ -46,12 +46,12 @@ def compute_dtw_matrix_single(X, Y, R=15):
 
             return current_val, current_val
 
-        _, new_row_core = jax.lax.scan(col_scan, jnp.inf, jnp.arrange(M))
+        _, new_row_core = jax.lax.scan(col_scan, jnp.inf, jnp.arange(M))
         new_row = jnp.concatenate([jnp.array([jnp.inf]), new_row_core])
 
         return new_row, new_row_core
 
-    _, D_matrix = jax.lax.scan(row_sacn, D_init, C_banded)
+    _, D_matrix = jax.lax.scan(row_scan, D_init, C_banded)
     return D_matrix
 
 
@@ -72,19 +72,19 @@ def compute_dtw_path(D_matrix):
         np.ndarray of shape (K, 2) representing the optimal alignment indices.
     """
     N, M = D_matrix.shape
-    i, j = N - 1, M - 1
+    i, j = int(N - 1), int(M - 1)
 
     path = [i, j]
 
-    while i > 0 or J > 0:
+    while i > 0 or j > 0:
         if i == 0:
             j -= 1
         elif j == 0:
             i -= 1
         else:
-            cost_up = D_matrix[i - 1, j]
-            cost_left = D_matrix[i, j - 1]
-            cost_diag = D_matrix[i - 1, j - 1]
+            cost_up   = float(D_matrix[i - 1, j])
+            cost_left = float(D_matrix[i, j - 1])
+            cost_diag = float(D_matrix[i - 1, j - 1])
 
             min_cost = min(cost_up, cost_left, cost_diag)
 
@@ -96,7 +96,7 @@ def compute_dtw_path(D_matrix):
             else:
                 j -= 1
 
-        path.append((i, j))
+        path.append((int(i), int(j)))
 
     path.reverse()
-    return np.array(path)
+    return np.array(path, dtype=np.int32)
