@@ -74,7 +74,7 @@ def compute_dtw_path(D_matrix):
     N, M = D_matrix.shape
     i, j = int(N - 1), int(M - 1)
 
-    path = [i, j]
+    path = [(i, j)]
 
     while i > 0 or j > 0:
         if i == 0:
@@ -82,7 +82,7 @@ def compute_dtw_path(D_matrix):
         elif j == 0:
             i -= 1
         else:
-            cost_up   = float(D_matrix[i - 1, j])
+            cost_up = float(D_matrix[i - 1, j])
             cost_left = float(D_matrix[i, j - 1])
             cost_diag = float(D_matrix[i - 1, j - 1])
 
