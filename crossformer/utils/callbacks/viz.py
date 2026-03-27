@@ -206,6 +206,31 @@ class ActionBatchDenormalizer:
             lines[dof_name] = xs
         return lines
 
+    def denormalize_slot(
+        self,
+        arr: Any,
+        dof_ids: Any,
+        ds_name: str,
+    ) -> np.ndarray:
+        """Denormalize one slot-ordered action vector using DOF ids."""
+        xs = np.asarray(arr, dtype=np.float32).copy()
+        ids = np.asarray(dof_ids).reshape(-1)
+        if xs.ndim != 1:
+            raise ValueError(f"Expected arr shape (A,), got {xs.shape}")
+        if ids.shape[0] != xs.shape[0]:
+            raise ValueError(f"Expected dof_ids len {xs.shape[0]}, got {ids.shape}")
+
+        stats = self._action_stats(ds_name)
+        for i, dof_id in enumerate(ids):
+            dof_id = int(dof_id)
+            if dof_id == MASK_ID:
+                continue
+            stat = self._dof_array_stats(stats, self._dof_name(dof_id))
+            if stat is None:
+                continue
+            xs[i] = np.asarray(stat.unnormalize(np.asarray([xs[i]], dtype=np.float32)))[0]
+        return xs
+
     def decode_dataset_names(self, arr: Any) -> list[str]:
         arr = np.asarray(arr)
         if arr.ndim == 1:
