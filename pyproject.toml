@@ -104,7 +104,7 @@ reportMissingTypeStubs = false
 exclude = ["**/build","**/.venv","**/data"]
 
 [tool.pytest.ini_options]
-addopts = "-q --maxfail=1 --disable-warnings -vvrs"
+addopts = "-q  --disable-warnings -vvrs"
 testpaths = ["tests/unit", 'tests/integration']
 norecursedirs = ["tests", "broken", "wip"]
 markers = [
