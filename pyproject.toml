@@ -5,6 +5,9 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-root = ""
 
+[tool.uv.extra-build-dependencies]
+crossformer = ["uv_build"]
+
 [tool.uv]
 override-dependencies = [
     # "tensorflow>=2.15.0",
@@ -77,6 +80,10 @@ dependencies = [
     "jax[cuda12]>=0.5.3",
     "jaxlib>=0.5.3",
     "dm-pix>=0.4.4",
+    "pcax>=0.1.0",
+    # "jaxrenderer",
+    # "nvdiffrast",
+    "nvdiffrast>=0.4.0",
 ]
 
 [dependency-groups]
@@ -96,6 +103,8 @@ dlimp = { git = "https://github.com/kvablack/dlimp.git", rev = "main" }
 xgym = { git = "https://github.com/mhyatt000/xgym" }
 xclients = { git = "https://github.com/mhyatt000/xclients" , rev = '638c1db'}
 jaxtyping = { git = "https://github.com/patrick-kidger/jaxtyping" }
+jaxrenderer = { git = "https://github.com/JoeyTeng/jaxrenderer" }
+nvdiffrast = { git = "https://github.com/NVlabs/nvdiffrast.git" }
 
 [tool.pyright]
 typeCheckingMode = "basic"
@@ -103,7 +112,7 @@ reportMissingTypeStubs = false
 exclude = ["**/build","**/.venv","**/data"]
 
 [tool.pytest.ini_options]
-addopts = "-q --maxfail=1 --disable-warnings -vvrs"
+addopts = "-q  --disable-warnings -vvrs"
 testpaths = ["tests/unit", 'tests/integration']
 norecursedirs = ["tests", "broken", "wip"]
 markers = [

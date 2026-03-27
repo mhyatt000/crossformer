@@ -31,6 +31,7 @@ class Config(cn.Train):
     arec_path: Path | None = None
     dataset_name: str | None = None
     recompute: bool = False  # recompute data stats? y/n
+    mp: int = 8
     once: bool = True
 
     log_level: Literal["debug", "info", "warning", "error"] = "warning"  # logging verbosity
@@ -49,7 +50,7 @@ def main(cfg: Config) -> None:
         return multihost_utils.host_local_array_to_global_array(batch, mesh, PartitionSpec("batch"))
 
     if True:
-        dataset = GrainDataFactory().make(cfg, shard_fn=do_shard, train=True)
+        dataset = GrainDataFactory(cfg.mp).make(cfg, shard_fn=do_shard, train=True)
 
     if False:
         # jax.config.update("jax_default_device", jax.devices("cpu")[0])

@@ -1,3 +1,8 @@
+# intr extr and urdf
+data
+*.urdf
+assets
+
 weights
 .claude
 .env

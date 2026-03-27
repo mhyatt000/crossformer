@@ -34,7 +34,7 @@ MASK = 1  # excluded
 def sample_modes(
     n_parts: int,
     rng: np.random.Generator,
-    mask_prob: float = 0.25,
+    mask_prob: float = 0.1,
 ) -> list[int]:
     """Sample INCLUDE/MASK per body part, at least one included."""
     modes = rng.choice([INCLUDE, MASK], size=n_parts, p=[1 - mask_prob, mask_prob]).tolist()
@@ -186,7 +186,7 @@ def build_embodiment_action(
     embodiment: Embodiment,
     max_a: int,
     rng: np.random.Generator,
-    mask_prob: float = 0.25,
+    mask_prob: float = 0.10,
     key_map: dict[str, str] | None = None,
 ) -> dict[str, np.ndarray]:
     """End-to-end: extract actions, sample modes, shuffle order, build block.
@@ -233,7 +233,7 @@ def embody_transform(
     *,
     embodiment: Embodiment,
     max_a: int,
-    mask_prob: float = 0.25,
+    mask_prob: float = 0.10,
 ) -> dict:
     """Grain .map() transform: adds act.base, act.id, act.embody, mask.act."""
     rng = np.random.default_rng()

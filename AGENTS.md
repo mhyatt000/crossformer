@@ -4,11 +4,61 @@ Refer to `docs/` for repo specific context
 If looking undirected for fixes to make, start with `roadmap/*` for info. remove items from the
 roadmap once completed.
 
+# STEERING
+
+## running code and iterative debugging
+
+in general, after making a change, run at least one of [a] an existing script. [b] a new throwaway script or REPL
+[c] relevant unit and integration tests. changes are best to be debugged before returning to the human.
+
+this guideline can be ignored IFF the script will incur significant stdout (token debt) in which
+case it is better to ask the human if you should run or pipe to a *.log file. similarly can ask for
+guidance if the script will take a long time to run (2+min) such as training for a long time.
+
 # SURPRISES
 
 ## uvx tools
 
 uv is first class for environment, but use uvx to install and use ruff, pre-commit, etc
+
+## uv run python
+
+Use `uv run python` instead of bare `python`, even for quick REPL checks. Bare
+`python` may use the system interpreter rather than the project environment and
+report missing deps incorrectly.
+
+Bad:
+```bash
+python
+python - <<'PY'
+from crossformer.utils.spec import spec
+PY
+```
+
+Good:
+```bash
+uv run python
+uv run python - <<'PY'
+from crossformer.utils.spec import spec
+PY
+```
+
+## tyro booleans
+
+Tyro CLI args use kebab-case flag names like `--batch-size`. Boolean flags are
+toggles like `--flag` and `--no-flag`, not `--flag False`.
+
+Bad:
+```bash
+uv run scripts/train/xflow.py --wandb.use False
+uv run scripts/train/xflow.py --myflag True
+```
+
+Good:
+```bash
+uv run scripts/train/xflow.py --wandb.no-use
+uv run scripts/train/xflow.py --myflag
+```
 
 ## RUF003
 

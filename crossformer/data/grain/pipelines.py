@@ -690,8 +690,6 @@ def drop_str(batch):
         batch.pop("language.instruction")
     if "dataset_name" in batch:
         batch.pop("dataset_name")
-    if "dataset_name" in batch.get("info", {}):
-        batch["info"].pop("dataset_name")
     return batch
 
 

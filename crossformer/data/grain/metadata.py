@@ -92,7 +92,9 @@ class ArrayStatistics:
 
     @classmethod
     def compute(cls, arr: np.ndarray) -> ArrayStatistics:
-        print("computing stats for array of shape", arr.shape)
+        """Compute stats from first timestep only; result shape is (A,)."""
+        if arr.ndim >= 3:
+            arr = arr[:, 0]
         return cls(
             mean=arr.mean(axis=0),
             std=arr.std(axis=0),
@@ -102,6 +104,14 @@ class ArrayStatistics:
             p99=np.quantile(arr, 0.99, axis=0),
             p01=np.quantile(arr, 0.01, axis=0),
         )
+
+    def normalize(self, x: np.ndarray) -> np.ndarray:
+        y = (x - self.mean) / np.maximum(self.std, EPS)
+        return y if self.mask is None else np.where(self.mask, y, x)
+
+    def unnormalize(self, x: np.ndarray) -> np.ndarray:
+        y = x * np.maximum(self.std, EPS) + self.mean
+        return y if self.mask is None else np.where(self.mask, y, x)
 
 
 @dataclass
@@ -142,8 +152,11 @@ class NormalizationType(str):
     BOUNDS = "bounds"
 
 
+_STATS_VERSION = "v3_first_timestep_action_mask"
+
+
 def _cache_path(hash_dependencies: Iterable[str], save_dir: str | Path | None) -> Path:
-    key = "".join(hash_dependencies).encode("utf-8")
+    key = "".join([_STATS_VERSION, *hash_dependencies]).encode("utf-8")
     unique_hash = hashlib.sha256(key, usedforsecurity=False).hexdigest()
     if save_dir is not None:
         return Path(save_dir) / f"dataset_statistics_{unique_hash}.json"
@@ -175,15 +188,24 @@ def compute_dataset_statistics(
     t = len(ds)
 
     _bs = 1  # 1024
-    streams = jax.tree.map(lambda x: OnlineStats(np.array(x).shape, dtype=np.array(x).dtype), ds[0])
-    streams = {"action": streams["action"], "proprio": streams["observation"]["proprio"]}
+    # Build OnlineStats only for action/proprio subtrees, using first-timestep shape (A,)
+    sample = ds[0]
+
+    def _make_stream(x):
+        a = np.array(x)
+        return OnlineStats(a[0].shape, dtype=a.dtype)
+
+    streams = {
+        "action": jax.tree.map(_make_stream, sample["action"]),
+        "proprio": jax.tree.map(_make_stream, sample["observation"]["proprio"]),
+    }
 
     def _update(x):
-        action_masks = x.get("action_norm_mask", {})
         for key, value in x["action"].items():
-            streams["action"][key].update(value, action_masks.get(key))
+            action_mask = x.get("action_norm_mask", {}).get(key)
+            streams["action"][key].update(value[0], mask=action_mask)
         for key, value in x["observation"]["proprio"].items():
-            streams["proprio"][key].update(value)
+            streams["proprio"][key].update(value[0])
         return x
 
     # ds = ds.slice(slice(5))
@@ -269,24 +291,17 @@ def normalize_action_and_proprio(
 ) -> dict:
     """Normalizes actions and proprioceptive observations."""
 
-    def _norm(a: np.ndarray, ma: ArrayStatistics) -> np.ndarray:
-        """Normalizes a single action array.
-        a: action
-        ma: action statistics
-        """
-        if normalization_type == NormalizationType.NORMAL:
-            mean = ma.mean
-            std = np.maximum(ma.std, EPS)
-            normalized = (a - mean) / std
-        elif normalization_type == NormalizationType.BOUNDS:
-            span = np.maximum(ma.maximum - ma.minimum, EPS)
-            normalized = 2.0 * (a - ma.minimum) / span - 1.0
-        else:
-            raise ValueError(f"Unknown normalization type: {normalization_type}")
-        return normalized
-
     action = step["action"]
-    normalized = jax.tree.map(lambda a, ma: _norm(a, ma), action, metadata.action)
+    if normalization_type == NormalizationType.NORMAL:
+        normalized = jax.tree.map(lambda a, ma: ma.normalize(a), action, metadata.action)
+    elif normalization_type == NormalizationType.BOUNDS:
+        normalized = jax.tree.map(
+            lambda a, ma: 2.0 * (a - ma.minimum) / np.maximum(ma.maximum - ma.minimum, EPS) - 1.0,
+            action,
+            metadata.action,
+        )
+    else:
+        raise ValueError(f"Unknown normalization type: {normalization_type}")
     step["action"] = {
         k: _apply_action_mask(
             action[k],
@@ -302,6 +317,12 @@ def normalize_action_and_proprio(
             continue
         if key not in metadata.proprio:
             continue
-        obs[key] = _norm(obs[key], metadata.proprio[key])
+        if normalization_type == NormalizationType.NORMAL:
+            obs[key] = metadata.proprio[key].normalize(obs[key])
+        elif normalization_type == NormalizationType.BOUNDS:
+            ma = metadata.proprio[key]
+            obs[key] = 2.0 * (obs[key] - ma.minimum) / np.maximum(ma.maximum - ma.minimum, EPS) - 1.0
+        else:
+            raise ValueError(f"Unknown normalization type: {normalization_type}")
     step["observation"] = obs
     return step

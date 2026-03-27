@@ -185,6 +185,8 @@ class XFlowHead(nn.Module, ActionHead):
         if self.pool_strategy == "mean":
             return token_group.tokens.mean(axis=-2)
         if self.pool_strategy == "pass":
+            # NOTE: broken — merges (W, N) so __call__ misinterprets dim 1 as W,
+            # causing shape mismatches with time_bw and the final rearrange.
             t = token_group.tokens
             return rearrange(t, "b w n e -> b (w n) e")
         raise ValueError(f"{self.pool_strategy} not implemented!")
@@ -412,15 +414,25 @@ class XFlowHead(nn.Module, ActionHead):
         guide_input: ArrayLike | None = None,
         guidance_mask: ArrayLike | None = None,
         cfg_scale: float | None = None,
+        accumulate: bool = False,
         **kwargs,
     ) -> Array:
         """Predict actions by solving the flow ODE (Euler integration).
 
-        Returns:
-            (B, W, max_H, max_A) — padded actions; use query mask to extract valid.
+        Args:
+            N: arbitrary leading sample dimensions.
+            accumulate: If True, return full trajectory with shape
+                (*N, F+1, B, W, max_H, max_A) where F = flow_steps.
+                If False (default), return only final prediction
+                (*N, B, W, max_H, max_A).
         """
         module, variables = self.unbind()
         max_H, max_A = self.max_horizon, self.max_dofs
+
+        # Ensure guidance_mask is explicit so zeros_like works in CFG path
+        if cfg_scale is not None and guidance_mask is None and guide_input is not None:
+            G = self.num_guidance_latents if self.compress_guidance else guide_input.shape[1]
+            guidance_mask = jnp.ones((guide_input.shape[0], G), dtype=jnp.int32)
 
         def sample_actions(rng):
             rng, key = jax.random.split(rng)
@@ -432,6 +444,7 @@ class XFlowHead(nn.Module, ActionHead):
                 (batch_size, window_size, max_H * max_A),
             )
             dt = 1.0 / max(self.flow_steps, 1)
+            a_0 = a_t
 
             def _velocity(a_t, time_val):
                 t = jnp.full((*a_t.shape[:2], 1), time_val, dtype=a_t.dtype)
@@ -473,12 +486,19 @@ class XFlowHead(nn.Module, ActionHead):
                 updated = a_t + dt * velocity
                 if self.clip_pred:
                     updated = jnp.clip(updated, -self.max_action, self.max_action)
-                return updated, ()
+                return updated, updated if accumulate else ()
 
             steps = jnp.arange(self.flow_steps)
-            a_t, _ = jax.lax.scan(scan_fn, a_t, steps)
+            a_t, history = jax.lax.scan(scan_fn, a_t, steps)
 
-            actions = rearrange(a_t, "b w (h a) -> b w h a", h=max_H, a=max_A)
+            if accumulate:
+                source = jnp.concatenate([a_0[None, ...], history], axis=0)
+                fmt = "f b w (h a) -> f b w h a"
+            else:
+                source = a_t
+                fmt = "b w (h a) -> b w h a"
+
+            actions = rearrange(source, fmt, h=max_H, a=max_A)
             if self.clip_pred:
                 actions = jnp.clip(actions, -self.max_action, self.max_action)
             return actions

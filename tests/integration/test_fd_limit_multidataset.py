@@ -11,7 +11,9 @@ import pytest
 
 from crossformer.data.arec.arec import ArrayRecordBuilder
 
-pytestmark = [pytest.mark.integration, pytest.mark.slow]
+doskip = pytest.mark.skip(reason="This test is a manual utility for debugging FD limits, not meant for CI")
+
+pytestmark = [doskip, pytest.mark.integration, pytest.mark.slow]
 
 
 def _has_2_gpus() -> bool:
