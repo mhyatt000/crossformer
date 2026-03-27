@@ -6,6 +6,11 @@ roadmap once completed.
 
 # STEERING
 
+## searching code efficiently
+
+prefer grep/rg with -C `n-lines` to get relevant surrounding context with no token waste.
+avoid reading entire files when you only need a specific function or block.
+
 ## running code and iterative debugging
 
 in general, after making a change, run at least one of [a] an existing script. [b] a new throwaway script or REPL
