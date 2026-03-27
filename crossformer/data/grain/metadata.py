@@ -152,7 +152,7 @@ class NormalizationType(str):
     BOUNDS = "bounds"
 
 
-_STATS_VERSION = "v2_first_timestep"
+_STATS_VERSION = "v3_first_timestep_action_mask"
 
 
 def _cache_path(hash_dependencies: Iterable[str], save_dir: str | Path | None) -> Path:
@@ -202,7 +202,8 @@ def compute_dataset_statistics(
 
     def _update(x):
         for key, value in x["action"].items():
-            streams["action"][key].update(value[0])
+            action_mask = x.get("action_norm_mask", {}).get(key)
+            streams["action"][key].update(value[0], mask=action_mask)
         for key, value in x["observation"]["proprio"].items():
             streams["proprio"][key].update(value[0])
         return x
