@@ -4,6 +4,17 @@ Refer to `docs/` for repo specific context
 If looking undirected for fixes to make, start with `roadmap/*` for info. remove items from the
 roadmap once completed.
 
+# STEERING
+
+## running code and iterative debugging
+
+in general, after making a change, run at least one of [a] an existing script. [b] a new throwaway script or REPL
+[c] relevant unit and integration tests. changes are best to be debugged before returning to the human.
+
+this guideline can be ignored IFF the script will incur significant stdout (token debt) in which
+case it is better to ask the human if you should run or pipe to a *.log file. similarly can ask for
+guidance if the script will take a long time to run (2+min) such as training for a long time.
+
 # SURPRISES
 
 ## uvx tools
