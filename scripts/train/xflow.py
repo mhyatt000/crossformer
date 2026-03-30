@@ -47,7 +47,6 @@ from crossformer.utils.train_utils import create_optimizer, Timer, TrainState
 import wandb
 
 
-from crossformer.rtc import RTC
 
 
 # -- config -------------------------------------------------------------------
