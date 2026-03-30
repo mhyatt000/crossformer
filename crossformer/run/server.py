@@ -11,6 +11,15 @@ from rich import print
 from webpolicy.base_policy import BasePolicy
 
 from crossformer.model.crossformer_model import CrossFormerModel
+from crossformer.run.base_policy import CorePolicy
+from crossformer.run.wrappers import (
+    EnsemblerWrapper,
+    HistoryWrapper,
+    ImageResizeWrapper,
+    LegacyDenormWrapper,
+    ProprioNormWrapper,
+    XFlowDenormWrapper,
+)
 from crossformer.utils.spec import spec
 from crossformer.utils.tree.core import drop_fn
 
@@ -61,10 +70,38 @@ class PolicyConfig:
 
 
 @dataclass
+class PolicyV2Config:
+    """Configurable wrapper-based policy (v2)."""
+
+    path: str
+    task: str
+    step: int | None = None
+    head_name: str | None = None  # auto-detected if None
+
+    resize: bool = True  # resize images to checkpoint sizes
+    proprio_norm: bool = True  # normalize proprio with dataset stats
+    history: int = 1  # observation window horizon
+    ensemble: bool = True  # exponential action ensembling
+    chunk: int = 20  # action chunk size
+    exp: float = 0.99  # ensembler exponential weight
+    denorm: bool = True  # denormalize actions (xflow or legacy)
+    warmup: bool = True
+
+    def verify(self):
+        path = Path(self.path).expanduser().resolve()
+        assert self.path and path.exists(), f"Model path {self.path} does not exist"
+        cfg = path / "config.json"
+        if not cfg.exists():
+            entries = sorted(p.name for p in path.iterdir()) if path.is_dir() else []
+            raise FileNotFoundError(f"Expected checkpoint config at {cfg}")
+        assert self.task in TASKS, f"Unknown task '{self.task}'. Choose from: {sorted(TASKS)}"
+
+
+@dataclass
 class ServerConfig:
     """Server configuration"""
 
-    policy: PolicyConfig
+    policy: PolicyConfig | PolicyV2Config
     host: str = "0.0.0.0"  # host to run on
     port: int = 8001  # port to run on
 
@@ -251,3 +288,35 @@ class Policy(BasePolicy):
         print(actions)
 
         return {"actions": self.emsembler(actions[: self.cfg.chunk])}
+
+
+def build_policy_v2(cfg: PolicyV2Config) -> BasePolicy:
+    """Compose a CorePolicy with configurable wrappers from PolicyV2Config."""
+    ds_name = TASKS[cfg.task]["dataset_name"]
+    core = CorePolicy(cfg.path, step=cfg.step, head_name=cfg.head_name)
+    stats = core.model.dataset_statistics
+
+    policy: BasePolicy = core
+
+    if cfg.resize:
+        policy = ImageResizeWrapper(policy, core.img_hw)
+
+    if cfg.proprio_norm:
+        policy = ProprioNormWrapper(policy, stats[ds_name]["proprio"])
+
+    if cfg.history > 1:
+        policy = HistoryWrapper(policy, cfg.history)
+
+    if cfg.denorm:
+        if core.is_xflow:
+            policy = XFlowDenormWrapper(policy, stats, ds_name)
+        else:
+            policy = LegacyDenormWrapper(policy, stats, core.head_name, ds_name)
+
+    if cfg.ensemble:
+        policy = EnsemblerWrapper(policy, cfg.exp, cfg.chunk, cfg.chunk)
+
+    if cfg.warmup:
+        core.warmup()
+
+    return policy
