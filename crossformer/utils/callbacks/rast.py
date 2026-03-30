@@ -1,4 +1,7 @@
-"""Callback that rasterizes a URDF robot from camera viewpoints."""
+"""Callback that rasterizes a URDF robot from camera viewpoints.
+
+Uses nvdiffrast for GPU-accelerated rasterization.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +11,9 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
+import nvdiffrast.torch as dr
 import pyroki as pk
+import torch
 import yourdfpy
 
 # ---------------------------------------------------------------------------
@@ -118,8 +123,25 @@ class _RobotMesh:
 
 
 # ---------------------------------------------------------------------------
-# Vectorised software rasterizer
+# GPU rasterizer (nvdiffrast)
 # ---------------------------------------------------------------------------
+
+
+class _GpuRasterizer:
+    """Batched GPU silhouette rasterizer via nvdiffrast."""
+
+    def __init__(self, faces: np.ndarray, device: torch.device | None = None):
+        self.device = device or torch.device("cuda")
+        self.glctx = dr.RasterizeCudaContext(device=self.device)
+        self.faces = torch.tensor(faces, dtype=torch.int32, device=self.device)
+
+    def render_masks(self, verts_clip: np.ndarray, width: int, height: int) -> np.ndarray:
+        """Rasterize (B, V, 4) clip-space verts to (B, H, W) binary masks."""
+        pos = torch.tensor(np.ascontiguousarray(verts_clip), dtype=torch.float32, device=self.device)
+        rast_out, _ = dr.rasterize(self.glctx, pos, self.faces, resolution=[height, width])
+        masks = (rast_out[:, :, :, 3] > 0).float()
+        masks = torch.flip(masks, dims=[1])  # Y-flip to match image convention
+        return masks.cpu().numpy()
 
 
 def _perspective(fovy_deg: float, aspect: float, znear: float, zfar: float) -> np.ndarray:
@@ -133,120 +155,6 @@ def _perspective(fovy_deg: float, aspect: float, znear: float, zfar: float) -> n
     return P
 
 
-def _rasterize_mask(
-    verts_clip: np.ndarray,
-    faces: np.ndarray,
-    width: int,
-    height: int,
-) -> np.ndarray:
-    """Vectorised silhouette rasterizer — no Python triangle loop.
-
-    Projects all triangles, bins pixels via edge functions in parallel.
-    For silhouettes we only need a binary mask, no z-buffer needed.
-    """
-    w = verts_clip[:, 3]
-    ok = np.abs(w) > 1e-7
-    ndc = np.zeros((len(verts_clip), 3), dtype=np.float32)
-    ndc[ok] = verts_clip[ok, :3] / w[ok, None]
-
-    # NDC --> pixel coords for all vertices
-    px = (ndc[:, 0] * 0.5 + 0.5) * (width - 1)
-    py = (1.0 - (ndc[:, 1] * 0.5 + 0.5)) * (height - 1)
-
-    # Gather triangle vertex pixel coords: (F, 3) each
-    x0, x1, x2 = px[faces[:, 0]], px[faces[:, 1]], px[faces[:, 2]]
-    y0, y1, y2 = py[faces[:, 0]], py[faces[:, 1]], py[faces[:, 2]]
-
-    # Filter degenerate and off-screen triangles
-    area2 = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
-    tri_xmin = np.minimum(np.minimum(x0, x1), x2)
-    tri_xmax = np.maximum(np.maximum(x0, x1), x2)
-    tri_ymin = np.minimum(np.minimum(y0, y1), y2)
-    tri_ymax = np.maximum(np.maximum(y0, y1), y2)
-    keep = (np.abs(area2) > 1e-6) & (tri_xmax >= 0) & (tri_xmin < width) & (tri_ymax >= 0) & (tri_ymin < height)
-    idx = np.where(keep)[0]
-    if len(idx) == 0:
-        return np.zeros((height, width), dtype=np.float32)
-
-    x0, x1, x2 = x0[idx], x1[idx], x2[idx]
-    y0, y1, y2 = y0[idx], y1[idx], y2[idx]
-    F = len(idx)
-
-    # Process triangles in chunks to limit memory
-    mask = np.zeros((height, width), dtype=np.float32)
-    chunk = max(1, min(F, 500))
-    for start in range(0, F, chunk):
-        end = min(start + chunk, F)
-        _rast_chunk(
-            mask,
-            x0[start:end],
-            y0[start:end],
-            x1[start:end],
-            y1[start:end],
-            x2[start:end],
-            y2[start:end],
-            width,
-            height,
-        )
-    return mask
-
-
-def _rast_chunk(
-    mask: np.ndarray,
-    x0: np.ndarray,
-    y0: np.ndarray,
-    x1: np.ndarray,
-    y1: np.ndarray,
-    x2: np.ndarray,
-    y2: np.ndarray,
-    width: int,
-    height: int,
-) -> None:
-    """Rasterize a chunk of triangles into mask (in-place)."""
-    n = len(x0)
-    # Per-triangle bounding box
-    bx0 = np.clip(np.floor(np.minimum(np.minimum(x0, x1), x2)).astype(np.int32), 0, width - 1)
-    bx1 = np.clip(np.ceil(np.maximum(np.maximum(x0, x1), x2)).astype(np.int32), 0, width - 1)
-    by0 = np.clip(np.floor(np.minimum(np.minimum(y0, y1), y2)).astype(np.int32), 0, height - 1)
-    by1 = np.clip(np.ceil(np.maximum(np.maximum(y0, y1), y2)).astype(np.int32), 0, height - 1)
-
-    # Max bbox size across chunk --> build grid once
-    max_w = int((bx1 - bx0).max()) + 2
-    max_h = int((by1 - by0).max()) + 2
-
-    # Pixel offsets within max bbox
-    dx = np.arange(max_w, dtype=np.float32) + 0.5  # (W,)
-    dy = np.arange(max_h, dtype=np.float32) + 0.5  # (H,)
-    gx = bx0[:, None] + dx[None, :]  # (n, W)
-    gy = by0[:, None] + dy[None, :]  # (n, H)
-
-    # Edge function for each triangle x pixel: use broadcasting
-    # pixel coords: (n, H, W) via outer product
-    px = gx[:, None, :]  # (n, 1, W)
-    py_grid = gy[:, :, None]  # (n, H, 1)
-
-    # Edge functions (n, H, W)
-    e0 = (x1 - x0)[:, None, None] * (py_grid - y0[:, None, None]) - (y1 - y0)[:, None, None] * (px - x0[:, None, None])
-    e1 = (x2 - x1)[:, None, None] * (py_grid - y1[:, None, None]) - (y2 - y1)[:, None, None] * (px - x1[:, None, None])
-    e2 = (x0 - x2)[:, None, None] * (py_grid - y2[:, None, None]) - (y0 - y2)[:, None, None] * (px - x2[:, None, None])
-
-    inside = ((e0 >= 0) & (e1 >= 0) & (e2 >= 0)) | ((e0 <= 0) & (e1 <= 0) & (e2 <= 0))
-
-    # Clamp to image bounds
-    x_valid = (px >= 0) & (px < width)  # (n, 1, W)
-    y_valid = (py_grid >= 0) & (py_grid < height)  # (n, H, 1)
-    valid = inside & x_valid & y_valid
-
-    # Scatter into mask
-    for i in range(n):
-        ys, xs = np.where(valid[i])
-        if len(ys) == 0:
-            continue
-        row = by0[i] + ys
-        col = bx0[i] + xs
-        mask[row, col] = 1.0
-
-
 # ---------------------------------------------------------------------------
 # Callback
 # ---------------------------------------------------------------------------
@@ -256,7 +164,7 @@ def _rast_chunk(
 class RastCallback:
     """Render URDF robot silhouettes from camera viewpoints.
 
-    Meshes are decimated at load time for fast software rasterization.
+    Uses nvdiffrast for GPU-accelerated rasterization.
     """
 
     urdf: Path
@@ -270,6 +178,7 @@ class RastCallback:
     alpha: float = 0.6
     joint_dim: int = 7
     _robot: _RobotMesh | None = field(default=None, init=False, repr=False)
+    _rasterizer: _GpuRasterizer | None = field(default=None, init=False, repr=False)
     _cam_mats: list[np.ndarray] = field(default_factory=list, init=False, repr=False)
     _proj: np.ndarray | None = field(default=None, init=False, repr=False)
 
@@ -277,6 +186,7 @@ class RastCallback:
         if self._robot is not None:
             return
         self._robot = _RobotMesh(self.urdf, self.mesh_dir)
+        self._rasterizer = _GpuRasterizer(self._robot.faces)
         self._proj = _perspective(self.fovy, self.width / self.height, 0.01, 10.0)
         if self.cams:
             self._cam_mats = [_load_cam(p) for p in self.cams]
@@ -306,18 +216,20 @@ class RastCallback:
             q = q[:, -1]
         q = q[..., : self.joint_dim]
 
-        verts = robot.posed_verts(q)
+        verts = robot.posed_verts(q)  # (B, V, 4)
         bg = np.asarray(self.bg, dtype=np.float32)
         color = np.asarray(self.color, dtype=np.float32)
 
         frames = []
         for cam in self._cam_mats:
             mvp = proj @ cam
+            # Batched clip-space projection: (B, V, 4)
+            clip = np.einsum("bvi,ji->bvj", verts, mvp)
+            masks = self._rasterizer.render_masks(clip, self.width, self.height)  # (B, H, W)
+            # Composite all batch items onto one frame
             frame = np.tile(bg[None, None, :], (self.height, self.width, 1))
             for b in range(len(q)):
-                clip = verts[b] @ mvp.T
-                m = _rasterize_mask(clip, robot.faces, self.width, self.height)
-                w = m[..., None] * self.alpha
+                w = masks[b, :, :, None] * self.alpha
                 frame = frame * (1.0 - w) + color[None, None, :] * w
             frames.append((np.clip(frame, 0, 1) * 255).astype(np.uint8))
         return frames
@@ -333,7 +245,7 @@ class RastCallback:
             traj = traj[0]
         traj = traj[..., : self.joint_dim]
 
-        verts = robot.posed_verts(traj)
+        verts = robot.posed_verts(traj)  # (T, V, 4)
         bg = np.asarray(self.bg, dtype=np.float32)
         color = np.asarray(self.color, dtype=np.float32)
         t_count = len(traj)
@@ -341,12 +253,13 @@ class RastCallback:
         frames = []
         for cam in self._cam_mats:
             mvp = proj @ cam
+            # Batched clip-space projection for all timesteps
+            clip = np.einsum("bvi,ji->bvj", verts, mvp)
+            masks = self._rasterizer.render_masks(clip, self.width, self.height)  # (T, H, W)
             frame = np.tile(bg[None, None, :], (self.height, self.width, 1))
             for t in range(t_count):
-                clip = verts[t] @ mvp.T
-                m = _rasterize_mask(clip, robot.faces, self.width, self.height)
                 a = self.alpha * (0.3 + 0.7 * t / max(t_count - 1, 1))
-                w = m[..., None] * a
+                w = masks[t, :, :, None] * a
                 frame = frame * (1.0 - w) + color[None, None, :] * w
             frames.append((np.clip(frame, 0, 1) * 255).astype(np.uint8))
         return frames

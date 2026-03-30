@@ -87,7 +87,7 @@ class Config:
 
     # Token guidance
     use_guidance: bool = True  # enable guidance tokens
-    guidance_prob: float = 1.0  # prob of using guidance each step (0-1, for dropout sweep)
+    guidance_prob: float = 0.5  # prob of using guidance each step (0-1, for dropout sweep)
     compress_guidance: bool = False  # compress via perceiver latents
     num_guidance_latents: int = 4  # latent count when compress=True
     guide_keys: tuple[str, ...] = ("action.position", "action.orientation")  # dot-paths into batch for guidance signal
@@ -140,6 +140,7 @@ def make_model_config(cfg, max_h, max_a, max_w, guide_dim=None):
         "lowdim": ModuleSpec.create(
             LowdimObsTokenizer,
             obs_keys=list(cfg.obs_keys),
+            dropout_rate=0.2,
         ),
     }
     if cfg.use_vision:

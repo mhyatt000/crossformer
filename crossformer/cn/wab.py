@@ -44,6 +44,10 @@ class Wandb(CN):
         m = WandbMode.DISABLED if not use else WandbMode.ONLINE
         return m.value
 
+    def finish(self):
+        if self.use:
+            wandb.finish()
+
     def log(self, info: dict, step: int | None = None, sep="/"):
         kwargs = {"step": step} if step is not None else {}
         wandb.log(flatten_dict(info, sep=sep), **kwargs)

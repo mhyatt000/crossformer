@@ -6,6 +6,11 @@ roadmap once completed.
 
 # STEERING
 
+## searching code efficiently
+
+prefer grep/rg with -C `n-lines` to get relevant surrounding context with no token waste.
+avoid reading entire files when you only need a specific function or block.
+
 ## running code and iterative debugging
 
 in general, after making a change, run at least one of [a] an existing script. [b] a new throwaway script or REPL
@@ -16,6 +21,13 @@ case it is better to ask the human if you should run or pipe to a *.log file. si
 guidance if the script will take a long time to run (2+min) such as training for a long time.
 
 # SURPRISES
+
+## dof_ids are ground truth for slot ordering
+
+action slots from the grain pipeline are NOT in canonical joint order (j0..j6).
+`dof_ids` (from `act.id`) is the ground truth for which DOF is in which slot.
+any code that consumes actions by position (rasterization, denormalization by offset,
+FK, etc.) must use `dof_ids` to map slots to the correct DOF — never assume `[:7]` = j0..j6.
 
 ## uvx tools
 
