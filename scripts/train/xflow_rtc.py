@@ -1,12 +1,10 @@
 """End-to-end XFlowHead training: CrossFormerModel + real data.
-
-Bundled action format: uses act.base / act.id from the grain embody
-pipeline instead of per-head action extraction.
+RTC integration: rtc_predict_action + offline rollout evaluation.
 
 Usage:
-    uv run scripts/train/xflow.py
-    uv run scripts/train/xflow.py --steps 500 --lr 3e-4
-    uv run scripts/train/xflow.py --mix xgym_sweep --batch-size 4
+    uv run scripts/train/xflow_rtc.py
+    uv run scripts/train/xflow_rtc.py --steps 500 --lr 3e-4
+    uv run scripts/train/xflow_rtc.py --mix xgym_sweep --batch-size 4
 """
 
 from __future__ import annotations
@@ -33,6 +31,7 @@ from crossformer.data.grain.embody import decode_embody_name
 from crossformer.model.components.guidance import TokenGuidance
 from crossformer.model.components.heads.dof import build_query_mask
 from crossformer.model.components.heads.xflow import XFlowHead
+from crossformer.model.components.heads.xflow_rtc import rtc_predict_action
 from crossformer.model.components.tokenizers import LowdimObsTokenizer
 from crossformer.model.components.transformer import common_transformer_sizes
 from crossformer.model.crossformer_model import CrossFormerModel
@@ -42,8 +41,6 @@ from crossformer.utils.spec import ModuleSpec, spec
 from crossformer.utils.train_utils import Timer, TrainState
 from crossformer.utils.tree.core import flat
 import wandb
-
-from crossformer.model.components.heads.xflow_rtc import rtc_predict_action
 
 # -- config -------------------------------------------------------------------
 
@@ -67,6 +64,12 @@ class Config:
     compress_guidance: bool = False  # compress via perceiver latents
     num_guidance_latents: int = 4  # latent count when compress=True
     guide_key: str = "action.pose"  # dot-path into batch for guidance signal
+
+    # RTC config
+    rtc_d: int = 4        # inference delay in controller steps
+    rtc_s: int = 8        # execution horizon — must satisfy d <= s <= horizon - d
+    rtc_beta: float = 5.0 # guidance weight clipping
+    rollout_steps: int = 8 # offline rollout evaluation steps
 
     mp: int = 1  # grain multiproc (for data loading)
     wandb: cn.Wandb = field(default_factory=cn.Wandb)
@@ -133,32 +136,19 @@ def resolve_obs_keys(obs, patterns):
 
 
 def extract_bundled_actions(batch, max_h):
-    """Extract bundled actions from grain embody pipeline.
-
-    Returns:
-        actions: (B, W, H, max_a) — W=1 added if missing.
-        dof_ids: (B, max_a) — from act.id.
-        chunk_steps: (B, H) — just arange(H) for now.
-            NOTE: chunk_steps padding disabled — all positions are valid.
-    """
+    """Extract bundled actions from grain embody pipeline."""
     actions = batch["act"]["base"]  # (B, H, max_a)
     if actions.ndim == 3:
         actions = actions[:, None, :, :]  # (B, 1, H, max_a)
     B = actions.shape[0]
     H = actions.shape[2]
-
     dof_ids = batch["act"]["id"]  # (B, max_a)
-    # NOTE: no chunk_steps padding — just dense arange(H)
     chunk_steps = jnp.tile(jnp.arange(H, dtype=jnp.float32)[None], (B, 1))
-
     return actions, dof_ids, chunk_steps
 
 
 def per_embodiment_metrics(batch, update_info):
-    """Compute per-embodiment loss from sample_mse and act.embody.
-
-    Returns dict like {"embodiment/single": mse, "embodiment/dual_arm": mse, ...}.
-    """
+    """Compute per-embodiment loss from sample_mse and act.embody."""
     embody_arr = np.array(batch["act"]["embody"])  # (B, 32) uint8
     sample_mse = np.array(update_info["sample_mse"])  # (B,)
     names = [decode_embody_name(embody_arr[i]) for i in range(embody_arr.shape[0])]
@@ -214,7 +204,6 @@ def main(cfg: Config):
     obs_keys = resolve_obs_keys(example_batch["observation"], cfg.obs_keys)
     print(f"  obs_keys: {obs_keys}")
 
-    # Get max_a from the bundled action shape
     max_a = example_batch["act"]["id"].shape[-1]
     print(f"  max_h={max_h}  max_a={max_a}")
     print(f"  act.base shape: {example_batch['act']['base'].shape}")
@@ -364,7 +353,9 @@ def main(cfg: Config):
     else:
         print("[bold yellow]loss did not decrease much — check lr or architecture[/]")
 
-    # -- denoise demo: Euler ODE solve -----------------------------------------
+    # -------------------------------------------------------------------------
+    # Inference
+    # -------------------------------------------------------------------------
     print(Rule("predict_action: full denoise"))
 
     batch = next(dsit)
@@ -381,7 +372,6 @@ def main(cfg: Config):
         train=False,
     )
 
-    # Encode guidance tokens for inference
     guide_tokens = None
     if guide_module is not None:
         guide_eval = flat(batch).get(cfg.guide_key)
@@ -395,7 +385,7 @@ def main(cfg: Config):
             )
 
     actions, dof_ids, chunk_steps = extract_bundled_actions(batch, max_h)
-    n_valid = int((dof_ids[0] != 0).sum())  # non-MASK DOFs in first sample
+    n_valid = int((dof_ids[0] != 0).sum())
 
     pred = bound.heads["xflow"].predict_action(
         transformer_outputs,
@@ -406,8 +396,6 @@ def main(cfg: Config):
         guidance_tokens=guide_tokens,
     )  # (B, W, max_h, max_a)
 
-
-    # Compute MSE on valid region
     q_mask = build_query_mask(chunk_steps, dof_ids)
     pred_flat = pred.reshape(pred.shape[0], pred.shape[1], -1)
     tgt_flat = actions.reshape(actions.shape[0], actions.shape[1], -1)
@@ -435,13 +423,10 @@ def main(cfg: Config):
         step=cfg.steps,
     )
 
-
-    # -- RTC demo -------------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # RTC single-step demo
+    # -------------------------------------------------------------------------
     print(Rule("rtc_predict_action: guided denoise"))
-
-    # Sahte önceki chunk olarak mevcut actions'ı kullan
-    d_rtc = 4   # inference delay (adım cinsinden)
-    s_rtc = 8   # execution horizon — d <= s <= max_h - d
 
     rtc_pred = rtc_predict_action(
         bound=bound,
@@ -449,18 +434,18 @@ def main(cfg: Config):
         rng=pred_rng,
         dof_ids=dof_ids,
         chunk_steps=chunk_steps,
-        a_prev=actions,          # (B, W, max_h, max_a) — önceki chunk
-        d=d_rtc,
-        s=s_rtc,
-        beta=5.0,
+        a_prev=actions,   # single-step demo: use GT as a_prev
+        d=cfg.rtc_d,
+        s=cfg.rtc_s,
+        beta=cfg.rtc_beta,
         guidance_tokens=guide_tokens,
     )  # (B, W, max_h, max_a)
 
     rtc_pred_flat = rtc_pred.reshape(rtc_pred.shape[0], rtc_pred.shape[1], -1)
     rtc_sq_err = (rtc_pred_flat - tgt_flat) ** 2 * mask
     rtc_mse = rtc_sq_err.sum() / mask.sum()
-
     rtc_valid = rtc_pred[0, 0, :max_h, :n_valid]
+
     print(f"\n  rtc pred shape: {rtc_pred.shape}  valid DOFs: {n_valid}")
     print(f"  rtc mse (valid): {float(rtc_mse):.4f}")
     print(f"  rtc pred range:  [{float(rtc_valid.min()):.3f}, {float(rtc_valid.max()):.3f}]")
@@ -475,10 +460,84 @@ def main(cfg: Config):
         step=cfg.steps,
     )
 
+    # -------------------------------------------------------------------------
+    # Offline rollout evaluation: baseline vs RTC
+    # -------------------------------------------------------------------------
+    # At each step, feed the predicted chunk back as a_prev (no GT leakage).
+    # Measures error accumulation over time — stability indicator.
+    # -------------------------------------------------------------------------
+    print(Rule("offline rollout evaluation: baseline vs RTC"))
+    print(f"  rollout_steps={cfg.rollout_steps}  d={cfg.rtc_d}  s={cfg.rtc_s}  beta={cfg.rtc_beta}")
 
+    B_r, W_r = actions.shape[0], actions.shape[1]
 
+    # -- Baseline rollout -----------------------------------------------------
+    baseline_mse_per_step = []
+    a_prev_base = jnp.zeros((B_r, W_r, max_h, max_a))
+    rng_base = pred_rng
 
+    for step in range(cfg.rollout_steps):
+        rng_base, step_rng = jax.random.split(rng_base)
+        pred_base = bound.heads["xflow"].predict_action(
+            transformer_outputs,
+            rng=step_rng,
+            dof_ids=dof_ids,
+            chunk_steps=chunk_steps,
+            train=False,
+            guidance_tokens=guide_tokens,
+        )  # (B, W, max_h, max_a)
 
+        pred_base_flat = pred_base.reshape(B_r, W_r, -1)
+        step_mse = float(((pred_base_flat - tgt_flat) ** 2 * mask).sum() / mask.sum())
+        baseline_mse_per_step.append(step_mse)
+        a_prev_base = pred_base  # feed back
+
+    # -- RTC rollout ----------------------------------------------------------
+    rtc_mse_per_step = []
+    a_prev_rtc = jnp.zeros((B_r, W_r, max_h, max_a))
+    rng_rtc = pred_rng  # same seed for fair comparison
+
+    for step in range(cfg.rollout_steps):
+        rng_rtc, step_rng = jax.random.split(rng_rtc)
+        pred_rtc_step = rtc_predict_action(
+            bound=bound,
+            transformer_outputs=transformer_outputs,
+            rng=step_rng,
+            dof_ids=dof_ids,
+            chunk_steps=chunk_steps,
+            a_prev=a_prev_rtc,   # feed back predicted chunk, not GT
+            d=cfg.rtc_d,
+            s=cfg.rtc_s,
+            beta=cfg.rtc_beta,
+            guidance_tokens=guide_tokens,
+        )  # (B, W, max_h, max_a)
+
+        pred_rtc_flat = pred_rtc_step.reshape(B_r, W_r, -1)
+        step_mse = float(((pred_rtc_flat - tgt_flat) ** 2 * mask).sum() / mask.sum())
+        rtc_mse_per_step.append(step_mse)
+        a_prev_rtc = pred_rtc_step  # feed back
+
+    # -- Print table ----------------------------------------------------------
+    print(f"\n  {'step':>4}  {'baseline MSE':>14}  {'RTC MSE':>10}  {'winner':>6}")
+    print(f"  {'-'*4}  {'-'*14}  {'-'*10}  {'-'*6}")
+    for i, (b_mse, r_mse) in enumerate(zip(baseline_mse_per_step, rtc_mse_per_step)):
+        winner = "RTC" if r_mse < b_mse else "base"
+        print(f"  {i:>4}  {b_mse:>14.4f}  {r_mse:>10.4f}  {winner:>6}")
+
+    print(f"\n  final MSE — baseline: {baseline_mse_per_step[-1]:.4f}  RTC: {rtc_mse_per_step[-1]:.4f}")
+
+    # -- Log to wandb ---------------------------------------------------------
+    cfg.wandb.log(
+        {
+            "rollout_eval": {
+                "baseline_mse": baseline_mse_per_step,
+                "rtc_mse": rtc_mse_per_step,
+                "baseline_final_mse": baseline_mse_per_step[-1],
+                "rtc_final_mse": rtc_mse_per_step[-1],
+            }
+        },
+        step=cfg.steps,
+    )
 
     print("\n[bold green]done.[/]")
     run.finish()
