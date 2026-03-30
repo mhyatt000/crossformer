@@ -22,6 +22,13 @@ guidance if the script will take a long time to run (2+min) such as training for
 
 # SURPRISES
 
+## dof_ids are ground truth for slot ordering
+
+action slots from the grain pipeline are NOT in canonical joint order (j0..j6).
+`dof_ids` (from `act.id`) is the ground truth for which DOF is in which slot.
+any code that consumes actions by position (rasterization, denormalization by offset,
+FK, etc.) must use `dof_ids` to map slots to the correct DOF — never assume `[:7]` = j0..j6.
+
 ## uvx tools
 
 uv is first class for environment, but use uvx to install and use ruff, pre-commit, etc
