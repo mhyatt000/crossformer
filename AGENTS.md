@@ -6,6 +6,15 @@ roadmap once completed.
 
 # STEERING
 
+## debugging strategy
+
+binary search in code. when tracking a bug or verifying a property, narrow
+the search space in half each step — comment out half the pipeline, add an
+assert mid-call-chain, or bisect the data. one well-placed check that halves
+the remaining candidates is very efficient. also: don't be shy about adding
+lots of print statements throughout a call chain — seeing shapes, dtypes,
+and values at every stage is a fast way to spot where things go wrong.
+
 ## searching code efficiently
 
 prefer grep/rg with -C `n-lines` to get relevant surrounding context with no token waste.
