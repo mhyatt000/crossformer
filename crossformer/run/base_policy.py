@@ -51,7 +51,8 @@ class CorePolicy(BasePolicy):
 
     def reset(self, payload: dict | None = None) -> dict:
         if payload is None:
-            self.task = None
+            # issue/59: fall back to checkpoint default, not empty dict
+            self.task = jax.tree.map(lambda x: jax.device_put(jnp.asarray(x)), self.model.example_batch["task"])
             return {"reset": True}
 
         if "goal" in payload:
@@ -73,6 +74,9 @@ class CorePolicy(BasePolicy):
         if payload.get("reset", False):
             return self.reset(payload)
 
+        if "task" in payload:
+            self.task = jax.tree.map(lambda x: jax.device_put(jnp.asarray(x)), payload["task"])
+
         obs = payload.get("observation", payload)
         obs = jax.tree.map(lambda x: jax.device_put(jnp.asarray(x)), obs)
 
@@ -82,6 +86,8 @@ class CorePolicy(BasePolicy):
                 raise ValueError("XFlowHead requires 'dof_ids' and 'chunk_steps' in payload")
             kwargs["dof_ids"] = jnp.asarray(payload["dof_ids"])[None]
             kwargs["chunk_steps"] = jnp.asarray(payload["chunk_steps"])[None]
+        if "guide_input" in payload and payload["guide_input"] is not None:
+            kwargs["guide_input"] = jnp.asarray(payload["guide_input"])
 
         self.rng, key = jax.random.split(self.rng)
         actions = self.model.sample_actions(
@@ -109,4 +115,3 @@ class CorePolicy(BasePolicy):
             batch["chunk_steps"] = np.arange(head.max_horizon, dtype=np.float32)
         for _ in range(n):
             self.step(batch)
-        self.task = None
