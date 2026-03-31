@@ -13,6 +13,7 @@ from webpolicy.base_policy import BasePolicy
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.run.base_policy import CorePolicy
 from crossformer.run.wrappers import (
+    BodyPartGroupWrapper,
     DtypeGuardWrapper,
     EnsemblerWrapper,
     HistoryWrapper,
@@ -294,12 +295,8 @@ class Policy(BasePolicy):
         return {"actions": self.emsembler(actions[: self.cfg.chunk])}
 
 
-def build_policy_v2(cfg: PolicyV2Config) -> BasePolicy:
-    """Compose a CorePolicy with configurable wrappers from PolicyV2Config."""
-    ds_name = TASKS[cfg.task]["dataset_name"]
-    core = CorePolicy(cfg.path, step=cfg.step, head_name=cfg.head_name)
-    stats = core.model.dataset_statistics
-
+def _wrap_preprocess_policy_v2(cfg: PolicyV2Config, core: CorePolicy, stats: dict, ds_name: str) -> BasePolicy:
+    """Apply observation-side PolicyV2 wrappers to the core policy."""
     policy: BasePolicy = core
 
     if cfg.dtype_guard:
@@ -318,6 +315,13 @@ def build_policy_v2(cfg: PolicyV2Config) -> BasePolicy:
     if cfg.history > 1:
         policy = HistoryWrapper(policy, cfg.history)
 
+    return policy
+
+
+def _wrap_postprocess_policy_v2(
+    cfg: PolicyV2Config, core: CorePolicy, stats: dict, ds_name: str, policy: BasePolicy
+) -> BasePolicy:
+    """Apply action-side PolicyV2 wrappers to the policy."""
     if cfg.denorm:
         if core.is_xflow:
             policy = XFlowDenormWrapper(policy, stats, ds_name)
@@ -327,7 +331,19 @@ def build_policy_v2(cfg: PolicyV2Config) -> BasePolicy:
     if cfg.ensemble:
         policy = EnsemblerWrapper(policy, cfg.exp, cfg.chunk, cfg.chunk)
 
+    if core.is_xflow:
+        policy = BodyPartGroupWrapper(policy)
+
     if cfg.warmup:
         core.warmup()
 
     return policy
+
+
+def build_policy_v2(cfg: PolicyV2Config) -> BasePolicy:
+    """Compose a CorePolicy with configurable wrappers from PolicyV2Config."""
+    ds_name = TASKS[cfg.task]["dataset_name"]
+    core = CorePolicy(cfg.path, step=cfg.step, head_name=cfg.head_name)
+    stats = core.model.dataset_statistics
+    policy = _wrap_preprocess_policy_v2(cfg, core, stats, ds_name)
+    return _wrap_postprocess_policy_v2(cfg, core, stats, ds_name, policy)

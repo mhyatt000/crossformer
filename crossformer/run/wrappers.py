@@ -9,9 +9,33 @@ import jax.numpy as jnp
 import numpy as np
 from webpolicy.base_policy import BasePolicy
 
-from crossformer.embody import MASK_ID
+from crossformer.embody import DOF, MASK_ID
 from crossformer.utils.callbacks.viz import ActionBatchDenormalizer
 from crossformer.utils.tree.core import drop_fn
+
+# ---------------------------------------------------------------------------
+# DOF ID -> body-part group reverse mapping
+# ---------------------------------------------------------------------------
+
+_BODYPART_GROUPS: dict[str, tuple[str, ...]] = {
+    "joints": ("j0", "j1", "j2", "j3", "j4", "j5", "j6"),
+    "gripper": ("gripper",),
+    "position": ("ee_x", "ee_y", "ee_z"),
+    "orientation": ("ee_rx", "ee_ry", "ee_rz"),
+    "hand": tuple(f"hand_j{i}" for i in range(16)),
+    "base": ("base_vx", "base_vy", "base_wz"),
+    "mano": tuple(f"mano_{i}" for i in range(7)),
+    "keypoints_3d": tuple(f"k3d_{i}" for i in range(84)),
+    "kp_chain": tuple(
+        f"kp_{loc}_{ax}"
+        for loc in ["base", "j0", "j1", "j2", "j3", "j4", "j5", "j6", "grip_l", "grip_r"]
+        for ax in ["x", "y", "z"]
+    ),
+    "fingertips": tuple(f"ftip_{i}" for i in range(15)),
+    "finger_joints": tuple(f"fjoint_{i}" for i in range(45)),
+}
+
+_DOF_ID_TO_GROUP: dict[int, str] = {DOF[name]: group for group, names in _BODYPART_GROUPS.items() for name in names}
 
 
 class PolicyWrapper(BasePolicy, abc.ABC):
@@ -19,6 +43,13 @@ class PolicyWrapper(BasePolicy, abc.ABC):
 
     def __init__(self, inner: BasePolicy):
         self.inner = inner
+
+    def unwrapped(self) -> BasePolicy:
+        """Return the innermost (non-wrapper) policy."""
+        p = self.inner
+        while isinstance(p, PolicyWrapper):
+            p = p.inner
+        return p
 
     def reset(self, payload: dict | None = None) -> dict | None:
         return self.inner.reset(payload) if payload else self.inner.reset()
@@ -299,3 +330,35 @@ class HistoryWrapper(PolicyWrapper):
             obs = _stack_and_pad(self.history, self.num_obs)
         payload = {**payload, "observation": obs}
         return payload
+
+
+class BodyPartGroupWrapper(PolicyWrapper):
+    """Group flat action vectors into a dict keyed by body-part name."""
+
+    def postprocess(self, payload: dict, result: dict) -> dict:
+        if "actions" not in result:
+            return result
+        dof_ids = result.get("dof_ids", payload.get("dof_ids"))
+        if dof_ids is None:
+            return result
+
+        dof_ids = np.asarray(dof_ids).reshape(-1)
+        actions = result["actions"]
+        flat = actions.ndim == 1
+
+        grouped: dict[str, list[int]] = {}
+        for slot, did in enumerate(dof_ids):
+            did = int(did)
+            if did == MASK_ID:
+                continue
+            group = _DOF_ID_TO_GROUP.get(did)
+            if group is None:
+                continue
+            grouped.setdefault(group, []).append(slot)
+
+        if flat:
+            out = {name: actions[slots] for name, slots in grouped.items()}
+        else:
+            out = {name: actions[:, slots] for name, slots in grouped.items()}
+
+        return {**result, "actions": out}
