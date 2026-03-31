@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 from collections import deque
+from typing import ClassVar
 
 import jax
 import jax.numpy as jnp
@@ -32,6 +33,97 @@ class PolicyWrapper(BasePolicy, abc.ABC):
 
     def postprocess(self, payload: dict, result: dict) -> dict:
         return result
+
+
+class DtypeGuardWrapper(PolicyWrapper):
+    """Reject non-numeric leaves before they reach the model's jnp.asarray.
+
+    Walks the observation (and task) trees, printing a spec of any leaf
+    whose dtype is non-numeric (e.g. strings, objects) and raising
+    ``TypeError`` with the offending paths.
+
+    Toggle via the ``enabled`` flag so it can be cheaply disabled in prod.
+    """
+
+    _NUMERIC_KINDS: ClassVar[set[str]] = set("biufcBIUFC")  # bool, int, uint, float, complex
+
+    def __init__(self, inner: BasePolicy, *, enabled: bool = True):
+        super().__init__(inner)
+        self.enabled = enabled
+
+    def preprocess(self, payload: dict) -> dict:
+        if not self.enabled:
+            return payload
+        bad: list[str] = []
+        for top_key in ("observation", "task"):
+            tree = payload.get(top_key)
+            if tree is None:
+                continue
+            self._check(tree, prefix=top_key, bad=bad)
+        if bad:
+            bad = "\n  ".join(bad)
+            raise TypeError(f"Non-numeric leaves found in payload — cannot convert to JAX array:\n  {bad}")
+        return payload
+
+    def _check(self, tree, *, prefix: str, bad: list[str]):
+        if isinstance(tree, dict):
+            for k, v in tree.items():
+                self._check(v, prefix=f"{prefix}.{k}", bad=bad)
+        elif isinstance(tree, (list, tuple)):
+            for i, v in enumerate(tree):
+                self._check(v, prefix=f"{prefix}[{i}]", bad=bad)
+        else:
+            arr = np.asarray(tree)
+            if arr.dtype.kind not in self._NUMERIC_KINDS:
+                bad.append(f"{prefix}: dtype={arr.dtype}, shape={arr.shape}, value={arr.flat[0]!r}")
+
+
+class ObsPaddingWrapper(PolicyWrapper):
+    """Zero-fill missing observation keys so the payload matches the checkpoint.
+
+    Missing keys get zeros with the same shape/dtype as ``example_obs``,
+    and their ``pad_mask_dict`` entry is set to all-False (masked out).
+    Extra keys in the payload that aren't in the checkpoint raise ValueError.
+    """
+
+    def __init__(self, inner: BasePolicy, example_obs: dict):
+        super().__init__(inner)
+        self.example_obs = example_obs
+
+    def preprocess(self, payload: dict) -> dict:
+        obs = payload.get("observation")
+        if obs is None:
+            return payload
+
+        expected = set(self.example_obs)
+        got = set(obs)
+        extra = got - expected - {"pad_mask_dict"}
+        if extra:
+            raise ValueError(f"Unexpected observation keys not in checkpoint: {extra}")
+
+        missing = expected - got - {"pad_mask_dict", "timestep_pad_mask"}
+
+        obs = {**obs}
+
+        # timestep_pad_mask: ones (all valid) when absent
+        if "timestep_pad_mask" not in obs and "timestep_pad_mask" in self.example_obs:
+            obs["timestep_pad_mask"] = np.ones_like(np.asarray(self.example_obs["timestep_pad_mask"]))
+
+        # zero-fill genuinely missing observation keys
+        for key in missing:
+            if key == "pad_mask_dict":
+                continue
+            obs[key] = np.zeros_like(np.asarray(self.example_obs[key]))
+
+        # pad_mask_dict: ones for keys the caller provided, zeros for missing
+        example_pad = self.example_obs.get("pad_mask_dict", {})
+        pad = dict(obs.get("pad_mask_dict", {}))
+        for pk in example_pad:
+            if pk not in pad:
+                fill = np.ones_like if pk in got else np.zeros_like
+                pad[pk] = fill(np.asarray(example_pad[pk]))
+        obs["pad_mask_dict"] = pad
+        return {**payload, "observation": obs}
 
 
 class LegacyDenormWrapper(PolicyWrapper):
