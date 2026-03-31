@@ -239,6 +239,24 @@ KP_FINGER_JOINTS = BodyPart(
 BASE_2D = BodyPart("base_2d", ("base_vx", "base_vy", "base_wz"), Frame.RELATIVE, PartKind.SPATIAL2D)
 
 
+def _build_no_norm_ids() -> frozenset[int]:
+    """DOF IDs that should NOT be denormalized, from BodyPart.norm_mask."""
+    import sys
+
+    skip: set[int] = set()
+    module = sys.modules[__name__]
+    for v in vars(module).values():
+        if not isinstance(v, BodyPart):
+            continue
+        for dof_name, should_norm in zip(v.dof_names, v.action_norm_mask):
+            if not should_norm:
+                skip.add(DOF[dof_name])
+    return frozenset(skip)
+
+
+NO_NORM_DOF_IDS: frozenset[int] = _build_no_norm_ids()
+
+
 # ---------------------------------------------------------------------------
 # Embodiment
 # ---------------------------------------------------------------------------
