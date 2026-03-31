@@ -245,6 +245,8 @@ def make_single_dataset(
             # unsqueeze proprio horizon dim to 1
             # in the current state of data transforms, we dont use many horizon steps
             # code still expects horizon dim
+            if not fnmatch.filter(flat(x).keys(), "observation.proprio.*"):
+                return x
             return do_fn_key(x, "observation.proprio.*", lambda y: y[None])
 
         ds = ds.map(unsqueeze_img_horizon)
