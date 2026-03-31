@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 from webpolicy.base_policy import BasePolicy
 
+from crossformer.model.components.heads.dof import pad_chunk_steps, pad_dof_ids
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.run.wrappers import _resize
 
@@ -84,8 +85,11 @@ class CorePolicy(BasePolicy):
         if self.is_xflow:
             if "dof_ids" not in payload or "chunk_steps" not in payload:
                 raise ValueError("XFlowHead requires 'dof_ids' and 'chunk_steps' in payload")
-            kwargs["dof_ids"] = jnp.asarray(payload["dof_ids"])[None]
-            kwargs["chunk_steps"] = jnp.asarray(payload["chunk_steps"])[None]
+            head = self.model.module.bind({"params": self.model.params}).heads[self.head_name]
+            dof_ids = tuple(int(x) for x in np.asarray(payload["dof_ids"]).reshape(-1))
+            chunk_steps = tuple(float(x) for x in np.asarray(payload["chunk_steps"]).reshape(-1))
+            kwargs["dof_ids"] = jnp.asarray(pad_dof_ids(dof_ids, head.max_dofs))[None]
+            kwargs["chunk_steps"] = jnp.asarray(pad_chunk_steps(chunk_steps, head.max_horizon))[None]
         if "guide_input" in payload and payload["guide_input"] is not None:
             kwargs["guide_input"] = jnp.asarray(payload["guide_input"])
 
