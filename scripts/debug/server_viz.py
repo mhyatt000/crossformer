@@ -1,9 +1,8 @@
-"""Forward-pass visualization: load data, run CorePolicy, rasterize actions, log to wandb.
+"""Forward-pass visualization: load data, run PolicyV2, rasterize actions, log to wandb.
 
 Loads dataset samples (batch_size=1, mp=0), runs forward pass through
-build_policy_v2 (no preprocessing — grain data is already normalized),
-denormalizes predicted joint actions, and renders robot silhouettes via
-RastCallback.
+build_policy_v2 (with obs_pad + denorm wrappers), and renders robot
+silhouettes via RastCallback.
 
 Usage:
     uv run scripts/debug/server_viz.py \
@@ -20,7 +19,6 @@ from functools import partial
 from pathlib import Path
 
 import jax
-import jax.numpy as jnp
 from jax.sharding import Mesh
 import numpy as np
 from rich import print
@@ -33,8 +31,10 @@ from crossformer.cn.dataset.dataset import Loader
 from crossformer.cn.wab import Wandb
 from crossformer.data.grain.loader import GrainDataFactory
 from crossformer.embody import DOF
+from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.run.server import build_policy_v2, PolicyV2Config, TASKS
 from crossformer.run.train_step import lookup_guide
+from crossformer.run.wrappers import BodyPartGroupWrapper
 from crossformer.utils.callbacks.rast import RastCallback
 from crossformer.utils.callbacks.viz import ActionBatchDenormalizer
 from crossformer.utils.spec import spec
@@ -47,10 +47,17 @@ JOINT_ID_TO_IDX = {dof_id: i for i, dof_id in enumerate(JOINT_IDS)}
 
 @dataclass
 class Config:
-    path: str
-    task: str
+    path: str = ""  # checkpoint path (required for local, needed for GT denorm with remote)
+    task: str = "sweep"  # task name (must match TASKS dict)
     step: int | None = None
     name: str = ""
+
+    # remote — if set, use websocket client instead of local policy
+    host: str | None = None
+    port: int = 8001
+
+    # serve — if set, wrap as a policy server on this port
+    serve_port: int | None = None
 
     mix: str = "xgym_sweep_single"
     n_samples: int = 8
@@ -77,20 +84,67 @@ def shard_batch(batch, mesh):
     return batch
 
 
-def fill_missing_obs(obs: dict, example_obs: dict) -> dict:
-    """Fill missing observation keys from example_batch (zeros) and mask them out."""
-    out = {k: dict(v) if isinstance(v, dict) else v for k, v in obs.items()}
-    pad = out.get("pad_mask_dict", {})
+class ReplayPolicy:
+    """Wraps a policy + dataset iterator. Ignores incoming obs, returns dataset obs + predicted actions."""
 
-    for key, example_value in example_obs.items():
-        if key == "pad_mask_dict":
-            for pk, pv in example_value.items():
-                if pk not in pad:
-                    pad[pk] = np.zeros_like(np.asarray(pv))  # False — masked out
-            out["pad_mask_dict"] = pad
-        elif key not in out:
-            out[key] = np.zeros_like(np.asarray(example_value))
-    return out
+    def __init__(self, policy, dsit, denorm, ds_name, guide_keys, no_guide):
+        self.policy = policy
+        self.dsit = dsit
+        self.denorm = denorm
+        self.ds_name = ds_name
+        self.guide_keys = guide_keys
+        self.no_guide = no_guide
+
+    def step(self, obs: dict) -> dict:
+        batch = jax.device_get(next(self.dsit))
+        act = np.asarray(batch["act"]["base"], dtype=np.float32)
+        dof_ids = np.asarray(batch["act"]["id"])
+        task = batch.get("task", {"pad_mask_dict": {}})
+        H = act.shape[1]
+        chunk_steps = np.arange(H, dtype=np.float32)
+
+        guide_input = None
+        if not self.no_guide:
+            with contextlib.suppress(KeyError):
+                guide_input = lookup_guide(batch, self.guide_keys)
+
+        self.policy.reset()
+        payload = {
+            "observation": batch["observation"],
+            "task": task,
+            "dof_ids": dof_ids[0],
+            "chunk_steps": chunk_steps,
+            "guide_input": guide_input,
+        }
+        payload = jax.tree.map(lambda x: np.asarray(x) if hasattr(x, "shape") else x, payload)
+        obs_keys = sorted(payload["observation"].keys())
+        has_pmd = "pad_mask_dict" in payload["observation"]
+        print(f"[CLIENT] sending obs keys: {obs_keys}")
+        print(f"[CLIENT] has pad_mask_dict: {has_pmd}")
+        if has_pmd:
+            pmd = payload["observation"]["pad_mask_dict"]
+            print(f"[CLIENT] pad_mask_dict values: {{{', '.join(f'{k}: {v}' for k, v in pmd.items())}}}")
+        result = self.policy.step(payload)
+
+        pred_ids = np.asarray(result.get("dof_ids", dof_ids[0]))
+        gt_ids = dof_ids[0]
+        gt_joints = slots_to_joints(act[0], gt_ids)
+        gt_joints = np.stack(
+            [
+                self.denorm.denormalize_slot(gt_joints[t], np.array(JOINT_IDS), self.ds_name)
+                for t in range(len(gt_joints))
+            ]
+        )
+
+        return {
+            "observation": batch["observation"],
+            "actions": result["actions"],
+            "gt_actions": gt_joints,
+            "dof_ids": pred_ids,
+        }
+
+    def reset(self):
+        pass
 
 
 def slots_to_joints(arr: np.ndarray, dof_ids: np.ndarray) -> np.ndarray:
@@ -101,6 +155,16 @@ def slots_to_joints(arr: np.ndarray, dof_ids: np.ndarray) -> np.ndarray:
         if dst is not None:
             out[..., dst] = arr[..., src]
     return out
+
+
+def action_joints(actions, dof_ids: np.ndarray) -> np.ndarray:
+    """Extract joint actions from flat or grouped policy output."""
+    if isinstance(actions, dict):
+        if "joints" not in actions:
+            keys = ", ".join(sorted(actions))
+            raise KeyError(f"Expected grouped actions to contain 'joints', got: {keys}")
+        return np.asarray(actions["joints"], dtype=np.float32)
+    return slots_to_joints(np.asarray(actions), dof_ids)
 
 
 def main(cfg: Config):
@@ -118,32 +182,45 @@ def main(cfg: Config):
         seed=42,
         verbosity=0,
     )
-    dataset = GrainDataFactory(mp=0).make(
+    dataset = GrainDataFactory(mp=0, shuffle=False).make(
         train_cfg,
         shard_fn=partial(shard_batch, mesh=mesh),
         train=True,
     )
     dsit = iter(dataset.dataset)
 
-    # -- policy (bare CorePolicy — no preprocessing, no ensembler) --
-    policy = build_policy_v2(
-        PolicyV2Config(
-            path=cfg.path,
-            task=cfg.task,
-            step=cfg.step,
-            resize=False,
-            proprio_norm=False,
-            ensemble=False,
-            denorm=False,
-            warmup=False,
+    # -- policy (local or remote) --
+    if cfg.host is not None:
+        from webpolicy.client import Client
+
+        policy = Client(host=cfg.host, port=cfg.port)
+    else:
+        policy = build_policy_v2(
+            PolicyV2Config(
+                path=cfg.path,
+                task=cfg.task,
+                step=cfg.step,
+                obs_pad=True,
+                resize=False,
+                proprio_norm=False,
+                ensemble=False,
+                denorm=True,
+                warmup=False,
+            )
         )
-    )
+        # server_viz rasterizes canonical joints from flat slot actions using
+        # dof_ids. Strip the outer grouping wrapper added by build_policy_v2.
+        if isinstance(policy, BodyPartGroupWrapper):
+            policy = policy.inner
 
-    example_obs = jax.device_get(policy.model.example_batch["observation"])
     ds_name = TASKS[cfg.task]["dataset_name"]
-    denorm = ActionBatchDenormalizer(policy.model.dataset_statistics)
-
-    print(spec(example_obs))
+    # GT denorm needs dataset stats — load from checkpoint even when using remote policy
+    if hasattr(policy, "unwrapped"):
+        stats = policy.unwrapped().model.dataset_statistics
+    else:
+        model = CrossFormerModel.load_pretrained(cfg.path, step=cfg.step)
+        stats = model.dataset_statistics
+    denorm = ActionBatchDenormalizer(stats)
 
     # -- rast callback (lazy init — needs CUDA) --
     rast_cb = None
@@ -166,6 +243,16 @@ def main(cfg: Config):
         }
     )
 
+    # -- serve mode: wrap as a policy server --
+    if cfg.serve_port is not None:
+        from webpolicy.server import Server
+
+        replay = ReplayPolicy(policy, dsit, denorm, ds_name, cfg.guide_keys, cfg.no_guide)
+        server = Server(replay, host="0.0.0.0", port=cfg.serve_port)
+        print(f"serving replay policy on 0.0.0.0:{cfg.serve_port}")
+        server.serve()
+        return
+
     for i in range(cfg.n_samples):
         batch = jax.device_get(next(dsit))
         act = np.asarray(batch["act"]["base"], dtype=np.float32)  # (1, H, A)
@@ -174,44 +261,40 @@ def main(cfg: Config):
         H = act.shape[1]
         chunk_steps = np.arange(H, dtype=np.float32)
 
-        policy.reset()
-        policy.task = task
-
-        obs = fill_missing_obs(batch["observation"], example_obs)
-        if i == 0:
-            print(spec(obs))
-
-        # forward pass — call transformer + head directly (like xflow.py) for guide_input
-        obs_jax = jax.tree.map(lambda x: jax.device_put(jnp.asarray(x)), obs)
-        task_jax = jax.tree.map(lambda x: jax.device_put(jnp.asarray(x)), task)
-        pad_mask = obs_jax["timestep_pad_mask"]
-
         guide_input = None
         if not cfg.no_guide:
             with contextlib.suppress(KeyError):
                 guide_input = lookup_guide(batch, cfg.guide_keys)
 
-        bound = policy.model.module.bind({"params": policy.model.params})
-        transformer_outputs = bound.crossformer_transformer(obs_jax, task_jax, pad_mask, train=False)
+        # -- forward pass via policy.step --
+        policy.reset()
+        payload = {
+            "observation": batch["observation"],
+            "task": task,
+            "dof_ids": dof_ids[0],
+            "chunk_steps": chunk_steps,
+            "guide_input": guide_input,
+        }
+        # webpolicy Client uses msgpack which can't serialize JAX arrays
+        payload = jax.tree.map(lambda x: np.asarray(x) if hasattr(x, "shape") else x, payload)
+        obs_keys = sorted(payload["observation"].keys())
+        has_pmd = "pad_mask_dict" in payload["observation"]
+        print(f"[CLIENT] sending obs keys: {obs_keys}")
+        print(f"[CLIENT] has pad_mask_dict: {has_pmd}")
+        if has_pmd:
+            pmd = payload["observation"]["pad_mask_dict"]
+            print(f"[CLIENT] pad_mask_dict values: {{{', '.join(f'{k}: {v}' for k, v in pmd.items())}}}")
+        result = policy.step(payload)
+        pred_actions = result["actions"]  # (H, A) — already denormalized
 
-        policy.rng, key = jax.random.split(policy.rng)
-        pred = bound.heads[policy.head_name].predict_action(
-            transformer_outputs,
-            rng=key,
-            dof_ids=jnp.asarray(dof_ids),
-            chunk_steps=jnp.asarray(chunk_steps)[None],
-            train=False,
-            guide_input=guide_input,
-        )
-        pred_actions = np.asarray(jax.device_get(pred))[0, -1]  # (H, A) — drop batch + window
+        if i == 0:
+            print(spec(batch["observation"]))
 
-        # remap to j0..j6 canonical order, then denormalize
-        ids = dof_ids[0]
-        pred_joints = slots_to_joints(pred_actions, ids)
-        gt_joints = slots_to_joints(act[0], ids)
-        pred_joints = np.stack(
-            [denorm.denormalize_slot(pred_joints[t], np.array(JOINT_IDS), ds_name) for t in range(len(pred_joints))]
-        )
+        # remap to j0..j6 canonical order for rendering
+        pred_ids = np.asarray(result.get("dof_ids", dof_ids[0]))
+        gt_ids = dof_ids[0]
+        pred_joints = action_joints(pred_actions, pred_ids)
+        gt_joints = slots_to_joints(act[0], gt_ids)
         gt_joints = np.stack(
             [denorm.denormalize_slot(gt_joints[t], np.array(JOINT_IDS), ds_name) for t in range(len(gt_joints))]
         )
@@ -229,7 +312,8 @@ def main(cfg: Config):
                 print(f"[yellow]rast skipped (no CUDA): {e}[/]")
                 rast_cb = None
         cfg.wandb.log(log, step=i)
-        print(f"sample {i}: pred {pred_actions.shape} gt {gt_joints.shape}")
+        pred_shape = pred_joints.shape if isinstance(pred_actions, dict) else pred_actions.shape
+        print(f"sample {i}: pred {pred_shape} gt {gt_joints.shape}")
 
     if cfg.wandb.use:
         wandb.finish()
