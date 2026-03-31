@@ -264,6 +264,7 @@ class GrainDataFactory:
 
     stats: dict[str, Any] = field(init=False, default_factory=dict)
     mp: int = 8  # of processes for mp prefetch. set to 0 to disable mp prefetch
+    shuffle: bool = True
 
     def source2ds(self, dconfig, tfconfig, cfg: cn.Train, dataset: Arec, max_a: int = 0) -> GrainDataLoader:
         ds, stats = make_single_dataset(
@@ -345,7 +346,9 @@ class GrainDataFactory:
             dsets = [self.source2ds(dc, tc, cfg, dataset=m, max_a=max_a) for (s, dc, tc), m in zip(sources, mix)]
             ds = self.pad_and_mix(dsets)
 
-        ds = ds.seed(cfg.seed).shuffle()  # shuffle before iter
+        ds = ds.seed(cfg.seed)
+        if self.shuffle:
+            ds = ds.shuffle()  # shuffle before iter
         ds = ds.repeat() if train else ds  # repeat before iter ... repeat after shuffle
         ds = (
             ds.map(add_mask)
