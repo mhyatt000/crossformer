@@ -126,6 +126,9 @@ VISION_ENCODERS = {
 JOINT_NAMES = tuple(f"j{i}" for i in range(7))
 JOINT_IDS = tuple(DOF[name] for name in JOINT_NAMES)
 JOINT_ID_TO_IDX = {dof_id: i for i, dof_id in enumerate(JOINT_IDS)}
+RAST_NAMES = (*JOINT_NAMES, "gripper")
+RAST_IDS = tuple(DOF[name] for name in RAST_NAMES)
+RAST_ID_TO_IDX = {dof_id: i for i, dof_id in enumerate(RAST_IDS)}
 
 
 def make_model_config(cfg, max_h, max_a, max_w, guide_dim=None):
@@ -233,8 +236,8 @@ def zero_lowdim_obs(obs, obs_keys):
     return out
 
 
-def adapt_viz_batch(act, flow):
-    """Map bundled actions to canonical j0..j6 order for VizCallback."""
+def adapt_canonical_batch(act, flow, dof_id_to_idx):
+    """Map bundled slot actions to a canonical DOF order."""
     base = np.asarray(act["base"], dtype=np.float32)
     dof_ids = np.asarray(act["id"])
     flow = np.asarray(flow, dtype=np.float32)
@@ -250,18 +253,19 @@ def adapt_viz_batch(act, flow):
         raise ValueError(f"Batch mismatch: base={base.shape} flow={flow.shape} dof_ids={dof_ids.shape}")
 
     keep = []
-    base_joint = np.zeros((*base.shape[:-1], len(JOINT_IDS)), dtype=np.float32)
-    flow_joint = np.zeros((*flow.shape[:-1], len(JOINT_IDS)), dtype=np.float32)
+    out_dim = len(dof_id_to_idx)
+    base_joint = np.zeros((*base.shape[:-1], out_dim), dtype=np.float32)
+    flow_joint = np.zeros((*flow.shape[:-1], out_dim), dtype=np.float32)
     for b, row in enumerate(dof_ids):
-        has_joint = False
+        has_target = False
         for src, dof_id in enumerate(row):
-            dst = JOINT_ID_TO_IDX.get(int(dof_id))
+            dst = dof_id_to_idx.get(int(dof_id))
             if dst is None:
                 continue
-            has_joint = True
+            has_target = True
             base_joint[b, ..., dst] = base[b, ..., src]
             flow_joint[:, b, ..., dst] = flow[:, b, ..., src]
-        if has_joint:
+        if has_target:
             keep.append(b)
 
     if not keep:
@@ -271,6 +275,16 @@ def adapt_viz_batch(act, flow):
         "act": {"base": base_joint[keep]},
         "predict": flow_joint[:, keep],
     }, keep
+
+
+def adapt_viz_batch(act, flow):
+    """Map bundled actions to canonical j0..j6 order for VizCallback."""
+    return adapt_canonical_batch(act, flow, JOINT_ID_TO_IDX)
+
+
+def adapt_rast_batch(act, flow):
+    """Map bundled actions to canonical j0..j6+gripper order for RastCallback."""
+    return adapt_canonical_batch(act, flow, RAST_ID_TO_IDX)
 
 
 def denorm_joints(arr: np.ndarray, denorm: ActionBatchDenormalizer, ds_name: str) -> np.ndarray:
@@ -283,6 +297,14 @@ def denorm_joints(arr: np.ndarray, denorm: ActionBatchDenormalizer, ds_name: str
             means[j] = float(np.asarray(stat.mean).reshape(-1)[0])
             stds[j] = float(np.asarray(stat.std).reshape(-1)[0])
     return arr * stds + means
+
+
+def denorm_canonical(arr: np.ndarray, denorm: ActionBatchDenormalizer, ds_name: str, dof_ids: np.ndarray) -> np.ndarray:
+    """Denormalize canonical actions with explicit DOF ids."""
+    arr = np.asarray(arr, dtype=np.float32)
+    flat = arr.reshape(-1, arr.shape[-1])
+    out = np.stack([denorm.denormalize_slot(row, dof_ids, ds_name) for row in flat], axis=0)
+    return out.reshape(arr.shape)
 
 
 def per_embodiment_metrics(batch, update_info):
@@ -570,7 +592,7 @@ def main(cfg: Config):
                         accumulate=True,
                     )
                     pred_flow_np = jax.device_get(pred_flow)
-                    viz_batch, viz_keep = adapt_viz_batch(batch["act"], pred_flow_np)
+                    viz_batch, _viz_keep = adapt_viz_batch(batch["act"], pred_flow_np)
                     if viz_batch is not None:
                         frames = viz_cb(viz_batch)
                         hist_metrics["flow_pca/video"] = wandb.Video(
@@ -578,18 +600,20 @@ def main(cfg: Config):
                             fps=cfg.viz_fps,
                         )
                         if rast_cb is not None:
-                            ds_names = chunk_cb.denorm.decode_dataset_names(
-                                jax.device_get(batch["info"]["dataset_name"]),
-                            )
-                            ds0 = ds_names[int(viz_keep[0])]
-                            # sample 0, final denoise, all H chunk steps
-                            chunk = viz_batch["predict"][-1, 0]  # (W, H, 7)
-                            if chunk.ndim == 3:
-                                chunk = chunk[0]  # (H, 7) — drop W=1
-                            chunk = denorm_joints(chunk, chunk_cb.denorm, ds0)
-                            traj_frames = rast_cb.render_trajectory(chunk)
-                            for ci, rf in enumerate(traj_frames):
-                                hist_metrics[f"rast/cam_{ci}"] = wandb.Image(rf)
+                            rast_batch, rast_keep = adapt_rast_batch(batch["act"], pred_flow_np)
+                            if rast_batch is not None:
+                                ds_names = chunk_cb.denorm.decode_dataset_names(
+                                    jax.device_get(batch["info"]["dataset_name"]),
+                                )
+                                ds0 = ds_names[int(rast_keep[0])]
+                                # sample 0, final denoise, all H chunk steps
+                                chunk = rast_batch["predict"][-1, 0]  # (W, H, 8)
+                                if chunk.ndim == 3:
+                                    chunk = chunk[0]  # (H, 8) — drop W=1
+                                chunk = denorm_canonical(chunk, chunk_cb.denorm, ds0, np.asarray(RAST_IDS))
+                                traj_frames = rast_cb.render_trajectory(chunk)
+                                for ci, rf in enumerate(traj_frames):
+                                    hist_metrics[f"rast/cam_{ci}"] = wandb.Image(rf)
             cfg.wandb.log(
                 {
                     "training": update_info,
