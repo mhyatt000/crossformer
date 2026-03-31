@@ -62,6 +62,8 @@ class Config:
     horizon: int = 20  # action horizon from data pipeline
     transformer_size: str = "dummy"  # transformer size preset
     obs_keys: tuple[str, ...] = ("proprio_.*",)  # lowdim obs keys to tokenize
+    lowdim_token_dropout_rate: float = 0.2  # elementwise dropout inside lowdim tokenizer
+    lowdim_drop_prob: float = 0.2  # prob of zeroing all lowdim obs for a step
 
     # Vision backbone
     use_vision: bool = True  # enable image tokenizer
@@ -83,7 +85,7 @@ class Config:
 
     # Token guidance
     use_guidance: bool = True  # enable guidance tokens
-    guidance_prob: float = 0.5  # prob of using guidance each step (0-1, for dropout sweep)
+    guidance_drop_prob: float = 0.5  # prob of dropping guidance each step
     compress_guidance: bool = False  # compress via perceiver latents
     num_guidance_latents: int = 4  # latent count when compress=True
     guide_keys: tuple[str, ...] = ("action.position", "action.orientation")  # dot-paths into batch for guidance signal
@@ -136,7 +138,7 @@ def make_model_config(cfg, max_h, max_a, max_w, guide_dim=None):
         "lowdim": ModuleSpec.create(
             LowdimObsTokenizer,
             obs_keys=list(cfg.obs_keys),
-            dropout_rate=0.2,
+            dropout_rate=cfg.lowdim_token_dropout_rate,
         ),
     }
     if cfg.use_vision:
@@ -223,6 +225,14 @@ def extract_bundled_actions(batch, max_h):
     return actions, dof_ids, chunk_steps
 
 
+def zero_lowdim_obs(obs, obs_keys):
+    """Zero resolved lowdim observation keys for whole-modality dropout."""
+    out = dict(obs)
+    for key in obs_keys:
+        out[key] = jnp.zeros_like(out[key])
+    return out
+
+
 def adapt_viz_batch(act, flow):
     """Map bundled actions to canonical j0..j6 order for VizCallback."""
     base = np.asarray(act["base"], dtype=np.float32)
@@ -265,7 +275,6 @@ def adapt_viz_batch(act, flow):
 
 def denorm_joints(arr: np.ndarray, denorm: ActionBatchDenormalizer, ds_name: str) -> np.ndarray:
     """Denormalize a (..., 7) array of j0..j6 joint values to radians."""
-    shape = arr.shape
     means, stds = np.zeros(7, dtype=np.float32), np.ones(7, dtype=np.float32)
     stats = denorm._action_stats(ds_name)
     for j in range(7):
@@ -358,6 +367,7 @@ def main(cfg: Config):
     config["model"]["observation_tokenizers"]["lowdim"] = ModuleSpec.create(
         LowdimObsTokenizer,
         obs_keys=[f"^{re.escape(k)}$" for k in obs_keys],
+        dropout_rate=cfg.lowdim_token_dropout_rate,
     )
     init_obs = dict(example_obs)
     if cfg.use_vision:
@@ -473,7 +483,8 @@ def main(cfg: Config):
 
     losses = []
     timer = Timer()
-    guide_rng = np.random.default_rng(42)
+    lowdim_rng = np.random.default_rng(42)
+    guide_rng = np.random.default_rng(43)
     for step in tqdm(range(cfg.steps)):
         timer.tick("total")
         with timer("dataset"):
@@ -481,12 +492,15 @@ def main(cfg: Config):
             obs = normalize_obs(batch["observation"], obs_keys)
             task = batch.get("task", {"pad_mask_dict": {}})
             pad_mask = obs["timestep_pad_mask"]
+            lowdim_active = True
+            if cfg.lowdim_drop_prob > 0.0 and lowdim_rng.random() < cfg.lowdim_drop_prob:
+                obs = zero_lowdim_obs(obs, obs_keys)
+                lowdim_active = False
 
             guide_input = None
             if cfg.use_guidance:
                 guide_input = lookup_guide(batch, cfg.guide_keys)
-                # Guidance dropout: skip with (1 - guidance_prob) probability
-                if cfg.guidance_prob < 1.0 and guide_rng.random() > cfg.guidance_prob:
+                if cfg.guidance_drop_prob > 0.0 and guide_rng.random() < cfg.guidance_drop_prob:
                     guide_input = None
 
             actions, dof_ids, chunk_steps = extract_bundled_actions(batch, max_h)
@@ -581,6 +595,7 @@ def main(cfg: Config):
                     "training": update_info,
                     **hist_metrics,
                     "timer": timer.get_average_times(),
+                    "lowdim_active": lowdim_active,
                     "guidance_active": guide_input is not None,
                     **embody_metrics,
                 },
