@@ -13,10 +13,12 @@ from webpolicy.base_policy import BasePolicy
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.run.base_policy import CorePolicy
 from crossformer.run.wrappers import (
+    DtypeGuardWrapper,
     EnsemblerWrapper,
     HistoryWrapper,
     ImageResizeWrapper,
     LegacyDenormWrapper,
+    ObsPaddingWrapper,
     ProprioNormWrapper,
     XFlowDenormWrapper,
 )
@@ -78,10 +80,12 @@ class PolicyV2Config:
     step: int | None = None
     head_name: str | None = None  # auto-detected if None
 
+    dtype_guard: bool = True  # check for non-numeric leaves before model ingestion
     resize: bool = True  # resize images to checkpoint sizes
+    obs_pad: bool = True  # zero-fill missing obs keys from checkpoint example
     proprio_norm: bool = True  # normalize proprio with dataset stats
     history: int = 1  # observation window horizon
-    ensemble: bool = True  # exponential action ensembling
+    ensemble: bool = False  # exponential action ensembling
     chunk: int = 20  # action chunk size
     exp: float = 0.99  # ensembler exponential weight
     denorm: bool = True  # denormalize actions (xflow or legacy)
@@ -297,6 +301,13 @@ def build_policy_v2(cfg: PolicyV2Config) -> BasePolicy:
     stats = core.model.dataset_statistics
 
     policy: BasePolicy = core
+
+    if cfg.dtype_guard:
+        policy = DtypeGuardWrapper(policy, enabled=True)
+
+    if cfg.obs_pad:
+        example_obs = jax.device_get(core.model.example_batch["observation"])
+        policy = ObsPaddingWrapper(policy, example_obs)
 
     if cfg.resize:
         policy = ImageResizeWrapper(policy, core.img_hw)
