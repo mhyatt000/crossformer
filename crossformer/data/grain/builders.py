@@ -153,6 +153,8 @@ def _restructure_step_mano(x: dict, *, name: str, config: GrainDatasetConfig) ->
     x["task"] = task
 
     x["observation"]["timestep"] = x["info"]["id"]["step"]
+    # k3ds is used as an action target here; don't expose it as proprio.
+    x["observation"].get("proprio", {}).pop("k3ds", None)
 
     # k3ds: (H, 21, 4) → strip homogeneous coord → (H, 21, 3)
     # derive cart_pos from palm keypoint (index 0) before flatten
