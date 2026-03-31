@@ -20,6 +20,7 @@ from grain.experimental import ThreadPrefetchIterDataset
 import grain.python as gp
 import jax
 import jax.numpy as jnp
+from jax.sharding import NamedSharding, PartitionSpec
 import numpy as np
 from rich import print
 from rich.pretty import pprint
@@ -187,9 +188,18 @@ def do_frame_transforms(config, tfconfig, ds):
         # batch["task"]["image"] = squeeze(batch["task"]["image"], dim=1)
         return batch
 
+    def rng_for_batch(rng, batch):
+        key = to_jax_key(rng)
+        leaf = jax.tree.leaves(batch)[0]
+        sharding = getattr(leaf, "sharding", None)
+        mesh = getattr(sharding, "mesh", None)
+        if mesh is None:
+            return key
+        return jax.device_put(key, NamedSharding(mesh, PartitionSpec()))
+
     ds = (
         # @todo is it better to use mp or to jit with constant size?
-        ds.random_map(lambda x, rng: frame_aug_with_reshape(rng=to_jax_key(rng), batch=x))
+        ds.random_map(lambda x, rng: frame_aug_with_reshape(rng=rng_for_batch(rng, x), batch=x))
     )
     return ds
 
@@ -604,6 +614,52 @@ def hwc2chw(img):
     return jnp.transpose(img, (2, 0, 1))  # HWC -> CHW
 
 
+class RandomAspect(augmax.GeometricTransformation):
+    """Apply independent x/y aspect scaling without changing output size."""
+
+    def __init__(
+        self,
+        x_range: tuple[float, float] = (1.0, 1.0),
+        y_range: tuple[float, float] | None = None,
+        p: float = 0.5,
+    ):
+        super().__init__()
+        self.x_range = x_range
+        self.y_range = x_range if y_range is None else y_range
+        self.probability = p
+
+        for lo, hi in (self.x_range, self.y_range):
+            if lo <= 0 or hi <= 0:
+                raise ValueError("Aspect ranges must be positive.")
+            if lo > hi:
+                raise ValueError("Aspect range lower bound must be <= upper bound.")
+
+    def _sample_aspect(self, rng, bounds: tuple[float, float]):
+        lo, hi = bounds
+        lo = jnp.log(jnp.asarray(lo, dtype=jnp.float32))
+        hi = jnp.log(jnp.asarray(hi, dtype=jnp.float32))
+        return jnp.exp(jax.random.uniform(rng, (), minval=lo, maxval=hi))
+
+    def transform_coordinates(self, rng: jnp.ndarray, coordinates, invert=False):
+        k_apply, kx, ky = jax.random.split(rng, 3)
+        do = jax.random.bernoulli(k_apply, self.probability)
+
+        sx = jnp.where(do, self._sample_aspect(kx, self.x_range), 1.0)
+        sy = jnp.where(do, self._sample_aspect(ky, self.y_range), 1.0)
+
+        if not invert:
+            sy, sx = 1.0 / sy, 1.0 / sx
+
+        transform = jnp.array(
+            [
+                [sy, 0, 0],
+                [0, sx, 0],
+                [0, 0, 1],
+            ]
+        )
+        coordinates.push_transform(transform)
+
+
 def get_frame_transform(
     config: builders.GrainDatasetConfig,
     tfconfig: TransformConfig,
@@ -613,10 +669,12 @@ def get_frame_transform(
 
     chain = augmax.Chain(
         augmax.Resize(re_wh),
-        # augmax.ByteToFloat(),
+        augmax.ChannelShuffle(p=0.5),
+        RandomAspect(x_range=(0.9, 1.1), y_range=(0.9, 1.1), p=0.5),
         # augmax.RandomGrayscale(p= 0.5),
+        augmax.Rotate((-15, 15), p=0.3),
+        # augmax.ByteToFloat(),
         # augmax.ChannelDrop(),
-        # augmax.Rotate((-15, 15),p=0.3),
         # augmax.Warp(strength= 5, coarseness= 32),
         # augmax.Normalize(),
         # augmax.Blur(),
