@@ -103,7 +103,7 @@ class TestRenderFrames:
         base, flow = base_and_flow
         base_fk = _fake_fk(base)
         flow_fk = compute_fk(base, flow, _fake_fk)[1]
-        _joint_st, _fk_st, base_j2d, base_fk2d, _jlim, _flim = fit_pca(base, base_fk)
+        joint_st, fk_st, base_j2d, base_fk2d, jlim, flim = fit_pca(base, base_fk)
 
         frames = render_frames(
             flow,
@@ -125,7 +125,7 @@ class TestRenderFrames:
         base, flow = base_and_flow
         base_fk = _fake_fk(base)
         flow_fk = compute_fk(base, flow, _fake_fk)[1]
-        _joint_st, _fk_st, base_j2d, base_fk2d, _jlim, _flim = fit_pca(base, base_fk)
+        joint_st, fk_st, base_j2d, base_fk2d, jlim, flim = fit_pca(base, base_fk)
 
         frames = render_frames(
             flow,
