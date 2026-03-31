@@ -8,6 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 from webpolicy.base_policy import BasePolicy
 
+from crossformer.embody import MASK_ID
 from crossformer.utils.callbacks.viz import ActionBatchDenormalizer
 from crossformer.utils.tree.core import drop_fn
 
@@ -60,14 +61,26 @@ class XFlowDenormWrapper(PolicyWrapper):
 
     def postprocess(self, payload: dict, result: dict) -> dict:
         actions = result["actions"]
-        dof_ids = payload.get("dof_ids")
+        # NOTE: must read from result, not payload. CorePolicy pads dof_ids
+        # to max_dofs and puts it in result. After denorm we strip MASK columns
+        # and write the active-only dof_ids back to result for downstream
+        # wrappers (BodyPartGroupWrapper) that also read from result.
+        dof_ids = result.get("dof_ids")
         if dof_ids is None:
-            raise ValueError("XFlowDenormWrapper requires 'dof_ids' in the payload")
-        result["actions"] = self.denorm.denormalize_slot(
-            actions,
-            dof_ids,
-            self.dataset_name,
-        )
+            raise ValueError("XFlowDenormWrapper requires 'dof_ids' in result (set by CorePolicy)")
+        dof_ids = np.asarray(dof_ids).reshape(-1)
+        active = dof_ids != MASK_ID
+
+        if actions.ndim == 1:
+            denormed = self.denorm.denormalize_slot(actions, dof_ids, self.dataset_name)
+            result["actions"] = denormed[active]
+        else:
+            denormed = np.stack(
+                [self.denorm.denormalize_slot(actions[t], dof_ids, self.dataset_name) for t in range(len(actions))]
+            )
+            result["actions"] = denormed[:, active]
+
+        result["dof_ids"] = dof_ids[active]  # strip padding for downstream
         return result
 
 
