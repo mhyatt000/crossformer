@@ -15,7 +15,7 @@ from crossformer.data.oxe.oxe_dataset_configs import OXE_DATASET_CONFIGS, Propri
 from crossformer.data.oxe.oxe_dataset_mixes import HEAD_TO_DATASET
 
 # from crossformer.data.oxe.oxe_standardization_transforms import  OXE_STANDARDIZATION_TRANSFORMS
-from crossformer.data.utils.data_utils import NormalizationType
+from crossformer.data.utils.normalization import NormalizationType
 from crossformer.utils.spec import ModuleSpec
 
 

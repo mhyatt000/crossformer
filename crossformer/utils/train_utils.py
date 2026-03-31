@@ -16,7 +16,6 @@ import jax.numpy as jnp
 from ml_collections import ConfigDict
 import numpy as np
 import optax
-import tensorflow as tf
 
 from crossformer.data.utils.text_processing import TextProcessor
 from crossformer.model.crossformer_model import CrossFormerModel
@@ -414,6 +413,16 @@ def process_text(batch: Data, text_processor: TextProcessor | None) -> Data:
 WeightLoader = Callable[[Params], Params]
 
 
+def _open_binary(path: str):
+    if "://" not in path:
+        return open(path, "rb")
+    try:
+        import tensorflow as tf
+    except ImportError as e:
+        raise ImportError(f"Reading non-local path {path!r} requires tensorflow or another remote filesystem client.") from e
+    return tf.io.gfile.GFile(path, "rb")
+
+
 def hf_weights_loader(params, hf_model):
     """Loads weights from a HuggingFace model into params."""
     from transformers import AutoConfig, FlaxAutoModel, FlaxT5EncoderModel
@@ -445,7 +454,7 @@ def hf_weights_loader(params, hf_model):
 
 def siglip_weights_loader(params, siglip_path="gs://big_vision/siglip/webli_en_b16_256_60500360.npz"):
     # load siglip params, and parse keys from np array
-    with tf.io.gfile.GFile(siglip_path, "rb") as f:
+    with _open_binary(siglip_path) as f:
         siglip_params = np.load(f)
 
     flat_params = flax.traverse_util.flatten_dict(params)
@@ -477,7 +486,7 @@ def resnet_26_loader(
         restore_path = restore_path.removeprefix("hf://")
         resnet_params = np.load(hf_hub_download(repo_id=restore_path, filename="params.npz"))
     else:
-        with tf.io.gfile.GFile(restore_path, "rb") as f:
+        with _open_binary(restore_path) as f:
             resnet_params = np.load(f)
 
     resnet_params = {

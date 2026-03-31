@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from enum import Enum
 from fnmatch import fnmatch
 import hashlib
 import json
@@ -14,6 +13,7 @@ import tensorflow as tf
 import tqdm
 
 from crossformer.utils.deco import deprecate
+from crossformer.data.utils.normalization import NormalizationType
 
 
 def fnmatch_filter(template, xs):
@@ -35,13 +35,6 @@ def tree_merge(*trees: dict) -> dict:
     from crossformer.utils.tree import merge
 
     return merge(*trees)
-
-
-class NormalizationType(str, Enum):
-    """Defines supported normalization schemes for action and proprio."""
-
-    NORMAL = "normal"  # normalize to mean 0, std 1
-    BOUNDS = "bounds"  # normalize to [-1, 1]
 
 
 def to_padding(tensor: tf.Tensor) -> tf.Tensor:

@@ -18,7 +18,7 @@ import numpy as np
 import orbax.checkpoint
 from rich import print
 
-from crossformer.data.utils.data_utils import NormalizationType
+from crossformer.data.utils.normalization import NormalizationType
 from crossformer.data.utils.text_processing import TextProcessor
 from crossformer.model.components.heads import ActionHead
 from crossformer.model.crossformer_module import CrossFormerModule

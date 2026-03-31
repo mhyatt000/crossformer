@@ -24,7 +24,6 @@ import numpy as np
 from rich import print
 from rich.rule import Rule
 from rich.table import Table
-import tensorflow as tf
 from tqdm import tqdm
 import tyro
 
@@ -295,11 +294,16 @@ def shard_batch(batch, mesh):
     return multihost_utils.host_local_array_to_global_array(batch, mesh, PartitionSpec("batch"))
 
 
+def _save_path(cfg: Config) -> str:
+    if cfg.save_dir is None:
+        raise ValueError("save_dir is None")
+    return str((Path(cfg.save_dir).expanduser() / cfg.wandb.project / (cfg.wandb.group or "") / cfg.name).resolve())
+
+
 # -- main ---------------------------------------------------------------------
 
 
 def main(cfg: Config):
-    tf.config.set_visible_devices([], "GPU")
     initialize_compilation_cache()
     devices = jax.devices()
     mesh = Mesh(devices, axis_names="batch")
@@ -431,12 +435,7 @@ def main(cfg: Config):
 
     # Checkpointing
     if cfg.save_dir is not None:
-        save_dir = tf.io.gfile.join(
-            cfg.save_dir,
-            cfg.wandb.project,
-            cfg.wandb.group or "",
-            cfg.name,
-        )
+        save_dir = _save_path(cfg)
         wandb.config.update({"save_dir": save_dir}, allow_val_change=True)
         print(f"  save_dir: {save_dir}")
         save_callback = SaveCallback(save_dir)

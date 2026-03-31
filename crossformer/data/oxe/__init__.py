@@ -11,7 +11,7 @@ from crossformer.data.oxe.oxe_dataset_configs import (
     ProprioDim,
 )
 from crossformer.data.oxe.oxe_dataset_mixes import HEAD_TO_DATASET, OXE_NAMED_MIXES
-from crossformer.data.utils.data_utils import NormalizationType
+from crossformer.data.utils.normalization import NormalizationType
 from crossformer.utils.spec import ModuleSpec
 
 

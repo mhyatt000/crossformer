@@ -14,7 +14,6 @@ from crossformer.cn.dataset.mix import DataSource, MultiDataSource
 from crossformer.cn.dataset.transform import Transform
 from crossformer.cn.dataset.transform.frame import FrameTransform
 from crossformer.cn.dataset.transform.traj import TrajectoryTransform
-from crossformer.data.dataset import make_interleaved_dataset
 
 _ = Transform(name="default")
 
@@ -146,6 +145,7 @@ class Dataset(CN):
 
     def create(self, oxe_fns: dict[str, Callable], train: bool = True):
         """create the dataset"""
+        from crossformer.data.dataset import make_interleaved_dataset
 
         #
         # TODO: fix assert transform.traj.action_horizon to match model

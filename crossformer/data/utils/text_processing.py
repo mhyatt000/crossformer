@@ -4,7 +4,6 @@ from abc import ABC, abstractmethod
 from typing import Sequence
 
 import numpy as np
-import tensorflow as tf
 
 MULTI_MODULE = "https://tfhub.dev/google/universal-sentence-encoder-multilingual/3"
 
@@ -59,6 +58,8 @@ class MuseEmbedding(TextProcessor):
         self.muse_model = hub.load(MULTI_MODULE)
 
     def encode(self, strings: Sequence[str]):
+        import tensorflow as tf
+
         with tf.device("/cpu:0"):
             return self.muse_model(strings).numpy()
 
@@ -97,6 +98,8 @@ class UniversalSentenceEncoder(TextProcessor):
         self.sentence_encoder = hub.load("https://tfhub.dev/google/universal-sentence-encoder-large/5")
 
     def encode(self, strings: Sequence[str]):
+        import tensorflow as tf
+
         with tf.device("/cpu:0"):
             if len(strings) == 0:
                 return self.sentence_encoder([""]).numpy()
