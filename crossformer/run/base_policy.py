@@ -103,7 +103,11 @@ class CorePolicy(BasePolicy):
             **kwargs,
         )
         actions = np.asarray(actions[0, -1])  # one batch, last window
-        return {"actions": actions}
+        result = {"actions": actions}
+        if self.is_xflow:
+            padded_ids = np.asarray(kwargs["dof_ids"][0])
+            result["dof_ids"] = padded_ids
+        return result
 
     # ------------------------------------------------------------------
     # warmup
