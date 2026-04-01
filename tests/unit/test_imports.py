@@ -48,7 +48,6 @@ def test_head():
 def test_cn():
     pass
     # import crossformer.cn.wab
-    # import crossformer.cn.model # fail
 
     # assert crossformer.cn is not None
     # assert CN is not None
