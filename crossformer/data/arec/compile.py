@@ -255,7 +255,7 @@ class MyBuilder(generate.Builder):
 @dataclass
 class Config:
     dir: Path  # Directory containing .dat files (searched recursively)
-    name: str = "my_dataset"  # Dataset name
+    name: str = "dataset"  # Dataset name
     workers: int = 16  # *.dat reader workers
     verbose: bool = False  # Print per-file details while streaming
     version: str = "0.5.0"  # Dataset version

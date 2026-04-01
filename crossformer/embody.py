@@ -466,7 +466,6 @@ xgym_sweep = Dataset(
     version="0.5.2",
     branch="to_step",
 )
-my_dataset = Dataset("my_dataset", SINGLE, SourceType.AREC, images=_XGYM_IMG, proprio=_XGYM_PROPRIO, version="0.5.3")
 
 _MANO_IMG = ImageObs(primary="image")
 _MANO_PROPRIO = ProprioObs(key="proprio", dim=8)

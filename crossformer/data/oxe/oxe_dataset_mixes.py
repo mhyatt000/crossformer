@@ -18,7 +18,6 @@ HEAD_TO_DATASET = {
         "xgym_stack_single",
         "xgym_duck_single",
         "xgym_sweep_single",
-        "my_dataset",
         #
         "berkeley_mvp_converted_externally_to_rlds",
         "nyu_rot_dataset_converted_externally_to_rlds",

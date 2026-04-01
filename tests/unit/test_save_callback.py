@@ -192,7 +192,7 @@ class TestSaveExtra:
     def test_dataset_statistics_not_null_when_present(self, tmp_path):
         """When dataset_statistics has real data, the JSON must not be null."""
         stats = {
-            "my_dataset": {
+            "dataset": {
                 "action": {
                     "mean": np.array([0.1, 0.2, 0.3]),
                     "std": np.array([1.0, 1.0, 1.0]),
@@ -208,8 +208,8 @@ class TestSaveExtra:
         cb.save_extra(state)
         raw = json.loads((tmp_path / "params" / "dataset_statistics.json").read_text())
         assert raw is not None
-        assert "my_dataset" in raw
-        assert raw["my_dataset"]["action"]["mean"] == [0.1, 0.2, 0.3]
+        assert "dataset" in raw
+        assert raw["dataset"]["action"]["mean"] == [0.1, 0.2, 0.3]
 
     def test_dataset_statistics_null_when_none(self, tmp_path):
         """When dataset_statistics is None, the JSON contains null."""
