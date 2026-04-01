@@ -13,10 +13,13 @@ from webpolicy.base_policy import BasePolicy
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.run.base_policy import CorePolicy
 from crossformer.run.wrappers import (
+    BodyPartGroupWrapper,
+    DtypeGuardWrapper,
     EnsemblerWrapper,
     HistoryWrapper,
     ImageResizeWrapper,
     LegacyDenormWrapper,
+    ObsPaddingWrapper,
     ProprioNormWrapper,
     XFlowDenormWrapper,
 )
@@ -78,10 +81,12 @@ class PolicyV2Config:
     step: int | None = None
     head_name: str | None = None  # auto-detected if None
 
+    dtype_guard: bool = True  # check for non-numeric leaves before model ingestion
     resize: bool = True  # resize images to checkpoint sizes
+    obs_pad: bool = True  # zero-fill missing obs keys from checkpoint example
     proprio_norm: bool = True  # normalize proprio with dataset stats
     history: int = 1  # observation window horizon
-    ensemble: bool = True  # exponential action ensembling
+    ensemble: bool = False  # exponential action ensembling
     chunk: int = 20  # action chunk size
     exp: float = 0.99  # ensembler exponential weight
     denorm: bool = True  # denormalize actions (xflow or legacy)
@@ -290,13 +295,16 @@ class Policy(BasePolicy):
         return {"actions": self.emsembler(actions[: self.cfg.chunk])}
 
 
-def build_policy_v2(cfg: PolicyV2Config) -> BasePolicy:
-    """Compose a CorePolicy with configurable wrappers from PolicyV2Config."""
-    ds_name = TASKS[cfg.task]["dataset_name"]
-    core = CorePolicy(cfg.path, step=cfg.step, head_name=cfg.head_name)
-    stats = core.model.dataset_statistics
-
+def _wrap_preprocess_policy_v2(cfg: PolicyV2Config, core: CorePolicy, stats: dict, ds_name: str) -> BasePolicy:
+    """Apply observation-side PolicyV2 wrappers to the core policy."""
     policy: BasePolicy = core
+
+    if cfg.dtype_guard:
+        policy = DtypeGuardWrapper(policy, enabled=True)
+
+    if cfg.obs_pad:
+        example_obs = jax.device_get(core.model.example_batch["observation"])
+        policy = ObsPaddingWrapper(policy, example_obs)
 
     if cfg.resize:
         policy = ImageResizeWrapper(policy, core.img_hw)
@@ -307,6 +315,13 @@ def build_policy_v2(cfg: PolicyV2Config) -> BasePolicy:
     if cfg.history > 1:
         policy = HistoryWrapper(policy, cfg.history)
 
+    return policy
+
+
+def _wrap_postprocess_policy_v2(
+    cfg: PolicyV2Config, core: CorePolicy, stats: dict, ds_name: str, policy: BasePolicy
+) -> BasePolicy:
+    """Apply action-side PolicyV2 wrappers to the policy."""
     if cfg.denorm:
         if core.is_xflow:
             policy = XFlowDenormWrapper(policy, stats, ds_name)
@@ -316,7 +331,19 @@ def build_policy_v2(cfg: PolicyV2Config) -> BasePolicy:
     if cfg.ensemble:
         policy = EnsemblerWrapper(policy, cfg.exp, cfg.chunk, cfg.chunk)
 
+    if core.is_xflow:
+        policy = BodyPartGroupWrapper(policy)
+
     if cfg.warmup:
         core.warmup()
 
     return policy
+
+
+def build_policy_v2(cfg: PolicyV2Config) -> BasePolicy:
+    """Compose a CorePolicy with configurable wrappers from PolicyV2Config."""
+    ds_name = TASKS[cfg.task]["dataset_name"]
+    core = CorePolicy(cfg.path, step=cfg.step, head_name=cfg.head_name)
+    stats = core.model.dataset_statistics
+    policy = _wrap_preprocess_policy_v2(cfg, core, stats, ds_name)
+    return _wrap_postprocess_policy_v2(cfg, core, stats, ds_name, policy)

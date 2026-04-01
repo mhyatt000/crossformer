@@ -4767,12 +4767,13 @@ wheels = [
 [[package]]
 name = "webpolicy"
 version = "0.1.0"
-source = { git = "https://github.com/mhyatt000/webpolicy#457d39ac1b09363a2e73eeb31698dab124e9891c" }
+source = { git = "https://github.com/mhyatt000/webpolicy#c9d32a2cd02f17e430716ca3c13206cf66a6d493" }
 dependencies = [
     { name = "jax" },
     { name = "jaxlib" },
     { name = "msgpack" },
     { name = "numpy" },
+    { name = "pydantic" },
     { name = "rich" },
     { name = "tyro" },
     { name = "websockets" },

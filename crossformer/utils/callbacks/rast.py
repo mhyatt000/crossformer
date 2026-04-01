@@ -65,6 +65,8 @@ class _RobotMesh:
         self.urdf = yourdfpy.URDF.load(str(urdf_path), mesh_dir=str(mesh_dir))
         self.robot = pk.Robot.from_urdf(self.urdf)
         self.link_index = {n: i for i, n in enumerate(self.robot.links.names)}
+        self.joint_names = tuple(j.name for j in self.urdf.actuated_joints)
+        self.joint_limits = tuple((float(j.limit.lower), float(j.limit.upper)) for j in self.urdf.actuated_joints)
         self.actuated = len(self.urdf.actuated_joints)
         self.verts, self.faces, self.link_ids = self._extract_meshes()
         self._fk = jax.jit(self.robot.forward_kinematics)
@@ -176,7 +178,11 @@ class RastCallback:
     color: tuple[float, float, float] = (0.2, 0.4, 0.9)
     bg: tuple[float, float, float] = (1.0, 1.0, 1.0)
     alpha: float = 0.6
-    joint_dim: int = 7
+    joint_dim: int | None = None
+    gripper_joint: str = "drive_joint"
+    gripper_open: float = 1.0
+    gripper_closed: float = 0.0
+    invert_gripper: bool = True
     _robot: _RobotMesh | None = field(default=None, init=False, repr=False)
     _rasterizer: _GpuRasterizer | None = field(default=None, init=False, repr=False)
     _cam_mats: list[np.ndarray] = field(default_factory=list, init=False, repr=False)
@@ -205,16 +211,43 @@ class RastCallback:
         )
         return _look_at(eye, np.zeros(3, dtype=np.float32), np.array([0, 0, 1], dtype=np.float32))
 
+    def _map_gripper(self, q: np.ndarray) -> np.ndarray:
+        robot = self._robot
+        out = np.array(q, dtype=np.float32, copy=True)
+        if self.gripper_joint not in robot.joint_names or out.shape[-1] == 0:
+            return out
+        grip_idx = robot.joint_names.index(self.gripper_joint)
+        if grip_idx >= out.shape[-1]:
+            return out
+        lo, hi = robot.joint_limits[grip_idx]
+        val = np.clip(
+            out[..., grip_idx], min(self.gripper_closed, self.gripper_open), max(self.gripper_closed, self.gripper_open)
+        )
+        denom = self.gripper_open - self.gripper_closed
+        if np.isclose(denom, 0.0):
+            raise ValueError("gripper_open and gripper_closed must differ")
+        t = (val - self.gripper_closed) / denom
+        if self.invert_gripper:
+            t = 1.0 - t
+        out[..., grip_idx] = lo + t * (hi - lo)
+        return out
+
+    def _prepare_q(self, joints: np.ndarray) -> np.ndarray:
+        robot = self._robot
+        q = np.asarray(joints, dtype=np.float32)
+        if q.ndim == 3:
+            q = q[:, -1]
+        dim = robot.actuated if self.joint_dim is None else min(self.joint_dim, robot.actuated)
+        q = q[..., :dim]
+        return self._map_gripper(q)
+
     def __call__(self, joints: np.ndarray) -> list[np.ndarray]:
         """Render silhouettes for (B, A) or (B, H, A) joint configs."""
         self._ensure_init()
         robot = self._robot
         proj = self._proj
 
-        q = np.asarray(joints, dtype=np.float32)
-        if q.ndim == 3:
-            q = q[:, -1]
-        q = q[..., : self.joint_dim]
+        q = self._prepare_q(joints)
 
         verts = robot.posed_verts(q)  # (B, V, 4)
         bg = np.asarray(self.bg, dtype=np.float32)
@@ -243,7 +276,8 @@ class RastCallback:
         traj = np.asarray(trajectory, dtype=np.float32)
         if traj.ndim == 3:
             traj = traj[0]
-        traj = traj[..., : self.joint_dim]
+        dim = robot.actuated if self.joint_dim is None else min(self.joint_dim, robot.actuated)
+        traj = self._map_gripper(traj[..., :dim])
 
         verts = robot.posed_verts(traj)  # (T, V, 4)
         bg = np.asarray(self.bg, dtype=np.float32)

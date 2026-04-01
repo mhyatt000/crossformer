@@ -1,5 +1,5 @@
 # intr extr and urdf
-data
+*.npz
 *.urdf
 assets
 

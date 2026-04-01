@@ -2,14 +2,40 @@ from __future__ import annotations
 
 import abc
 from collections import deque
+from typing import ClassVar
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from webpolicy.base_policy import BasePolicy
 
+from crossformer.embody import DOF, MASK_ID
 from crossformer.utils.callbacks.viz import ActionBatchDenormalizer
 from crossformer.utils.tree.core import drop_fn
+
+# ---------------------------------------------------------------------------
+# DOF ID -> body-part group reverse mapping
+# ---------------------------------------------------------------------------
+
+_BODYPART_GROUPS: dict[str, tuple[str, ...]] = {
+    "joints": ("j0", "j1", "j2", "j3", "j4", "j5", "j6"),
+    "gripper": ("gripper",),
+    "position": ("ee_x", "ee_y", "ee_z"),
+    "orientation": ("ee_rx", "ee_ry", "ee_rz"),
+    "hand": tuple(f"hand_j{i}" for i in range(16)),
+    "base": ("base_vx", "base_vy", "base_wz"),
+    "mano": tuple(f"mano_{i}" for i in range(7)),
+    "keypoints_3d": tuple(f"k3d_{i}" for i in range(84)),
+    "kp_chain": tuple(
+        f"kp_{loc}_{ax}"
+        for loc in ["base", "j0", "j1", "j2", "j3", "j4", "j5", "j6", "grip_l", "grip_r"]
+        for ax in ["x", "y", "z"]
+    ),
+    "fingertips": tuple(f"ftip_{i}" for i in range(15)),
+    "finger_joints": tuple(f"fjoint_{i}" for i in range(45)),
+}
+
+_DOF_ID_TO_GROUP: dict[int, str] = {DOF[name]: group for group, names in _BODYPART_GROUPS.items() for name in names}
 
 
 class PolicyWrapper(BasePolicy, abc.ABC):
@@ -17,6 +43,13 @@ class PolicyWrapper(BasePolicy, abc.ABC):
 
     def __init__(self, inner: BasePolicy):
         self.inner = inner
+
+    def unwrapped(self) -> BasePolicy:
+        """Return the innermost (non-wrapper) policy."""
+        p = self.inner
+        while isinstance(p, PolicyWrapper):
+            p = p.inner
+        return p
 
     def reset(self, payload: dict | None = None) -> dict | None:
         return self.inner.reset(payload) if payload else self.inner.reset()
@@ -31,6 +64,97 @@ class PolicyWrapper(BasePolicy, abc.ABC):
 
     def postprocess(self, payload: dict, result: dict) -> dict:
         return result
+
+
+class DtypeGuardWrapper(PolicyWrapper):
+    """Reject non-numeric leaves before they reach the model's jnp.asarray.
+
+    Walks the observation (and task) trees, printing a spec of any leaf
+    whose dtype is non-numeric (e.g. strings, objects) and raising
+    ``TypeError`` with the offending paths.
+
+    Toggle via the ``enabled`` flag so it can be cheaply disabled in prod.
+    """
+
+    _NUMERIC_KINDS: ClassVar[set[str]] = set("biufcBIUFC")  # bool, int, uint, float, complex
+
+    def __init__(self, inner: BasePolicy, *, enabled: bool = True):
+        super().__init__(inner)
+        self.enabled = enabled
+
+    def preprocess(self, payload: dict) -> dict:
+        if not self.enabled:
+            return payload
+        bad: list[str] = []
+        for top_key in ("observation", "task"):
+            tree = payload.get(top_key)
+            if tree is None:
+                continue
+            self._check(tree, prefix=top_key, bad=bad)
+        if bad:
+            bad = "\n  ".join(bad)
+            raise TypeError(f"Non-numeric leaves found in payload — cannot convert to JAX array:\n  {bad}")
+        return payload
+
+    def _check(self, tree, *, prefix: str, bad: list[str]):
+        if isinstance(tree, dict):
+            for k, v in tree.items():
+                self._check(v, prefix=f"{prefix}.{k}", bad=bad)
+        elif isinstance(tree, (list, tuple)):
+            for i, v in enumerate(tree):
+                self._check(v, prefix=f"{prefix}[{i}]", bad=bad)
+        else:
+            arr = np.asarray(tree)
+            if arr.dtype.kind not in self._NUMERIC_KINDS:
+                bad.append(f"{prefix}: dtype={arr.dtype}, shape={arr.shape}, value={arr.flat[0]!r}")
+
+
+class ObsPaddingWrapper(PolicyWrapper):
+    """Zero-fill missing observation keys so the payload matches the checkpoint.
+
+    Missing keys get zeros with the same shape/dtype as ``example_obs``,
+    and their ``pad_mask_dict`` entry is set to all-False (masked out).
+    Extra keys in the payload that aren't in the checkpoint raise ValueError.
+    """
+
+    def __init__(self, inner: BasePolicy, example_obs: dict):
+        super().__init__(inner)
+        self.example_obs = example_obs
+
+    def preprocess(self, payload: dict) -> dict:
+        obs = payload.get("observation")
+        if obs is None:
+            return payload
+
+        expected = set(self.example_obs)
+        got = set(obs)
+        extra = got - expected - {"pad_mask_dict"}
+        if extra:
+            raise ValueError(f"Unexpected observation keys not in checkpoint: {extra}")
+
+        missing = expected - got - {"pad_mask_dict", "timestep_pad_mask"}
+
+        obs = {**obs}
+
+        # timestep_pad_mask: ones (all valid) when absent
+        if "timestep_pad_mask" not in obs and "timestep_pad_mask" in self.example_obs:
+            obs["timestep_pad_mask"] = np.ones_like(np.asarray(self.example_obs["timestep_pad_mask"]))
+
+        # zero-fill genuinely missing observation keys
+        for key in missing:
+            if key == "pad_mask_dict":
+                continue
+            obs[key] = np.zeros_like(np.asarray(self.example_obs[key]))
+
+        # pad_mask_dict: ones for keys the caller provided, zeros for missing
+        example_pad = self.example_obs.get("pad_mask_dict", {})
+        pad = dict(obs.get("pad_mask_dict", {}))
+        for pk in example_pad:
+            if pk not in pad:
+                fill = np.ones_like if pk in got else np.zeros_like
+                pad[pk] = fill(np.asarray(example_pad[pk]))
+        obs["pad_mask_dict"] = pad
+        return {**payload, "observation": obs}
 
 
 class LegacyDenormWrapper(PolicyWrapper):
@@ -60,14 +184,26 @@ class XFlowDenormWrapper(PolicyWrapper):
 
     def postprocess(self, payload: dict, result: dict) -> dict:
         actions = result["actions"]
-        dof_ids = payload.get("dof_ids")
+        # NOTE: must read from result, not payload. CorePolicy pads dof_ids
+        # to max_dofs and puts it in result. After denorm we strip MASK columns
+        # and write the active-only dof_ids back to result for downstream
+        # wrappers (BodyPartGroupWrapper) that also read from result.
+        dof_ids = result.get("dof_ids")
         if dof_ids is None:
-            raise ValueError("XFlowDenormWrapper requires 'dof_ids' in the payload")
-        result["actions"] = self.denorm.denormalize_slot(
-            actions,
-            dof_ids,
-            self.dataset_name,
-        )
+            raise ValueError("XFlowDenormWrapper requires 'dof_ids' in result (set by CorePolicy)")
+        dof_ids = np.asarray(dof_ids).reshape(-1)
+        active = dof_ids != MASK_ID
+
+        if actions.ndim == 1:
+            denormed = self.denorm.denormalize_slot(actions, dof_ids, self.dataset_name)
+            result["actions"] = denormed[active]
+        else:
+            denormed = np.stack(
+                [self.denorm.denormalize_slot(actions[t], dof_ids, self.dataset_name) for t in range(len(actions))]
+            )
+            result["actions"] = denormed[:, active]
+
+        result["dof_ids"] = dof_ids[active]  # strip padding for downstream
         return result
 
 
@@ -194,3 +330,35 @@ class HistoryWrapper(PolicyWrapper):
             obs = _stack_and_pad(self.history, self.num_obs)
         payload = {**payload, "observation": obs}
         return payload
+
+
+class BodyPartGroupWrapper(PolicyWrapper):
+    """Group flat action vectors into a dict keyed by body-part name."""
+
+    def postprocess(self, payload: dict, result: dict) -> dict:
+        if "actions" not in result:
+            return result
+        dof_ids = result.get("dof_ids", payload.get("dof_ids"))
+        if dof_ids is None:
+            return result
+
+        dof_ids = np.asarray(dof_ids).reshape(-1)
+        actions = result["actions"]
+        flat = actions.ndim == 1
+
+        grouped: dict[str, list[int]] = {}
+        for slot, did in enumerate(dof_ids):
+            did = int(did)
+            if did == MASK_ID:
+                continue
+            group = _DOF_ID_TO_GROUP.get(did)
+            if group is None:
+                continue
+            grouped.setdefault(group, []).append(slot)
+
+        if flat:
+            out = {name: actions[slots] for name, slots in grouped.items()}
+        else:
+            out = {name: actions[:, slots] for name, slots in grouped.items()}
+
+        return {**result, "actions": out}

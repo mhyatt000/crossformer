@@ -174,6 +174,7 @@ class CrossFormerModel:
         head_name: str = "action",
         dof_ids: ArrayLike | None = None,
         chunk_steps: ArrayLike | None = None,
+        guide_input: ArrayLike | None = None,
     ):
         """Samples actions from the model. See `action_heads.py` for more info.
 
@@ -211,6 +212,8 @@ class CrossFormerModel:
             head_kwargs["dof_ids"] = dof_ids
         if chunk_steps is not None:
             head_kwargs["chunk_steps"] = chunk_steps
+        if guide_input is not None:
+            head_kwargs["guide_input"] = guide_input
 
         action = action_head.predict_action(transformer_outputs, **head_kwargs)
         if unnormalization_statistics is not None:

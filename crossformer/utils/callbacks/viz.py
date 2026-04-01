@@ -220,10 +220,12 @@ class ActionBatchDenormalizer:
         if ids.shape[0] != xs.shape[0]:
             raise ValueError(f"Expected dof_ids len {xs.shape[0]}, got {ids.shape}")
 
+        from crossformer.embody import NO_NORM_DOF_IDS
+
         stats = self._action_stats(ds_name)
         for i, dof_id in enumerate(ids):
             dof_id = int(dof_id)
-            if dof_id == MASK_ID:
+            if dof_id == MASK_ID or dof_id in NO_NORM_DOF_IDS:
                 continue
             stat = self._dof_array_stats(stats, self._dof_name(dof_id))
             if stat is None:
