@@ -5,12 +5,14 @@ Data prep, vectorised FK, PCA fitting, and Matplotlib rendering.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Callable
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pcax
 from pcax.pca import PCAState
+import yourdfpy
 
 # (x_min, x_max), (y_min, y_max)
 AxisLim = tuple[tuple[float, float], tuple[float, float]]
@@ -22,14 +24,13 @@ AxisLim = tuple[tuple[float, float], tuple[float, float]]
 
 
 def make_fk_fn(link: str = "link_eef") -> Callable[[np.ndarray], np.ndarray]:
-    try:
-        from xgym import calibrate
-        from xgym.calibrate.urdf.robot import urdf as urdf_path
-        import yourdfpy
-    except ModuleNotFoundError as e:
-        raise RuntimeError("Viz FK requires `yourdfpy` and `xgym` in the runtime environment.") from e
-
-    robot = yourdfpy.URDF.load(urdf_path, mesh_dir=calibrate.urdf.robot.DNAME / "assets")
+    urdf_path = Path.cwd() / "xarm7_standalone.urdf"
+    mesh_dir = Path.cwd() / "assets"
+    if not urdf_path.exists():
+        raise FileNotFoundError(f"Expected URDF at {urdf_path}")
+    if not mesh_dir.exists():
+        raise FileNotFoundError(f"Expected mesh dir at {mesh_dir}")
+    robot = yourdfpy.URDF.load(str(urdf_path), mesh_dir=str(mesh_dir))
 
     def fk_fn(q: np.ndarray) -> np.ndarray:
         q = np.asarray(q, dtype=np.float64)

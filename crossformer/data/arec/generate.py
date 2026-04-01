@@ -10,9 +10,10 @@ import warnings
 import jax
 import jax.numpy as jnp
 import numpy as np
-import xgym
-from xgym.rlds.util.trajectory import binarize_gripper_actions as binarize
-from xgym.rlds.util.trajectory import scan_noop
+
+from crossformer.data.utils.trajectory import binarize_gripper_actions as binarize
+from crossformer.data.utils.trajectory import scan_noop
+from crossformer.utils.io.memmap import read
 
 log = logging.getLogger(__name__)
 
@@ -167,13 +168,13 @@ class Builder:
         log.debug(path)
 
         try:
-            info, ep = xgym.viz.memmap.read(path)
+            info, ep = read(path)
             cams = [k for k in info["schema"] if "camera" in k]
             if len(cams) < 2:
                 raise ValueError(f"Not enough cameras {cams}")
         except Exception as e:
-            xgym.logger.error(f"Error reading {path}")
-            xgym.logger.error(e)
+            log.error("Error reading %s", path)
+            log.error("%s", e)
             return None
 
         n = len(ep["time"])

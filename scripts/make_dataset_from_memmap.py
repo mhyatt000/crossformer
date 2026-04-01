@@ -13,13 +13,13 @@ import numpy as np
 from rich import print
 from tqdm import tqdm
 import tyro
-from xgym.rlds.util.trajectory import binarize_gripper_actions as binarize
-from xgym.rlds.util.trajectory import scan_noop
 
 from crossformer.data.arec.arec import ArrayRecordBuilder
 from crossformer.data.grain.datasets import (
     drop,
 )
+from crossformer.data.utils.trajectory import binarize_gripper_actions as binarize
+from crossformer.data.utils.trajectory import scan_noop
 from crossformer.data.grain.map import flatmap
 from crossformer.data.grain.util.mano import acroll_stacked
 from crossformer.data.grain.util.remap import rekey

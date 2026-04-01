@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import jax
 import jax.numpy as jnp
 import jaxlie
 import pyroki as pk  # from : src/pyroki/viewer/_manipulability_ellipse.py
-from xgym import calibrate
-from xgym.calibrate.urdf.robot import urdf
 import yourdfpy
 
 
@@ -16,7 +16,14 @@ def pose6(q):  # J_6xN = jax.jacfwd(pose6)(joints)     # (6, n)
     return jnp.concatenate([p, r])  # (6,)
 
 
-urdf = yourdfpy.URDF.load(urdf, mesh_dir=calibrate.urdf.robot.DNAME / "assets")
+def _load_urdf() -> yourdfpy.URDF:
+    urdf_path = Path.cwd() / "xarm7_standalone.urdf"
+    mesh_dir = Path.cwd() / "assets"
+    if not urdf_path.exists():
+        raise FileNotFoundError(f"Expected URDF at {urdf_path}")
+    if not mesh_dir.exists():
+        raise FileNotFoundError(f"Expected mesh dir at {mesh_dir}")
+    return yourdfpy.URDF.load(str(urdf_path), mesh_dir=str(mesh_dir))
 
 
 def atleast_4d(x):
@@ -25,7 +32,7 @@ def atleast_4d(x):
 
 
 def make_robot():
-    return pk.Robot.from_urdf(urdf)
+    return pk.Robot.from_urdf(_load_urdf())
 
 
 def get_jac_fn(robot: pk.Robot, pad_gripper: bool = False):

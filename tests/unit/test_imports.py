@@ -8,11 +8,6 @@ def test_third_party_tf():
 
 
 @pytest.mark.skip
-def test_third_party_xgym():
-    pass
-
-
-@pytest.mark.skip
 def test_third_party_xclients():
     pass
 
