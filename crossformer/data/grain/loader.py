@@ -268,6 +268,8 @@ class GrainDataFactory:
     mp: int = 8  # of processes for mp prefetch. set to 0 to disable mp prefetch
     shuffle: bool = True
     mask_slot: bool = True  # mask body-part slots in embody_transform; disable for eval/debug
+    shuffle_slot: bool = True  # shuffle body-part slot order in embody_transform; disable for eval/debug
+    imaug: bool = True  # apply augmax image augmentations (channel shuffle, random aspect, rotate)
 
     def source2ds(self, dconfig, tfconfig, cfg: cn.Train, dataset: Arec, max_a: int = 0) -> GrainDataLoader:
         ds, stats = make_single_dataset(
@@ -279,7 +281,11 @@ class GrainDataFactory:
         )
         if max_a > 0:
             embody_fn = partial(
-                embody_transform, embodiment=dataset.embodiment, max_a=max_a, mask_prob=0.25 if self.mask_slot else 0.0
+                embody_transform,
+                embodiment=dataset.embodiment,
+                max_a=max_a,
+                mask_prob=0.25 if self.mask_slot else 0.0,
+                shuffle_slot=self.shuffle_slot,
             )
             ds = ds.map(embody_fn)
             log.debug("applied embody transform: %s (max_a=%d)", dconfig.name, max_a)
@@ -385,7 +391,7 @@ class GrainDataFactory:
         # quick hack with keys
         dconfig, tfconfig = sources[0][1], sources[0][2]
         dconfig.keys.image = list(batch["observation"]["image"].keys())
-        ds = do_frame_transforms(dconfig, tfconfig, ds)
+        ds = do_frame_transforms(dconfig, tfconfig, ds, imaug=self.imaug)
         ds = ds.map(compatibility)
 
         log.info("returning final dataset")

@@ -187,6 +187,7 @@ def build_embodiment_action(
     max_a: int,
     rng: np.random.Generator,
     mask_prob: float = 0.10,
+    shuffle_slot: bool = True,
     key_map: dict[str, str] | None = None,
 ) -> dict[str, np.ndarray]:
     """End-to-end: extract actions, sample modes, shuffle order, build block.
@@ -198,6 +199,7 @@ def build_embodiment_action(
         max_a: global pad width.
         rng: numpy generator for mode sampling and shuffling.
         mask_prob: probability of masking each body part (default 0.25).
+        shuffle_slot: whether to randomly permute body-part slot order.
         key_map: optional override for body-part-name → action-dict-key.
 
     Returns:
@@ -206,7 +208,7 @@ def build_embodiment_action(
     parts = list(embodiment.parts)
     actions = extract_part_actions(action_dict, embodiment, key_map)
     modes = sample_modes(len(parts), rng, mask_prob)
-    order = rng.permutation(len(parts)).tolist()
+    order = rng.permutation(len(parts)).tolist() if shuffle_slot else list(range(len(parts)))
     return build_action_block(parts, actions, modes, order, max_a)
 
 
@@ -234,6 +236,7 @@ def embody_transform(
     embodiment: Embodiment,
     max_a: int,
     mask_prob: float = 0.10,
+    shuffle_slot: bool = True,
 ) -> dict:
     """Grain .map() transform: adds act.base, act.id, act.embody, mask.act."""
     rng = np.random.default_rng()
@@ -243,6 +246,7 @@ def embody_transform(
         max_a,
         rng,
         mask_prob,
+        shuffle_slot=shuffle_slot,
     )
     block["act.embody"] = _encode_name(embodiment.name)
     sample.update(block)
