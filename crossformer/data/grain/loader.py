@@ -267,6 +267,7 @@ class GrainDataFactory:
     stats: dict[str, Any] = field(init=False, default_factory=dict)
     mp: int = 8  # of processes for mp prefetch. set to 0 to disable mp prefetch
     shuffle: bool = True
+    mask_slot: bool = True  # mask body-part slots in embody_transform; disable for eval/debug
 
     def source2ds(self, dconfig, tfconfig, cfg: cn.Train, dataset: Arec, max_a: int = 0) -> GrainDataLoader:
         ds, stats = make_single_dataset(
@@ -277,7 +278,9 @@ class GrainDataFactory:
             seed=cfg.seed,
         )
         if max_a > 0:
-            embody_fn = partial(embody_transform, embodiment=dataset.embodiment, max_a=max_a, mask_prob=0.25)
+            embody_fn = partial(
+                embody_transform, embodiment=dataset.embodiment, max_a=max_a, mask_prob=0.25 if self.mask_slot else 0.0
+            )
             ds = ds.map(embody_fn)
             log.debug("applied embody transform: %s (max_a=%d)", dconfig.name, max_a)
         self.stats[dconfig.name] = stats
