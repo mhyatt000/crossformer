@@ -16,6 +16,8 @@ import pyroki as pk
 import torch
 import yourdfpy
 
+from crossformer.cn.base import default
+
 # ---------------------------------------------------------------------------
 # Geometry helpers
 # ---------------------------------------------------------------------------
@@ -160,6 +162,52 @@ def _perspective(fovy_deg: float, aspect: float, znear: float, zfar: float) -> n
 # ---------------------------------------------------------------------------
 # Callback
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class RastConfig:
+    """Config for ``RastCallback``."""
+
+    urdf: Path | None = Path("xarm7_standalone.urdf")
+    cams: tuple[Path, ...] = default(
+        (
+            Path("data/cam/over/HT.npz"),
+            Path("data/cam/side/HT.npz"),
+            Path("data/cam/low/HT.npz"),
+        )
+    )
+    mesh_dir: Path | None = Path("assets")
+    width: int = 256
+    height: int = 256
+    fovy: float = 45.0
+    color: tuple[float, float, float] = (0.2, 0.4, 0.9)
+    bg: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    alpha: float = 0.6
+    joint_dim: int | None = None
+    gripper_joint: str = "drive_joint"
+    gripper_open: float = 1.0
+    gripper_closed: float = 0.0
+    invert_gripper: bool = True
+
+    def create(self) -> RastCallback | None:
+        if self.urdf is None:
+            return None
+        return RastCallback(
+            urdf=self.urdf,
+            cams=list(self.cams) if self.cams else None,
+            mesh_dir=self.mesh_dir,
+            width=self.width,
+            height=self.height,
+            fovy=self.fovy,
+            color=self.color,
+            bg=self.bg,
+            alpha=self.alpha,
+            joint_dim=self.joint_dim,
+            gripper_joint=self.gripper_joint,
+            gripper_open=self.gripper_open,
+            gripper_closed=self.gripper_closed,
+            invert_gripper=self.invert_gripper,
+        )
 
 
 @dataclass

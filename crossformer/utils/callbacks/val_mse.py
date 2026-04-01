@@ -16,6 +16,32 @@ from crossformer.utils.callbacks.viz import ActionBatchDenormalizer
 
 
 @dataclass
+class ValMSEConfig:
+    """Config for ``ValMSECallback``."""
+
+    every: int = 500
+    head_name: str = "xflow"
+    ds_key: tuple[str, ...] = ("info", "dataset_name")
+    guide_keys: tuple[str, ...] | None = None
+    sample_idx: int = 0
+    print_sample: bool = True
+
+    def create(
+        self,
+        stats: Mapping[str, Any],
+        guide_keys: tuple[str, ...] | None = None,
+    ) -> ValMSECallback:
+        return ValMSECallback(
+            stats=stats,
+            head_name=self.head_name,
+            ds_key=self.ds_key,
+            guide_keys=guide_keys or self.guide_keys or ("action.position", "action.orientation"),
+            sample_idx=self.sample_idx,
+            print_sample=self.print_sample,
+        )
+
+
+@dataclass
 class ValMSECallback:
     """Log fixed-batch action MSE for XFlow validation."""
 

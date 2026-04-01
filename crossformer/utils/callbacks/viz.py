@@ -10,12 +10,40 @@ import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
 
+from crossformer.cn.base import default
 from crossformer.data.grain.metadata import ArrayStatistics, DatasetStatistics
 from crossformer.embody import DOF, MASK_ID
 from crossformer.utils.jax_utils import jax2str
 from crossformer.utils.mytyping import Data
 from crossformer.viz.flow_pca import compute_fk, fit_pca, make_fk_fn, prep_data, render_frames
 import wandb
+
+
+@dataclass
+class VizConfig:
+    """Config for ``VizCallback``."""
+
+    every: int = 500
+    flow_key: tuple[str, ...] = default(("predict",))
+    base_key: tuple[str, ...] = default(("act", "base"))
+    sample_idx: int = 0
+    figsize: tuple[float, float] = (12.0, 6.0)
+    fps: int = 12
+    dpi: int = 120
+    joint_dim: int = 7
+    fk_link: str = "link_eef"
+
+    def create(self) -> VizCallback:
+        return VizCallback(
+            flow_key=self.flow_key,
+            base_key=self.base_key,
+            sample_idx=self.sample_idx,
+            figsize=self.figsize,
+            fps=self.fps,
+            dpi=self.dpi,
+            joint_dim=self.joint_dim,
+            fk_link=self.fk_link,
+        )
 
 
 @dataclass

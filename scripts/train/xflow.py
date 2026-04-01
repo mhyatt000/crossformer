@@ -11,7 +11,7 @@ Usage:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 import re
@@ -28,6 +28,7 @@ from tqdm import tqdm
 import tyro
 
 import crossformer.cn as cn
+from crossformer.cn.base import default
 from crossformer.data.grain.embody import decode_embody_name
 from crossformer.embody import DOF
 from crossformer.model.components.heads.xflow import XFlowHead
@@ -36,10 +37,15 @@ from crossformer.model.components.transformer import common_transformer_sizes
 from crossformer.model.components.vit_encoders import ResNet26FILM, SmallStem
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.run.train_step import lookup_guide, make_train_step
-from crossformer.utils.callbacks.rast import RastCallback
+from crossformer.utils.callbacks.rast import RastConfig
 from crossformer.utils.callbacks.save import SaveCallback
-from crossformer.utils.callbacks.val_mse import ValMSECallback
-from crossformer.utils.callbacks.viz import ActionBatchDenormalizer, ChunkVizCallback, HistVizCallback, VizCallback
+from crossformer.utils.callbacks.val_mse import ValMSEConfig
+from crossformer.utils.callbacks.viz import (
+    ActionBatchDenormalizer,
+    ChunkVizCallback,
+    HistVizCallback,
+    VizConfig,
+)
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec, spec
 from crossformer.utils.train_utils import create_optimizer, Timer, TrainState
@@ -95,24 +101,11 @@ class Config:
 
     mp: int = 8  # grain multiproc (for data loading)
     hist_every: int = 500  # histogram log interval
-    viz_every: int = 500  # trajectory video log interval (0 disables)
-    viz_fps: int = 12  # logged trajectory video fps
-    val_mse_every: int = 500  # fixed-batch action eval interval (0 disables)
-    val_mse_print_sample: bool = True  # print one denormalized sample per eval
-    val_mse_sample_idx: int = 0  # sample to print from fixed eval batch
+    viz: VizConfig = default(VizConfig())
+    val_mse: ValMSEConfig = default(ValMSEConfig())
+    rast: RastConfig = default(RastConfig())
 
-    # Robot rasterisation
-    rast_urdf: Path | None = Path("xarm7_standalone.urdf")  # URDF for rast callback (None disables)
-    rast_mesh_dir: Path | None = Path("assets")  # mesh dir for URDF
-    rast_cams: tuple[Path, ...] = (
-        Path("data/cam/over/HT.npz"),
-        Path("data/cam/side/HT.npz"),
-        Path("data/cam/low/HT.npz"),
-    )
-    rast_width: int = 256
-    rast_height: int = 256
-
-    wandb: cn.Wandb = field(default_factory=cn.Wandb)
+    wandb: cn.Wandb = default(cn.Wandb())
 
 
 # -- helpers ------------------------------------------------------------------
@@ -478,22 +471,9 @@ def main(cfg: Config):
 
     hist_cb = HistVizCallback(stats=dataset.dataset_statistics)
     chunk_cb = ChunkVizCallback(stats=dataset.dataset_statistics)
-    viz_cb = VizCallback(flow_key=("predict",), base_key=("act", "base"), fps=cfg.viz_fps)
-    rast_cb = None
-    if cfg.rast_urdf is not None:
-        rast_cb = RastCallback(
-            urdf=cfg.rast_urdf,
-            cams=list(cfg.rast_cams) if cfg.rast_cams else None,
-            mesh_dir=cfg.rast_mesh_dir,
-            width=cfg.rast_width,
-            height=cfg.rast_height,
-        )
-    val_mse_cb = ValMSECallback(
-        stats=dataset.dataset_statistics,
-        guide_keys=cfg.guide_keys,
-        sample_idx=cfg.val_mse_sample_idx,
-        print_sample=cfg.val_mse_print_sample,
-    )
+    viz_cb = cfg.viz.create()
+    rast_cb = cfg.rast.create()
+    val_mse_cb = cfg.val_mse.create(stats=dataset.dataset_statistics, guide_keys=cfg.guide_keys)
 
     # Train
     print(Rule("training"))
@@ -555,7 +535,7 @@ def main(cfg: Config):
             table.add_row(*row)
             hist_metrics = {}
             need_pred = (cfg.hist_every > 0 and (step % cfg.hist_every == 0 or step == cfg.steps - 1)) or (
-                cfg.viz_every > 0 and (step % cfg.viz_every == 0 or step == cfg.steps - 1)
+                cfg.viz.every > 0 and (step % cfg.viz.every == 0 or step == cfg.steps - 1)
             )
             if need_pred:
                 bound = model.module.bind({"params": state.model.params})
@@ -580,7 +560,7 @@ def main(cfg: Config):
                     chunk_imgs = chunk_cb(batch, {"predict": pred_flat})
                     for k, v in chunk_imgs.items():
                         hist_metrics[f"action_chunks/{k}"] = v
-                if cfg.viz_every > 0 and (step % cfg.viz_every == 0 or step == cfg.steps - 1):
+                if cfg.viz.every > 0 and (step % cfg.viz.every == 0 or step == cfg.steps - 1):
                     pred_flow = bound.heads["xflow"].predict_action(
                         transformer_outputs,
                         rng=pred_rng,
@@ -596,7 +576,7 @@ def main(cfg: Config):
                         frames = viz_cb(viz_batch)
                         hist_metrics["flow_pca/video"] = wandb.Video(
                             np.moveaxis(frames, -1, 1),
-                            fps=cfg.viz_fps,
+                            fps=cfg.viz.fps,
                         )
                         if rast_cb is not None:
                             rast_batch, rast_keep = adapt_rast_batch(batch["act"], pred_flow_np)
@@ -630,7 +610,7 @@ def main(cfg: Config):
             state.model.params,
             val_batch,
             step,
-            cfg.val_mse_every,
+            cfg.val_mse.every,
             pred_rng,
             cfg.use_guidance,
         )
