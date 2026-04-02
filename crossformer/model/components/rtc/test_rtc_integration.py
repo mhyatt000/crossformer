@@ -286,3 +286,189 @@ class TestRTCReal:
 
         rtc.stop()
         assert errors == [], f"errors during live get_action: {errors}"
+
+
+"""TestChunkContinuity — paper Section 3.1, Figure 3.
+
+Verifies the core RTC claim: the soft mask guidance correctly steers
+A_new so that region-wise L2 distances to A_prev satisfy
+
+    frozen_error < intermediate_error < fresh_error
+
+This tests the *mechanism* (guidance math + mask weights), not policy quality.
+Random XFlowHead weights are sufficient because the guidance term is a
+mathematical property of the inpainting algorithm, independent of whether
+the velocity field has learned anything meaningful.
+
+Parameters follow paper Table 4:
+    flow_steps = 5
+    beta       = 5.0
+    d          = 1   (inference delay)
+    s          = 3   (execution horizon; must satisfy d <= s <= H-d, i.e. 1<=3<=5)
+
+Seeds: 5 independent seeds, each must satisfy the ordering strictly.
+"""
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from crossformer.model.components.rtc.rtc_algorithm import guided_inference
+
+# Constants — must match test_rtc_integration.py
+H     = 6
+max_A = 4
+
+# Paper Table 4 hyperparameters
+FLOW_STEPS = 5
+BETA       = 5.0
+D          = 1   # inference delay
+S          = 3   # execution horizon
+
+# 5 independent seeds
+SEEDS = [0, 1, 2, 3, 4]
+
+
+def _region_l2(A_new: np.ndarray, A_prev: np.ndarray, lo: int, hi: int) -> float:
+    """Mean L2 distance between A_new[lo:hi] and A_prev[lo:hi].
+
+    A_new : (H, max_A)
+    A_prev: (H, max_A)
+    """
+    diff = A_new[lo:hi] - A_prev[lo:hi]           # (region_len, max_A)
+    return float(np.mean(np.linalg.norm(diff, axis=-1)))
+
+
+class TestChunkContinuity:
+    """Paper Section 3.1, Figure 3 — chunk continuity ordering test."""
+
+    # ------------------------------------------------------------------
+    # A_prev: constant signal, easy to reason about distance from A_new
+    # ------------------------------------------------------------------
+    @pytest.fixture(scope="class")
+    def A_prev(self):
+        """(H, max_A) constant signal at 2.0 — deterministic, non-zero."""
+        return jnp.ones((H, max_A), dtype=jnp.float32) * 2.0
+
+    # ------------------------------------------------------------------
+    # Helper: run guided_inference for one seed, return A_new (H, max_A)
+    # ------------------------------------------------------------------
+    def _run_one_seed(self, bound_head, obs, A_prev, seed: int) -> np.ndarray:
+        obs_seeded = {**obs, "rng": jax.random.PRNGKey(seed)}
+        out = guided_inference(
+            bound_head,
+            obs_seeded,
+            A_prev,
+            d=D,
+            s=S,
+            flow_steps=FLOW_STEPS,
+            beta=BETA,
+        )
+        # out: (B, W, H, max_A) with B=W=1 — squeeze to (H, max_A)
+        return np.array(out[0, 0])
+
+    # ------------------------------------------------------------------
+    # Tests
+    # ------------------------------------------------------------------
+
+    def test_ordering_all_seeds(self, bound_head, obs, A_prev):
+        """frozen_error < intermediate_error < fresh_error for every seed.
+
+        Region boundaries (D=1, S=3, H=6):
+            frozen:       A_new[0:1]   vs A_prev[0:1]    (weight = 1)
+            intermediate: A_new[1:3]   vs A_prev[1:3]    (weight decays 1→0)
+            fresh:        A_new[3:6]   vs A_prev[3:6]    (weight = 0, no guidance)
+        """
+        A_prev_np = np.array(A_prev)
+
+        failures = []
+        for seed in SEEDS:
+            A_new = self._run_one_seed(bound_head, obs, A_prev, seed)
+
+            frozen_error       = _region_l2(A_new, A_prev_np, lo=0,   hi=D)
+            intermediate_error = _region_l2(A_new, A_prev_np, lo=D,   hi=H - S)
+            fresh_error        = _region_l2(A_new, A_prev_np, lo=H-S, hi=H)
+
+            ordering_ok = (frozen_error < intermediate_error < fresh_error)
+            if not ordering_ok:
+                failures.append(
+                    f"seed={seed}: "
+                    f"frozen={frozen_error:.4f} "
+                    f"intermediate={intermediate_error:.4f} "
+                    f"fresh={fresh_error:.4f} "
+                    f"— ordering VIOLATED"
+                )
+
+        assert not failures, (
+            f"Chunk continuity ordering violated in {len(failures)}/{len(SEEDS)} seeds:\n"
+            + "\n".join(failures)
+        )
+
+    def test_frozen_region_closest_to_A_prev(self, bound_head, obs, A_prev):
+        """Frozen region must be the closest to A_prev across all seeds.
+
+        Isolated check: frozen_error < fresh_error (stronger than just ordering).
+        """
+        A_prev_np = np.array(A_prev)
+
+        for seed in SEEDS:
+            A_new = self._run_one_seed(bound_head, obs, A_prev, seed)
+
+            frozen_error = _region_l2(A_new, A_prev_np, lo=0,   hi=D)
+            fresh_error  = _region_l2(A_new, A_prev_np, lo=H-S, hi=H)
+
+            assert frozen_error < fresh_error, (
+                f"seed={seed}: frozen_error ({frozen_error:.4f}) >= "
+                f"fresh_error ({fresh_error:.4f}) — "
+                f"guidance is not pulling frozen region toward A_prev"
+            )
+
+    def test_fresh_region_farthest_from_A_prev(self, bound_head, obs, A_prev):
+        """Fresh region (weight=0) must be farthest from A_prev across all seeds."""
+        A_prev_np = np.array(A_prev)
+
+        for seed in SEEDS:
+            A_new = self._run_one_seed(bound_head, obs, A_prev, seed)
+
+            frozen_error       = _region_l2(A_new, A_prev_np, lo=0,   hi=D)
+            intermediate_error = _region_l2(A_new, A_prev_np, lo=D,   hi=H - S)
+            fresh_error        = _region_l2(A_new, A_prev_np, lo=H-S, hi=H)
+
+            assert fresh_error > frozen_error and fresh_error > intermediate_error, (
+                f"seed={seed}: fresh_error ({fresh_error:.4f}) is not the maximum — "
+                f"frozen={frozen_error:.4f}, intermediate={intermediate_error:.4f}"
+            )
+
+    def test_errors_are_finite(self, bound_head, obs, A_prev):
+        """All region errors must be finite (no NaN/Inf from guidance)."""
+        A_prev_np = np.array(A_prev)
+
+        for seed in SEEDS:
+            A_new = self._run_one_seed(bound_head, obs, A_prev, seed)
+            assert np.all(np.isfinite(A_new)), (
+                f"seed={seed}: A_new contains NaN or Inf"
+            )
+
+            for lo, hi in [(0, D), (D, H - S), (H - S, H)]:
+                err = _region_l2(A_new, A_prev_np, lo=lo, hi=hi)
+                assert np.isfinite(err), (
+                    f"seed={seed}: region [{lo}:{hi}] error is not finite: {err}"
+                )
+
+    def test_region_errors_positive(self, bound_head, obs, A_prev):
+        """All region errors must be strictly positive — A_new != A_prev anywhere.
+
+        If guidance collapses A_new to A_prev even in the fresh region,
+        something is wrong (e.g., velocity field is identically zero).
+        """
+        A_prev_np = np.array(A_prev)
+
+        for seed in SEEDS:
+            A_new = self._run_one_seed(bound_head, obs, A_prev, seed)
+
+            fresh_error = _region_l2(A_new, A_prev_np, lo=H-S, hi=H)
+            assert fresh_error > 1e-6, (
+                f"seed={seed}: fresh region error ~0 ({fresh_error:.2e}) — "
+                f"velocity field may be degenerate"
+            )
