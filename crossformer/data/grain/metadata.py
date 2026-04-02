@@ -326,3 +326,32 @@ def normalize_action_and_proprio(
             raise ValueError(f"Unknown normalization type: {normalization_type}")
     step["observation"] = obs
     return step
+
+
+def normalize_proprio(
+    step: dict,
+    *,
+    metadata: DatasetStatistics,
+    normalization_type: str,
+    proprio_keys: Sequence[str],
+    action_mask: Sequence[bool] | Mapping[str, Sequence[bool]] | None = None,
+    skip_norm_keys: Sequence[str] = (),
+    device: jax.Device | None = cpu,
+) -> dict:
+    """Normalizes proprioceptive observations but not actions."""
+
+    obs = step.get("observation")
+    for key in proprio_keys:
+        if key not in obs or key in skip_norm_keys:
+            continue
+        if key not in metadata.proprio:
+            continue
+        if normalization_type == NormalizationType.NORMAL:
+            obs[key] = metadata.proprio[key].normalize(obs[key])
+        elif normalization_type == NormalizationType.BOUNDS:
+            ma = metadata.proprio[key]
+            obs[key] = 2.0 * (obs[key] - ma.minimum) / np.maximum(ma.maximum - ma.minimum, EPS) - 1.0
+        else:
+            raise ValueError(f"Unknown normalization type: {normalization_type}")
+    step["observation"] = obs
+    return step

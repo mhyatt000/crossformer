@@ -76,7 +76,7 @@ def mix_precompatibility(x):
     crop = partial(center_crop, h=480, w=480)
     x["observation"]["image"] = jax.tree.map(crop, x["observation"]["image"])
     x["observation"]["image"] = jax.tree.map(
-        lambda img: np.array(cv2.resize(img, (224, 224))), x["observation"]["image"]
+        lambda img: np.array(cv2.resize(np.asarray(img), (224, 224))), x["observation"]["image"]
     )
 
     def _reshape_int(y):
