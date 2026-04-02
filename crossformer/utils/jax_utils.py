@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import wraps
 import logging
 import os
@@ -14,6 +15,17 @@ import numpy as np
 from crossformer.utils.mytyping import PyTree
 
 cpu = jax.devices("cpu")[0]
+
+
+def compose(*fns: Callable[[PyTree], PyTree]) -> Callable[[PyTree], PyTree]:
+    """Chain multiple PyTree transforms into a single callable."""
+
+    def run(x: PyTree) -> PyTree:
+        for fn in fns:
+            x = fn(x)
+        return x
+
+    return run
 
 
 class JaxCPUProxy:
