@@ -82,6 +82,67 @@ def ezdiff(a: dict[str, Any], b: dict[str, Any], simple=True):
     pprint(diff(a, b, simple=simple))
 
 
+def valdiff(a: dict[str, Any], b: dict[str, Any], *, atol: float = 1e-5, rtol: float = 1e-5):
+    """Compare two trees element-wise and report per-key value differences.
+
+    Returns a dict with:
+      - ``match``: keys where values are close (within atol/rtol)
+      - ``mismatch``: keys where values differ, with max_abs_diff and shapes
+      - ``a_only`` / ``b_only``: keys present in only one tree
+    """
+    import numpy as _np
+
+    from crossformer.utils.tree import flat
+
+    fa, fb = flat(a), flat(b)
+    keys_a, keys_b = set(fa), set(fb)
+
+    result: dict[str, Any] = {
+        "match": {},
+        "mismatch": {},
+        "a_only": sorted(keys_a - keys_b),
+        "b_only": sorted(keys_b - keys_a),
+    }
+
+    for k in sorted(keys_a & keys_b):
+        va, vb = _np.asarray(fa[k]), _np.asarray(fb[k])
+        if va.shape != vb.shape:
+            result["mismatch"][k] = {"reason": "shape", "a": va.shape, "b": vb.shape}
+            continue
+        if va.dtype.kind in ("U", "S", "O") or vb.dtype.kind in ("U", "S", "O"):
+            eq = _np.array_equal(va, vb)
+            result["match" if eq else "mismatch"][k] = {"equal": eq}
+            continue
+        if _np.allclose(va, vb, atol=atol, rtol=rtol, equal_nan=True):
+            result["match"][k] = True
+        else:
+            diff_abs = _np.abs(va.astype(float) - vb.astype(float))
+            result["mismatch"][k] = {
+                "max_abs_diff": float(diff_abs.max()),
+                "mean_abs_diff": float(diff_abs.mean()),
+                "a_range": (float(va.min()), float(va.max())),
+                "b_range": (float(vb.min()), float(vb.max())),
+            }
+
+    return result
+
+
+def ezvaldiff(a: dict[str, Any], b: dict[str, Any], *, atol: float = 1e-5, rtol: float = 1e-5):
+    """Pretty-print a value-level diff between two nested dicts."""
+    from rich.pretty import pprint
+
+    result = valdiff(a, b, atol=atol, rtol=rtol)
+    n_match = len(result["match"])
+    n_mis = len(result["mismatch"])
+    print(f"  {n_match} keys match, {n_mis} keys mismatch")
+    if result["a_only"]:
+        print(f"  a_only: {result['a_only']}")
+    if result["b_only"]:
+        print(f"  b_only: {result['b_only']}")
+    if result["mismatch"]:
+        pprint(result["mismatch"])
+
+
 class ModuleSpec(TypedDict):
     """A JSON-serializable representation of a function or class with some default args and kwargs to pass to
     it. Useful for specifying a particular class or function in a config file, while keeping it serializable
