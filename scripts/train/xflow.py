@@ -11,7 +11,7 @@ Usage:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 import re
@@ -29,19 +29,20 @@ import tyro
 
 import crossformer.cn as cn
 from crossformer.cn.base import default
+from crossformer.cn.dataset import DataSourceE
+from crossformer.cn.dataset.dataset import Loader
 from crossformer.data.grain.embody import decode_embody_name
-from crossformer.embody import DOF
 from crossformer.model.components.heads.xflow import XFlowHead
 from crossformer.model.components.tokenizers import ImageTokenizer, LowdimObsTokenizer
 from crossformer.model.components.transformer import common_transformer_sizes
 from crossformer.model.components.vit_encoders import ResNet26FILM, SmallStem
 from crossformer.model.crossformer_model import CrossFormerModel
+from crossformer.run.xflow_eval import XFlowEvalCallbacks, XFlowEvalLoop, extract_bundled_actions, normalize_obs
 from crossformer.run.train_step import lookup_guide, make_train_step
 from crossformer.utils.callbacks.rast import RastConfig
 from crossformer.utils.callbacks.save import SaveCallback
 from crossformer.utils.callbacks.val_mse import ValMSEConfig
 from crossformer.utils.callbacks.viz import (
-    ActionBatchDenormalizer,
     ChunkVizCallback,
     HistVizCallback,
     VizConfig,
@@ -99,7 +100,9 @@ class Config:
     save_dir: str | None = Path().home().expanduser()  # checkpoint root dir (None to disable)
     save_interval: int = 25_000  # save every N steps
 
+    train_loader: Loader = default(Loader(use_grain=True))
     mp: int = 8  # grain multiproc (for data loading)
+    eval_frames: int = 64  # eval examples to poll for rast videos
     hist_every: int = 500  # histogram log interval
     viz: VizConfig = default(VizConfig())
     val_mse: ValMSEConfig = default(ValMSEConfig())
@@ -115,12 +118,6 @@ VISION_ENCODERS = {
     "small_stem": SmallStem,
     "resnet26": ResNet26FILM,
 }
-JOINT_NAMES = tuple(f"j{i}" for i in range(7))
-JOINT_IDS = tuple(DOF[name] for name in JOINT_NAMES)
-JOINT_ID_TO_IDX = {dof_id: i for i, dof_id in enumerate(JOINT_IDS)}
-RAST_NAMES = (*JOINT_NAMES, "gripper")
-RAST_IDS = tuple(DOF[name] for name in RAST_NAMES)
-RAST_ID_TO_IDX = {dof_id: i for i, dof_id in enumerate(RAST_IDS)}
 
 
 def make_model_config(cfg, max_h, max_a, max_w, guide_dim=None):
@@ -176,18 +173,6 @@ def make_model_config(cfg, max_h, max_a, max_w, guide_dim=None):
     }
 
 
-def normalize_obs(obs, obs_keys):
-    """Flatten selected lowdim inputs to (B, W, D)."""
-    out = dict(obs)
-    for key in obs_keys:
-        x = out[key]
-        if x.ndim == 2:
-            out[key] = x[..., None]
-        elif x.ndim > 3:
-            out[key] = x.reshape(*x.shape[:2], -1)
-    return out
-
-
 def resolve_obs_keys(obs, patterns):
     """Resolve regex patterns against real observation keys."""
     keys = []
@@ -198,105 +183,12 @@ def resolve_obs_keys(obs, patterns):
     return tuple(keys)
 
 
-def extract_bundled_actions(batch, max_h):
-    """Extract bundled actions from grain embody pipeline.
-
-    Returns:
-        actions: (B, W, H, max_a) — W=1 added if missing.
-        dof_ids: (B, max_a) — from act.id.
-        chunk_steps: (B, H) — just arange(H) for now.
-            NOTE: chunk_steps padding disabled — all positions are valid.
-    """
-    actions = batch["act"]["base"]  # (B, H, max_a)
-    if actions.ndim == 3:
-        actions = actions[:, None, :, :]  # (B, 1, H, max_a)
-    B = actions.shape[0]
-    H = actions.shape[2]
-
-    dof_ids = batch["act"]["id"]  # (B, max_a)
-    # NOTE: no chunk_steps padding — just dense arange(H)
-    chunk_steps = jnp.tile(jnp.arange(H, dtype=jnp.float32)[None], (B, 1))
-
-    return actions, dof_ids, chunk_steps
-
-
 def zero_lowdim_obs(obs, obs_keys):
     """Zero resolved lowdim observation keys for whole-modality dropout."""
     out = dict(obs)
     for key in obs_keys:
         out[key] = jnp.zeros_like(out[key])
     return out
-
-
-def adapt_canonical_batch(act, flow, dof_id_to_idx):
-    """Map bundled slot actions to a canonical DOF order."""
-    base = np.asarray(act["base"], dtype=np.float32)
-    dof_ids = np.asarray(act["id"])
-    flow = np.asarray(flow, dtype=np.float32)
-    if base.ndim == 3:
-        base = base[:, None, :, :]
-    if base.ndim != 4:
-        raise ValueError(f"Expected act.base ndim 3 or 4, got {base.shape}")
-    if flow.ndim != 5:
-        raise ValueError(f"Expected flow ndim 5, got {flow.shape}")
-    if dof_ids.ndim != 2:
-        raise ValueError(f"Expected act.id ndim 2, got {dof_ids.shape}")
-    if base.shape[0] != dof_ids.shape[0] or flow.shape[1] != dof_ids.shape[0]:
-        raise ValueError(f"Batch mismatch: base={base.shape} flow={flow.shape} dof_ids={dof_ids.shape}")
-
-    keep = []
-    out_dim = len(dof_id_to_idx)
-    base_joint = np.zeros((*base.shape[:-1], out_dim), dtype=np.float32)
-    flow_joint = np.zeros((*flow.shape[:-1], out_dim), dtype=np.float32)
-    for b, row in enumerate(dof_ids):
-        has_target = False
-        for src, dof_id in enumerate(row):
-            dst = dof_id_to_idx.get(int(dof_id))
-            if dst is None:
-                continue
-            has_target = True
-            base_joint[b, ..., dst] = base[b, ..., src]
-            flow_joint[:, b, ..., dst] = flow[:, b, ..., src]
-        if has_target:
-            keep.append(b)
-
-    if not keep:
-        return None, None
-    keep = np.asarray(keep, dtype=np.int32)
-    return {
-        "act": {"base": base_joint[keep]},
-        "predict": flow_joint[:, keep],
-    }, keep
-
-
-def adapt_viz_batch(act, flow):
-    """Map bundled actions to canonical j0..j6 order for VizCallback."""
-    return adapt_canonical_batch(act, flow, JOINT_ID_TO_IDX)
-
-
-def adapt_rast_batch(act, flow):
-    """Map bundled actions to canonical j0..j6+gripper order for RastCallback."""
-    return adapt_canonical_batch(act, flow, RAST_ID_TO_IDX)
-
-
-def denorm_joints(arr: np.ndarray, denorm: ActionBatchDenormalizer, ds_name: str) -> np.ndarray:
-    """Denormalize a (..., 7) array of j0..j6 joint values to radians."""
-    means, stds = np.zeros(7, dtype=np.float32), np.ones(7, dtype=np.float32)
-    stats = denorm._action_stats(ds_name)
-    for j in range(7):
-        stat = denorm._dof_array_stats(stats, f"j{j}")
-        if stat is not None:
-            means[j] = float(np.asarray(stat.mean).reshape(-1)[0])
-            stds[j] = float(np.asarray(stat.std).reshape(-1)[0])
-    return arr * stds + means
-
-
-def denorm_canonical(arr: np.ndarray, denorm: ActionBatchDenormalizer, ds_name: str, dof_ids: np.ndarray) -> np.ndarray:
-    """Denormalize canonical actions with explicit DOF ids."""
-    arr = np.asarray(arr, dtype=np.float32)
-    flat = arr.reshape(-1, arr.shape[-1])
-    out = np.stack([denorm.denormalize_slot(row, dof_ids, ds_name) for row in flat], axis=0)
-    return out.reshape(arr.shape)
 
 
 def per_embodiment_metrics(batch, update_info):
@@ -316,6 +208,18 @@ def per_embodiment_metrics(batch, update_info):
 def shard_batch(batch, mesh):
     """Shard a host-local batch across the data axis."""
     return multihost_utils.host_local_array_to_global_array(batch, mesh, PartitionSpec("batch"))
+
+
+def make_data_cfg(mix: str, batch_size: int, loader: Loader) -> cn.Train:
+    """Build a Train config for a specific loader."""
+    return cn.Train(
+        data=cn.Dataset(
+            mix=DataSourceE[mix],
+            loader=replace(loader, global_batch_size=batch_size),
+        ),
+        seed=42,
+        verbosity=0,
+    )
 
 
 def _save_path(cfg: Config) -> str:
@@ -344,29 +248,35 @@ def main(cfg: Config):
 
     # Load data
     print(Rule("loading data"))
-    from crossformer.cn.dataset import DataSourceE
-    from crossformer.cn.dataset.dataset import Loader
     from crossformer.data.grain.loader import _apply_fd_limit, GrainDataFactory
 
     _apply_fd_limit(512**2)
-    train_cfg = cn.Train(
-        data=cn.Dataset(
-            mix=DataSourceE[cfg.mix],
-            loader=Loader(use_grain=True, global_batch_size=cfg.batch_size),
+    train_cfg = make_data_cfg(cfg.mix, cfg.batch_size, cfg.train_loader)
+    eval_cfg = make_data_cfg(
+        cfg.mix,
+        cfg.batch_size,
+        Loader(
+            use_grain=True,
+            shuffle_buffer=1,
+            threads_traj_transform=16,
+            threads_traj_read=16,
+            threads_frame_transform=16,
+            prefetch=8,
         ),
-        seed=42,
-        verbosity=0,
     )
     dataset = GrainDataFactory(mp=cfg.mp).make(train_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=True)
     dsit = iter(dataset.dataset)
     example_batch = next(dsit)
-    val_dataset = GrainDataFactory(mp=cfg.mp).make(train_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=False)
-    val_batch = next(iter(val_dataset.dataset))
+    eval_dataset = GrainDataFactory(
+        mp=0,
+        shuffle=False,
+        mask_slot=False,
+        shuffle_slot=False,
+        imaug=False,
+    ).make(eval_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=False)
     print(spec(example_batch))
     obs_keys = resolve_obs_keys(example_batch["observation"], cfg.obs_keys)
     print(f"  obs_keys: {obs_keys}")
-    val_batch = dict(val_batch)
-    val_batch["observation"] = normalize_obs(val_batch["observation"], obs_keys)
 
     guide_example = None
     if cfg.use_guidance:
@@ -474,6 +384,25 @@ def main(cfg: Config):
     viz_cb = cfg.viz.create()
     rast_cb = cfg.rast.create()
     val_mse_cb = cfg.val_mse.create(stats=dataset.dataset_statistics, guide_keys=cfg.guide_keys)
+    eval_loop = XFlowEvalLoop(
+        loader=eval_dataset.dataset,
+        obs_keys=obs_keys,
+        pred_rng=pred_rng,
+        callbacks=XFlowEvalCallbacks(
+            hist_cb=hist_cb,
+            chunk_cb=chunk_cb,
+            viz_cb=viz_cb,
+            rast_cb=rast_cb,
+            val_mse_cb=val_mse_cb,
+            wandb_log=cfg.wandb.log,
+            hist_every=cfg.hist_every,
+            viz_every=cfg.viz.every,
+            val_every=cfg.val_mse.every,
+            eval_frames=cfg.eval_frames,
+            use_guidance=cfg.use_guidance,
+            guide_keys=cfg.guide_keys,
+        ),
+    )
 
     # Train
     print(Rule("training"))
@@ -533,70 +462,9 @@ def main(cfg: Config):
             row = [str(step), f"{total_loss:.4f}"]
             row.append(f"{float(update_info['grad_norm']):.4f}")
             table.add_row(*row)
-            hist_metrics = {}
-            need_pred = (cfg.hist_every > 0 and (step % cfg.hist_every == 0 or step == cfg.steps - 1)) or (
-                cfg.viz.every > 0 and (step % cfg.viz.every == 0 or step == cfg.steps - 1)
-            )
-            if need_pred:
-                bound = model.module.bind({"params": state.model.params})
-                transformer_outputs = bound.crossformer_transformer(
-                    obs,
-                    task,
-                    pad_mask,
-                    train=False,
-                )
-                pred = bound.heads["xflow"].predict_action(
-                    transformer_outputs,
-                    rng=pred_rng,
-                    dof_ids=dof_ids,
-                    chunk_steps=chunk_steps,
-                    train=False,
-                    guide_input=guide_input,
-                )
-                pred_np = jax.device_get(pred)
-                if cfg.hist_every > 0 and (step % cfg.hist_every == 0 or step == cfg.steps - 1):
-                    pred_flat = pred_np.reshape(pred_np.shape[0], pred_np.shape[1], -1)
-                    hist_metrics = hist_cb(batch, {"predict": pred_flat})
-                    chunk_imgs = chunk_cb(batch, {"predict": pred_flat})
-                    for k, v in chunk_imgs.items():
-                        hist_metrics[f"action_chunks/{k}"] = v
-                if cfg.viz.every > 0 and (step % cfg.viz.every == 0 or step == cfg.steps - 1):
-                    pred_flow = bound.heads["xflow"].predict_action(
-                        transformer_outputs,
-                        rng=pred_rng,
-                        dof_ids=dof_ids,
-                        chunk_steps=chunk_steps,
-                        train=False,
-                        guide_input=guide_input,
-                        accumulate=True,
-                    )
-                    pred_flow_np = jax.device_get(pred_flow)
-                    viz_batch, _viz_keep = adapt_viz_batch(batch["act"], pred_flow_np)
-                    if viz_batch is not None:
-                        frames = viz_cb(viz_batch)
-                        hist_metrics["flow_pca/video"] = wandb.Video(
-                            np.moveaxis(frames, -1, 1),
-                            fps=cfg.viz.fps,
-                        )
-                        if rast_cb is not None:
-                            rast_batch, rast_keep = adapt_rast_batch(batch["act"], pred_flow_np)
-                            if rast_batch is not None:
-                                ds_names = chunk_cb.denorm.decode_dataset_names(
-                                    jax.device_get(batch["info"]["dataset_name"]),
-                                )
-                                ds0 = ds_names[int(rast_keep[0])]
-                                # sample 0, final denoise, all H chunk steps
-                                chunk = rast_batch["predict"][-1, 0]  # (W, H, 8)
-                                if chunk.ndim == 3:
-                                    chunk = chunk[0]  # (H, 8) — drop W=1
-                                chunk = denorm_canonical(chunk, chunk_cb.denorm, ds0, np.asarray(RAST_IDS))
-                                traj_frames = rast_cb.render_trajectory(chunk)
-                                for ci, rf in enumerate(traj_frames):
-                                    hist_metrics[f"rast/cam_{ci}"] = wandb.Image(rf)
             cfg.wandb.log(
                 {
                     "training": update_info,
-                    **hist_metrics,
                     "timer": timer.get_average_times(),
                     "lowdim_active": lowdim_active,
                     "guidance_active": guide_input is not None,
@@ -604,18 +472,7 @@ def main(cfg: Config):
                 },
                 step=step,
             )
-
-        val_metrics = val_mse_cb.every(
-            model,
-            state.model.params,
-            val_batch,
-            step,
-            cfg.val_mse.every,
-            pred_rng,
-            cfg.use_guidance,
-        )
-        if val_metrics is not None:
-            cfg.wandb.log(val_metrics, step=step)
+        eval_loop(model, state.model.params, step, is_last=step == cfg.steps - 1)
 
         if (step + 1) % cfg.save_interval == 0 and save_dir is not None:
             with timer("ckpt"):
