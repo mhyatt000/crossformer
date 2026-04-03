@@ -44,6 +44,9 @@ class PolicyWrapper(BasePolicy, abc.ABC):
     def __init__(self, inner: BasePolicy):
         self.inner = inner
 
+    def __getattr__(self, name: str):
+        return getattr(self.inner, name)
+
     def unwrapped(self) -> BasePolicy:
         """Return the innermost (non-wrapper) policy."""
         p = self.inner
