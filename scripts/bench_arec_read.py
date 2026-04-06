@@ -2,15 +2,15 @@
 
   sample(T) = images[T] + proprio[T:T+50]
 
-Strategies:
-  A) Single file, vary group_size, fetch 1 + 50 steps
-  B) Single file + custom source that batches the 50-step fetch
-  C) Split files: images.arrayrecord + proprio.arrayrecord
+Strategy C with independent group_size tuning per modality:
+  - images: random access (1 read) → small group_size likely best
+  - proprio: contiguous window (50 reads) → larger group_size may help
 """
 from __future__ import annotations
 
 import shutil
 import time
+from itertools import product
 from pathlib import Path
 from typing import Any
 
@@ -29,9 +29,10 @@ STEPS_PER_EP = N_STEPS // N_EPISODES
 IMG_H, IMG_W = 64, 64
 PROPRIO_WINDOW = 50
 SEED = 42
-ROOT = Path("/tmp/arec_bench2")
+ROOT = Path("/tmp/arec_bench3")
 
-OPTIONS = ["group_size:1", "group_size:8", "group_size:32", "group_size:64"]
+IMG_OPTIONS = ["group_size:1", "group_size:8", "group_size:32"]
+PRO_OPTIONS = ["group_size:1", "group_size:8", "group_size:32", "group_size:64", "group_size:128"]
 
 
 # ── pack / unpack ─────────────────────────────────────────────────────────
@@ -82,7 +83,6 @@ def make_step(rng, ep_id, step_id):
 
 
 def gen_all():
-    """Return list of all steps (materialized for reuse)."""
     rng = np.random.default_rng(SEED)
     return [make_step(rng, ep, s) for ep in range(N_EPISODES) for s in range(STEPS_PER_EP)]
 
@@ -97,21 +97,10 @@ def _write_shard(path: Path, records, opt: str):
     w.close()
 
 
-def build_combined(steps: list[dict], opt: str) -> ArrayRecordDataSource:
-    """Strategy A/B: everything in one file."""
-    tag = opt.replace(":", "")
-    dest = ROOT / "combined" / tag
-    if dest.exists():
-        shutil.rmtree(dest)
-    p = dest / "data-00000.arrayrecord"
-    _write_shard(p, steps, opt)
-    return ArrayRecordDataSource([str(p)])
-
-
-def build_split(steps: list[dict], opt: str) -> tuple[ArrayRecordDataSource, ArrayRecordDataSource]:
-    """Strategy C: separate image and proprio files."""
-    tag = opt.replace(":", "")
-    dest = ROOT / "split" / tag
+def build_split(steps, img_opt, pro_opt):
+    """Build separate image and proprio shards with independent group_size."""
+    tag = f"img_{img_opt.replace(':', '')}_pro_{pro_opt.replace(':', '')}"
+    dest = ROOT / tag
     if dest.exists():
         shutil.rmtree(dest)
 
@@ -121,8 +110,8 @@ def build_split(steps: list[dict], opt: str) -> tuple[ArrayRecordDataSource, Arr
     img_records = [{"image": s["image"], "info": s["info"]} for s in steps]
     pro_records = [{"proprio": s["proprio"], "info": s["info"]} for s in steps]
 
-    _write_shard(img_path, img_records, opt)
-    _write_shard(pro_path, pro_records, opt)
+    _write_shard(img_path, img_records, img_opt)
+    _write_shard(pro_path, pro_records, pro_opt)
 
     return (
         ArrayRecordDataSource([str(img_path)]),
@@ -130,74 +119,50 @@ def build_split(steps: list[dict], opt: str) -> tuple[ArrayRecordDataSource, Arr
     )
 
 
-# ── access pattern simulation ─────────────────────────────────────────────
+# ── benchmark ─────────────────────────────────────────────────────────────
 
 def sample_indices(n_steps, window, n_samples=200):
-    """Generate valid sample start indices."""
     rng = np.random.default_rng(0)
-    max_t = n_steps - window
-    return rng.integers(0, max_t, size=n_samples)
+    return rng.integers(0, n_steps - window, size=n_samples)
 
 
-def strategy_a_sequential(src: ArrayRecordDataSource, indices) -> float:
-    """Read step T (full), then steps T+1..T+49 (unpack all, discard images)."""
+def bench_split(img_src, pro_src, indices, rounds=5):
+    """img[T] (1 random read) + proprio[T:T+50] (batched contiguous)."""
     times = []
-    for _ in range(3):
-        t0 = time.perf_counter()
-        for t in indices:
-            # step T: full
-            step_t = unpack(src[int(t)])
-            # steps T+1..T+49: read one by one
-            for i in range(1, PROPRIO_WINDOW):
-                full = unpack(src[int(t + i)])
-                _ = full["proprio"]  # only need proprio
-        times.append(time.perf_counter() - t0)
-    return sum(times) / len(times)
-
-
-def strategy_b_batched(src: ArrayRecordDataSource, indices) -> float:
-    """Read step T (full), then batch-read T+1..T+49 via __getitems__."""
-    times = []
-    for _ in range(3):
+    for _ in range(rounds):
         t0 = time.perf_counter()
         for t in indices:
             t = int(t)
-            step_t = unpack(src[t])
-            batch = src.__getitems__(list(range(t + 1, t + PROPRIO_WINDOW)))
+            # 1 image read
+            _ = unpack(img_src[t])
+            # 50 proprio reads batched
+            batch = pro_src.__getitems__(list(range(t, t + PROPRIO_WINDOW)))
             for b in batch:
-                full = unpack(b)
-                _ = full["proprio"]
+                _ = unpack(b)
         times.append(time.perf_counter() - t0)
     return sum(times) / len(times)
 
 
-def strategy_b_batched_lazy(src: ArrayRecordDataSource, indices) -> float:
-    """Same as B but only unpack proprio keys (skip image deserialization)."""
+def bench_img_only(img_src, indices, rounds=5):
+    """Just the image read portion."""
     times = []
-    for _ in range(3):
+    for _ in range(rounds):
+        t0 = time.perf_counter()
+        for t in indices:
+            _ = unpack(img_src[int(t)])
+        times.append(time.perf_counter() - t0)
+    return sum(times) / len(times)
+
+
+def bench_pro_only(pro_src, indices, rounds=5):
+    """Just the proprio window portion."""
+    times = []
+    for _ in range(rounds):
         t0 = time.perf_counter()
         for t in indices:
             t = int(t)
-            step_t = unpack(src[t])
-            batch = src.__getitems__(list(range(t + 1, t + PROPRIO_WINDOW)))
+            batch = pro_src.__getitems__(list(range(t, t + PROPRIO_WINDOW)))
             for b in batch:
-                # unpack but we pay the full msgpack cost regardless
-                full = unpack(b)
-                _ = full["proprio"]
-        times.append(time.perf_counter() - t0)
-    return sum(times) / len(times)
-
-
-def strategy_c_split(img_src: ArrayRecordDataSource, pro_src: ArrayRecordDataSource, indices) -> float:
-    """Read images[T] + proprio[T:T+50] from separate files."""
-    times = []
-    for _ in range(3):
-        t0 = time.perf_counter()
-        for t in indices:
-            t = int(t)
-            img_t = unpack(img_src[t])
-            pro_batch = pro_src.__getitems__(list(range(t, t + PROPRIO_WINDOW)))
-            for b in pro_batch:
                 _ = unpack(b)
         times.append(time.perf_counter() - t0)
     return sum(times) / len(times)
@@ -210,56 +175,77 @@ def main():
     steps = gen_all()
     indices = sample_indices(N_STEPS, PROPRIO_WINDOW, n_samples=200)
 
-    record_bytes = len(pack(steps[0]))
     img_bytes = len(pack({"image": steps[0]["image"], "info": steps[0]["info"]}))
     pro_bytes = len(pack({"proprio": steps[0]["proprio"], "info": steps[0]["info"]}))
-    console.print(f"record size: {record_bytes:,} B  |  img-only: {img_bytes:,} B  |  proprio-only: {pro_bytes:,} B")
-    console.print(f"per sample: 1 full read ({record_bytes:,}B) + {PROPRIO_WINDOW-1} proprio reads")
-    console.print(f"  strategy A/B waste: {(PROPRIO_WINDOW-1) * record_bytes:,} B decoded (mostly images)")
-    console.print(f"  strategy C waste:   0 B  (proprio file is {pro_bytes} B/step)")
-    console.print(f"  samples: {len(indices)}")
+    console.print(f"img record: {img_bytes:,} B  |  proprio record: {pro_bytes:,} B")
+    console.print(f"per sample: 1 img read + {PROPRIO_WINDOW} proprio reads (batched)")
+    console.print(f"samples: {len(indices)}, rounds: 5\n")
 
-    table = Table(title=f"Access pattern: img[T] + proprio[T:T+{PROPRIO_WINDOW}]  ({len(indices)} samples)")
-    table.add_column("group_size", style="cyan")
-    table.add_column("A: seq 1+49 (s)", justify="right")
-    table.add_column("A samp/s", justify="right")
-    table.add_column("B: batched (s)", justify="right")
-    table.add_column("B samp/s", justify="right")
-    table.add_column("C: split (s)", justify="right")
-    table.add_column("C samp/s", justify="right")
-    table.add_column("C speedup", justify="right", style="green")
+    # ── Part 1: isolate each modality ─────────────────────────────────────
 
-    for opt in OPTIONS:
-        console.print(f"\n[bold]{opt}[/]")
+    console.rule("Part 1: Image read (1 random access per sample)")
+    img_table = Table(title="Image-only timing")
+    img_table.add_column("img group_size", style="cyan")
+    img_table.add_column("time (s)", justify="right")
+    img_table.add_column("samp/s", justify="right")
 
-        # build
-        combined = build_combined(steps, opt)
-        img_src, pro_src = build_split(steps, opt)
+    img_results = {}
+    for img_opt in IMG_OPTIONS:
+        # build with dummy proprio option
+        img_src, _ = build_split(steps, img_opt, "group_size:1")
+        t = bench_img_only(img_src, indices)
+        img_results[img_opt] = t
+        img_table.add_row(img_opt, f"{t:.4f}", f"{len(indices) / t:.0f}")
 
-        # bench
-        t_a = strategy_a_sequential(combined, indices)
-        t_b = strategy_b_batched(combined, indices)
-        t_c = strategy_c_split(img_src, pro_src, indices)
+    console.print(img_table)
 
-        n = len(indices)
-        speedup = t_b / t_c if t_c > 0 else float("inf")
+    console.rule("Part 2: Proprio window (50 contiguous batched reads per sample)")
+    pro_table = Table(title="Proprio-only timing")
+    pro_table.add_column("pro group_size", style="cyan")
+    pro_table.add_column("time (s)", justify="right")
+    pro_table.add_column("samp/s", justify="right")
 
-        table.add_row(
-            opt,
-            f"{t_a:.3f}", f"{n / t_a:.0f}",
-            f"{t_b:.3f}", f"{n / t_b:.0f}",
-            f"{t_c:.3f}", f"{n / t_c:.0f}",
-            f"{speedup:.1f}x",
+    pro_results = {}
+    for pro_opt in PRO_OPTIONS:
+        _, pro_src = build_split(steps, "group_size:1", pro_opt)
+        t = bench_pro_only(pro_src, indices)
+        pro_results[pro_opt] = t
+        pro_table.add_row(pro_opt, f"{t:.4f}", f"{len(indices) / t:.0f}")
+
+    console.print(pro_table)
+
+    # ── Part 2: combined sweep ────────────────────────────────────────────
+
+    console.rule("Part 3: Combined sweep (img + proprio)")
+    combo_table = Table(title=f"img[T] + proprio[T:T+{PROPRIO_WINDOW}]  ({len(indices)} samples)")
+    combo_table.add_column("img gs", style="cyan")
+    combo_table.add_column("pro gs", style="cyan")
+    combo_table.add_column("total (s)", justify="right")
+    combo_table.add_column("samp/s", justify="right")
+    combo_table.add_column("img frac", justify="right")
+    combo_table.add_column("pro frac", justify="right")
+
+    best_t, best_combo = float("inf"), ("", "")
+    for img_opt, pro_opt in product(IMG_OPTIONS, PRO_OPTIONS):
+        img_src, pro_src = build_split(steps, img_opt, pro_opt)
+        t = bench_split(img_src, pro_src, indices)
+
+        t_img = img_results[img_opt]
+        t_pro = pro_results[pro_opt]
+        img_frac = t_img / t if t > 0 else 0
+        pro_frac = t_pro / t if t > 0 else 0
+
+        if t < best_t:
+            best_t, best_combo = t, (img_opt, pro_opt)
+
+        combo_table.add_row(
+            img_opt, pro_opt,
+            f"{t:.4f}", f"{len(indices) / t:.0f}",
+            f"{img_frac:.0%}", f"{pro_frac:.0%}",
         )
 
-    console.print()
-    console.rule("Results")
-    console.print(table)
-    console.print()
-    console.print("[bold]Legend:[/]")
-    console.print("  A = single file, sequential 1+49 reads (unpack all)")
-    console.print("  B = single file, batched __getitems__ for the 49-step window")
-    console.print("  C = split files (images + proprio), batched proprio reads")
+    console.print(combo_table)
+    console.print(f"\n[bold green]Best:[/] img={best_combo[0]}  pro={best_combo[1]}  → {len(indices)/best_t:.0f} samp/s")
 
 
 if __name__ == "__main__":
