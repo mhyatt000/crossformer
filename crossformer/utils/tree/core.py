@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import fnmatch
+from typing import Any
 
 import flax.traverse_util as ftu
 import jax
@@ -45,9 +46,9 @@ def drop(tree: dict, keys: list[str]) -> dict:
     return {k: v for k, v in tree.items() if k not in keys}
 
 
-def drop_fn(tree: dict, fn: Callable) -> dict:
-    """Drop leaves from a nested dict where fn(leaf) is True."""
-    return unflat({k: v for k, v in flat(tree).items() if not fn(v)})
+def drop_fn(tree: dict, fn: Callable[[str, Any], bool]) -> dict:
+    """Drop leaves from a nested dict where fn(key, leaf) is True."""
+    return unflat({k: v for k, v in flat(tree).items() if not fn(k, v)})
 
 
 def do_fn_key(x: dict, keymatch: str, fn: Callable):

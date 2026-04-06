@@ -257,7 +257,7 @@ class Policy(BasePolicy):
         unnorm_stats = None
         if not self._is_xflow:
             unnorm_stats = self.model.dataset_statistics[self.dataset_name]["action"]
-            unnorm_stats = drop_fn(unnorm_stats, lambda x: x is None or x.dtype == "O")
+            unnorm_stats = drop_fn(unnorm_stats, lambda k, x: x is None or x.dtype == "O")
             unnorm_stats = jax.tree.map(lambda x: jnp.array(x), unnorm_stats)
             unnorm_stats = unnorm_stats[self.head_name]
 

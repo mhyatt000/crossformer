@@ -166,7 +166,7 @@ class LegacyDenormWrapper(PolicyWrapper):
     def __init__(self, inner: BasePolicy, stats: dict, head_name: str, dataset_name: str):
         super().__init__(inner)
         raw = stats[dataset_name]["action"]
-        raw = drop_fn(raw, lambda x: x is None or x.dtype == "O")
+        raw = drop_fn(raw, lambda k, x: x is None or x.dtype == "O")
         self.unnorm_stats = {k: jnp.array(v) for k, v in raw[head_name].items()}
 
     def postprocess(self, payload: dict, result: dict) -> dict:
