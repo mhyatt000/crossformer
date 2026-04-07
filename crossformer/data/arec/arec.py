@@ -7,7 +7,7 @@ import json
 import math
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, TypeAlias
 
 from array_record.python.array_record_data_source import ArrayRecordDataSource
 from array_record.python.array_record_module import ArrayRecordWriter
@@ -22,6 +22,8 @@ from tqdm import tqdm
 
 Shape = tuple[int, ...]
 Spec = dict[str, Shape]
+WriterValue: TypeAlias = list[str] | tuple[list[str], dict[str, Any]]
+WriterSpec: TypeAlias = dict[str, WriterValue]
 
 
 # ---------- Encoding helpers (msgpack) ----------
@@ -144,6 +146,7 @@ class ArrayRecordBuilder:
         shard_size: int = 100_000,
         writer_options: str | None = "group_size:1",
         build_meta: dict[str, Any] | None = None,  # things that affect schema
+        writers: WriterSpec | None = None,
     ):
         self.name = name
         self.branch = branch
@@ -153,8 +156,11 @@ class ArrayRecordBuilder:
         self.shard_size = int(shard_size)
         self.writer_options = writer_options
         self.build_meta = build_meta or {}
+        self.writers = self._normalize_writers(writers or {"data": ["*"]})
+        self.default_writer = "data" if "data" in self.writers else next(iter(self.writers))
         self._meta: dict[str, Any] | None = None
         self._ds: ArrayRecordDataSource | None = None
+        self._sources: dict[str, ArrayRecordDataSource] = {}
 
     # ----- public API -----
 
@@ -170,10 +176,15 @@ class ArrayRecordBuilder:
                 existing = json.load(f)
 
         fp = _schema_fingerprint(self.version, self.build_meta)
-        # shards = sorted(Path().glob(_shard_glob(self.root, self.name)))
-        shards = sorted(self.root.glob("data-*.arrayrecord"))
+        shards = {name: sorted((self.root / name).glob("data-*.arrayrecord")) for name in self.writers}
 
-        needs_build = (not existing) or existing.get("schema_fingerprint") != fp or not shards
+        meta_writers = None if not existing else self._normalize_writers(existing.get("writers", {}))
+        needs_build = (
+            (not existing)
+            or existing.get("schema_fingerprint") != fp
+            or meta_writers != self.writers
+            or any(not xs for xs in shards.values())
+        )
 
         if needs_build:
             self._build_from_stream(build_fn)
@@ -181,13 +192,13 @@ class ArrayRecordBuilder:
             self._meta = existing
 
     def __len__(self) -> int:
-        self._ensure_reader()
+        self._ensure_reader(self.default_writer)
         return len(self._ds)
 
     def __getitem__(self, i: int) -> Any:
         # print('get item')
         # print(len(self))
-        self._ensure_reader()
+        self._ensure_reader(self.default_writer)
         # Use parallelized read by batched range when possible.
         rec = self._ds[i]
         return unpack_record(rec)
@@ -196,7 +207,7 @@ class ArrayRecordBuilder:
         """Chunked iteration using ArrayRecordDataSource.__getitems__ (batched).
         Chunk size is tunable; 16k is a good starting point.
         """
-        self._ensure_reader()
+        self._ensure_reader(self.default_writer)
 
         n = len(self._ds)
         chunk = 16_384
@@ -220,30 +231,41 @@ class ArrayRecordBuilder:
         root.mkdir(parents=True, exist_ok=True)
 
         t0 = time.time()
-        count = 0
-        shard_idx = 0
-        writer: ArrayRecordWriter | None = None
         last_sample: Any | None = None
+        writer_last: dict[str, Any] = {}
+        counts = dict.fromkeys(self.writers, 0)
+        shard_idxs = dict.fromkeys(self.writers, 0)
+        writers: dict[str, ArrayRecordWriter] = {}
 
-        def open_writer(si: int):
-            p = _shard_path(self.root, self.name, si)
-            return ArrayRecordWriter(str(p), options=self.writer_options or "")
+        def open_writer(name: str, si: int):
+            d = self.root / name
+            d.mkdir(parents=True, exist_ok=True)
+            p = _shard_path(d, self.name, si)
+            cfg = self.writers[name]
+            options = cfg["kwargs"].get("options", self.writer_options or "")
+            return ArrayRecordWriter(str(p), options=options)
 
         try:
-            writer = open_writer(shard_idx)
+            for name in self.writers:
+                writers[name] = open_writer(name, shard_idxs[name])
             for sample in build_fn():
-                blob = pack_record(sample)
-                writer.write(blob)
-                count += 1
                 last_sample = sample
-                if count % self.shard_size == 0:
-                    writer.close()
-                    shard_idx += 1
-                    writer = open_writer(shard_idx)
+                for name, subsample in self._split_sample(sample).items():
+                    blob = pack_record(subsample)
+                    writers[name].write(blob)
+                    counts[name] += 1
+                    writer_last[name] = subsample
+                    if counts[name] % self.shard_size == 0:
+                        writers[name].close()
+                        shard_idxs[name] += 1
+                        writers[name] = open_writer(name, shard_idxs[name])
 
             spec_path = root / "spec.json"
             if last_sample is not None:
-                dataspec = self.spec(last_sample)
+                dataspec = {
+                    "data": self.spec(last_sample),
+                    "writers": {writer_key: self.spec(sample) for writer_key, sample in writer_last.items()},
+                }
                 with spec_path.open("w", encoding="utf-8") as f:
                     pprint(dataspec)
                     json.dump(dataspec, f, ensure_ascii=False, indent=2)
@@ -251,7 +273,7 @@ class ArrayRecordBuilder:
                 spec_path.unlink()
 
         finally:
-            if writer is not None:
+            for writer in writers.values():
                 writer.close()
 
         meta = {
@@ -260,8 +282,10 @@ class ArrayRecordBuilder:
             "branch": self.branch,
             "schema_fingerprint": _schema_fingerprint(self.version, self.build_meta),
             "writer_options": self.writer_options or "",
+            "writers": self._meta_writers(),
             "shard_size": self.shard_size,
-            "num_records": count,
+            "num_records": counts.get("data", next(iter(counts.values()), 0)),
+            "writer_num_records": counts,
             "created_unix": int(time.time()),
             "build_seconds": round(time.time() - t0, 3),
         }
@@ -269,28 +293,40 @@ class ArrayRecordBuilder:
         self._meta = meta
         # Re-open reader with fresh shard list.
         self._ds = None
+        self._sources = {}
         self._ensure_reader()
 
     @property
     def source(self) -> ArrayRecordDataSource:
-        self._ensure_reader()
+        self._ensure_reader(self.default_writer)
         return self._ds
 
-    def _ensure_reader(self) -> None:
-        if self._ds is not None:
+    def get_source(self, writer: str | None = None) -> ArrayRecordDataSource:
+        writer = self.default_writer if writer is None else writer
+        self._ensure_reader(writer)
+        return self._sources[writer]
+
+    def _ensure_reader(self, writer: str | None = None) -> None:
+        writer = self.default_writer if writer is None else writer
+        if writer in self._sources:
+            if writer == self.default_writer:
+                self._ds = self._sources[writer]
             return
-        # shard_paths = sorted(Path().glob(_shard_glob(self.root, self.name)))
-        shard_paths = sorted((self.root).glob("data-*.arrayrecord"))
+        if writer not in self.writers:
+            raise KeyError(f"Unknown writer: {writer}")
+        shard_paths = sorted((self.root / writer).glob("data-*.arrayrecord"))
         if not shard_paths:
-            raise FileNotFoundError(f"No ArrayRecord shards found under {self.root}.")
-        self._ds = ArrayRecordDataSource([str(p) for p in shard_paths])
+            raise FileNotFoundError(f"No ArrayRecord shards found under {self.root / writer}.")
+        self._sources[writer] = ArrayRecordDataSource([str(p) for p in shard_paths])
+        if writer == self.default_writer:
+            self._ds = self._sources[writer]
         if self._meta is None:
             # best-effort: reconstruct minimal meta
             self._meta = {
                 "name": self.name,
                 "version": self.version,
                 "branch": self.branch,
-                "num_records": len(self._ds),
+                "num_records": len(self._sources[writer]),
             }
 
     # ----- convenience -----
@@ -312,6 +348,55 @@ class ArrayRecordBuilder:
                     "num_records": len(self._ds),
                 }
         return self._meta
+
+    def _split_sample(self, sample: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        claimed: set[str] = set()
+        out: dict[str, dict[str, Any]] = {}
+        for name, cfg in self.writers.items():
+            keys = cfg["keys"]
+            picked: dict[str, Any] = {}
+            for key in keys:
+                if key == "*":
+                    continue
+                if key not in sample:
+                    raise KeyError(f"Missing key {key!r} for writer {name!r}")
+                picked[key] = sample[key]
+                claimed.add(key)
+            out[name] = picked
+
+        for name, cfg in self.writers.items():
+            keys = cfg["keys"]
+            if "*" in keys:
+                rest = {k: v for k, v in sample.items() if k not in claimed}
+                out[name] = out[name] | rest
+
+        return out
+
+    def _normalize_writers(self, writers: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        for name, value in writers.items():
+            if isinstance(value, tuple) or (
+                isinstance(value, list)
+                and len(value) == 2
+                and isinstance(value[0], list)
+                and isinstance(value[1], dict)
+            ):
+                keys, kwargs = value
+            else:
+                keys, kwargs = value, {}
+            if not isinstance(keys, list) or not all(isinstance(x, str) for x in keys):
+                raise TypeError(f"Writer {name!r} keys must be list[str]")
+            if not isinstance(kwargs, dict):
+                raise TypeError(f"Writer {name!r} kwargs must be dict[str, Any]")
+            out[name] = {"keys": keys, "kwargs": kwargs}
+        return out
+
+    def _meta_writers(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for name, cfg in self.writers.items():
+            kwargs = dict(cfg["kwargs"])
+            out[name] = cfg["keys"] if not kwargs else [cfg["keys"], kwargs]
+        return out
 
 
 # ---------- The template dataset ----------

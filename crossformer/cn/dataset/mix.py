@@ -52,6 +52,9 @@ class Arec(DataSource):
     # upgrade: bool = False
     branch: str = "main"
 
+    chunk: int = 50
+    goal: bool = False
+
     builder: ArrayRecordBuilder = field(init=False)
     _cache: Path = field(init=False, default=Path("~/.cache/arrayrecords").expanduser().resolve())
 
@@ -67,6 +70,23 @@ class Arec(DataSource):
 
     @property
     def source(self):
+        meta = self.builder.meta
+        writers = meta.get("writers", {})
+        if writers:
+            self.builder.writers = self.builder._normalize_writers(writers)
+            self.builder.default_writer = "data" if "data" in self.builder.writers else next(iter(self.builder.writers))
+        if {"image", "proprio"}.issubset(self.builder.writers):
+            try:
+                from crossformer.data.grain.datasets import MultiArrayRecordSource
+
+                return MultiArrayRecordSource(
+                    self.builder.get_source("image"),
+                    self.builder.get_source("proprio"),
+                    chunk=self.chunk,
+                    goal=self.goal,
+                )
+            except Exception:
+                log.exception("failed to open multisource arec for %s; falling back", self.name)
         return self.builder.source
 
     @property
@@ -80,9 +100,10 @@ class Arec(DataSource):
             raise ValueError(f"No OXE dataset config found for name: {name}")
         version = getattr(config, "version", None)
         branch = getattr(config, "branch", "main")
+        chunk = getattr(config, "chunk", 50)
         head = DATASET_TO_HEAD.get(name)
         embodiment = getattr(config, "embodiment")
-        return Arec(name=name, version=version, head=head, embodiment=embodiment, branch=branch)
+        return Arec(name=name, version=version, head=head, embodiment=embodiment, branch=branch, chunk=chunk)
 
     def create(self):
         pass

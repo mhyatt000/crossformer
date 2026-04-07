@@ -17,7 +17,7 @@ from tqdm import tqdm
 import tyro
 import zarr
 
-from crossformer.data.arec.arec import ArrayRecordBuilder
+from crossformer.data.arec.arec import ArrayRecordBuilder, WriterSpec
 from crossformer.data.grain.map import flatmap
 from crossformer.data.utils.trajectory import binarize_gripper_actions as binarize
 from crossformer.data.utils.trajectory import scan_noop
@@ -43,6 +43,12 @@ class Config:
     name: str = "zarr_steps"
     version: str = "0.0.1"
     branch: str = "main"
+    writer: Literal["source", "multisource"] = "multisource"
+    writers: WriterSpec = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.writers = make_writers(self.writer)
+        print(self)
 
     def build(self, fn) -> None:
         print(self)
@@ -51,9 +57,19 @@ class Config:
             version=self.version,
             branch=self.branch,
             shard_size=self.shard_size,
+            writers=self.writers,
         )
         print(self.builder.root)
         self.builder.prepare(fn)
+
+
+def make_writers(writer: Literal["source", "multisource"]) -> WriterSpec:
+    if writer == "source":
+        return {"data": ["*"]}
+    return {
+        "image": (["image"], {"options": "group_size:1"}),
+        "proprio": (["proprio", "info"], {"options": "group_size:32"}),
+    }
 
 
 @dataclass(frozen=True)
@@ -382,23 +398,21 @@ def standardize(step: dict[str, Any], threshold: float = 1e-3) -> dict[str, Any]
     out = {}
     out["info"] = step["info"]
     step = flat(step)
-    out["observation.image.low"] = step["observation.cam.low.image_raw.data"]
-    out["observation.image.side"] = step["observation.cam.side.image_raw.data"]
-    out["observation.image.wrist"] = step["observation.camera.camera.color.image_raw.compressed.data"]
+    out["image.low"] = step["observation.cam.low.image_raw.data"]
+    out["image.side"] = step["observation.cam.side.image_raw.data"]
+    out["image.wrist"] = step["observation.camera.camera.color.image_raw.compressed.data"]
 
     pose = step["observation.xarm.robot_states.pose"]
-    out["observation.proprio.position"] = pose[..., :3] / 1e3
-    out["observation.proprio.orientation"] = pose[..., 3:]
-    out["observation.proprio.gripper"] = step["observation.xgym.gripper.position"]
-    out["observation.proprio.joints"] = step["observation.xarm.joint_states.position"]
+    out["proprio.position"] = pose[..., :3] / 1e3
+    out["proprio.orientation"] = pose[..., 3:]
+    out["proprio.gripper"] = step["observation.xgym.gripper.position"]
+    out["proprio.joints"] = step["observation.xarm.joint_states.position"]
 
-    out["observation.proprio.gripper"] = np.asarray(
-        binarize(jnp.asarray(out["observation.proprio.gripper"]), open=0.95, close=0.4)
-    )
+    out["proprio.gripper"] = np.asarray(binarize(jnp.asarray(out["proprio.gripper"]), open=0.95, close=0.4))
 
-    pos = np.concatenate((out["observation.proprio.position"], out["observation.proprio.gripper"]), axis=-1)
+    pos = np.concatenate((out["proprio.position"], out["proprio.gripper"]), axis=-1)
     noops = np.asarray(scan_noop(jnp.asarray(pos), threshold=threshold))
-    jpos = np.concatenate((out["observation.proprio.joints"], out["observation.proprio.gripper"]), axis=-1)
+    jpos = np.concatenate((out["proprio.joints"], out["proprio.gripper"]), axis=-1)
     jnoop = np.asarray(scan_noop(jnp.asarray(jpos), threshold=threshold))
     mask = np.logical_and(~noops, ~jnoop)
     out = jax.tree.map(lambda x: x[mask], out)
@@ -416,7 +430,7 @@ def main(cfg: Config) -> None:
     ds = ds.map(lambda x: standardize(x, threshold=cfg.threshold))
 
     print(f"Root: {loader.path}")
-    print_tree(loader.root, max_depth=cfg.max_depth)
+    # print_tree(loader.root, max_depth=cfg.max_depth)
     print()
     print(f"n_episodes={loader.n_episodes}")
     print(f"len={len(loader)}")

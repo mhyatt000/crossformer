@@ -81,7 +81,7 @@ class MultiArrayRecordSource:
         self,
         img_src: ArrayRecordDataSource,
         pro_src: ArrayRecordDataSource,
-        window: int = 50,
+        chunk: int = 50,
         goal: bool = False,
         goal_decay: float = 0.05,
         seed: int = 0,
@@ -89,28 +89,28 @@ class MultiArrayRecordSource:
         assert len(img_src) == len(pro_src), "image and proprio sources must be aligned"
         self._img = img_src
         self._pro = pro_src
-        self._window = window
+        self._chunk = chunk
         self._goal = goal
         self._goal_decay = goal_decay
         self._rng = np.random.default_rng(seed)
         self._n = len(img_src)
 
     def __len__(self) -> int:
-        return self._n - self._window + 1
+        return self._n - self._chunk + 1
 
     def __getitem__(self, i: int) -> dict:
         # image: single step
         img_rec = unpack_record(self._img[i])
 
-        # proprio: batched window
-        end = min(i + self._window, self._n)
+        # proprio: batched chunk
+        end = min(i + self._chunk, self._n)
         idxs = list(range(i, end))
         pro_recs = [unpack_record(b) for b in self._pro.__getitems__(idxs)]
 
         # stack proprio leaves: (W, ...) per field
-        pro_stacked = jax.tree.map(lambda *xs: np.stack(xs), *[r["proprio"] for r in pro_recs])
+        pro_stacked = jax.tree.map(lambda *xs: np.stack(xs), *pro_recs)
 
-        out = {**img_rec, "proprio": pro_stacked}
+        out = {**img_rec, **pro_stacked}
 
         if self._goal:
             max_offset = self._n - 1 - i
