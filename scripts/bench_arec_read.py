@@ -2,14 +2,14 @@
 
   sample(T) = images[T] + proprio[T:T+50]
 
-Strategy C with independent group_size tuning per modality:
-  - images: random access (1 read) → small group_size likely best
-  - proprio: contiguous window (50 reads) → larger group_size may help
+Strategy C: split files with independent group_size per modality.
+Sweeps group_size combos, proprio batch chunk sizes, and threaded loading.
 """
 from __future__ import annotations
 
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor
 from itertools import product
 from pathlib import Path
 from typing import Any
@@ -31,8 +31,9 @@ PROPRIO_WINDOW = 50
 SEED = 42
 ROOT = Path("/tmp/arec_bench3")
 
-IMG_OPTIONS = ["group_size:1", "group_size:8", "group_size:32"]
-PRO_OPTIONS = ["group_size:1", "group_size:8", "group_size:32", "group_size:64", "group_size:128"]
+IMG_OPTIONS = ["group_size:1", "group_size:8"]
+PRO_OPTIONS = ["group_size:1", "group_size:8", "group_size:32", "group_size:64"]
+CHUNK_SIZES = [10, 25, 50]  # how many proprio steps to batch per __getitems__ call
 
 
 # ── pack / unpack ─────────────────────────────────────────────────────────
@@ -98,7 +99,6 @@ def _write_shard(path: Path, records, opt: str):
 
 
 def build_split(steps, img_opt, pro_opt):
-    """Build separate image and proprio shards with independent group_size."""
     tag = f"img_{img_opt.replace(':', '')}_pro_{pro_opt.replace(':', '')}"
     dest = ROOT / tag
     if dest.exists():
@@ -107,11 +107,8 @@ def build_split(steps, img_opt, pro_opt):
     img_path = dest / "images-00000.arrayrecord"
     pro_path = dest / "proprio-00000.arrayrecord"
 
-    img_records = [{"image": s["image"], "info": s["info"]} for s in steps]
-    pro_records = [{"proprio": s["proprio"], "info": s["info"]} for s in steps]
-
-    _write_shard(img_path, img_records, img_opt)
-    _write_shard(pro_path, pro_records, pro_opt)
+    _write_shard(img_path, [{"image": s["image"], "info": s["info"]} for s in steps], img_opt)
+    _write_shard(pro_path, [{"proprio": s["proprio"], "info": s["info"]} for s in steps], pro_opt)
 
     return (
         ArrayRecordDataSource([str(img_path)]),
@@ -119,52 +116,86 @@ def build_split(steps, img_opt, pro_opt):
     )
 
 
-# ── benchmark ─────────────────────────────────────────────────────────────
+# ── benchmark helpers ─────────────────────────────────────────────────────
 
 def sample_indices(n_steps, window, n_samples=200):
     rng = np.random.default_rng(0)
     return rng.integers(0, n_steps - window, size=n_samples)
 
 
-def bench_split(img_src, pro_src, indices, rounds=5):
-    """img[T] (1 random read) + proprio[T:T+50] (batched contiguous)."""
+def bench_sequential(img_src, pro_src, indices, chunk=50, rounds=5):
+    """Sequential: read img then proprio."""
     times = []
     for _ in range(rounds):
         t0 = time.perf_counter()
         for t in indices:
             t = int(t)
-            # 1 image read
             _ = unpack(img_src[t])
-            # 50 proprio reads batched
-            batch = pro_src.__getitems__(list(range(t, t + PROPRIO_WINDOW)))
-            for b in batch:
-                _ = unpack(b)
+            idxs = list(range(t, t + PROPRIO_WINDOW))
+            for s in range(0, len(idxs), chunk):
+                batch = pro_src.__getitems__(idxs[s:s + chunk])
+                for b in batch:
+                    _ = unpack(b)
         times.append(time.perf_counter() - t0)
     return sum(times) / len(times)
 
 
-def bench_img_only(img_src, indices, rounds=5):
-    """Just the image read portion."""
-    times = []
-    for _ in range(rounds):
-        t0 = time.perf_counter()
-        for t in indices:
-            _ = unpack(img_src[int(t)])
-        times.append(time.perf_counter() - t0)
-    return sum(times) / len(times)
+def bench_threaded(img_src, pro_src, indices, chunk=50, rounds=5):
+    """Threaded: img and proprio reads overlap via ThreadPoolExecutor."""
+    pool = ThreadPoolExecutor(max_workers=2)
 
+    def read_img(t):
+        return unpack(img_src[t])
 
-def bench_pro_only(pro_src, indices, rounds=5):
-    """Just the proprio window portion."""
+    def read_pro(t):
+        idxs = list(range(t, t + PROPRIO_WINDOW))
+        out = []
+        for s in range(0, len(idxs), chunk):
+            batch = pro_src.__getitems__(idxs[s:s + chunk])
+            out.extend(unpack(b) for b in batch)
+        return out
+
     times = []
     for _ in range(rounds):
         t0 = time.perf_counter()
         for t in indices:
             t = int(t)
-            batch = pro_src.__getitems__(list(range(t, t + PROPRIO_WINDOW)))
-            for b in batch:
-                _ = unpack(b)
+            f_img = pool.submit(read_img, t)
+            f_pro = pool.submit(read_pro, t)
+            _ = f_img.result()
+            _ = f_pro.result()
         times.append(time.perf_counter() - t0)
+    pool.shutdown(wait=False)
+    return sum(times) / len(times)
+
+
+def bench_threaded_prefetch(img_src, pro_src, indices, chunk=50, rounds=5, prefetch=4):
+    """Submit prefetch samples ahead, drain as we go."""
+    pool = ThreadPoolExecutor(max_workers=prefetch)
+
+    def load_one(t):
+        t = int(t)
+        img = unpack(img_src[t])
+        idxs = list(range(t, t + PROPRIO_WINDOW))
+        pros = []
+        for s in range(0, len(idxs), chunk):
+            batch = pro_src.__getitems__(idxs[s:s + chunk])
+            pros.extend(unpack(b) for b in batch)
+        return img, pros
+
+    times = []
+    for _ in range(rounds):
+        t0 = time.perf_counter()
+        futures = []
+        for i, t in enumerate(indices):
+            futures.append(pool.submit(load_one, t))
+            # drain completed to bound memory
+            if len(futures) >= prefetch:
+                _ = futures.pop(0).result()
+        for f in futures:
+            _ = f.result()
+        times.append(time.perf_counter() - t0)
+    pool.shutdown(wait=False)
     return sum(times) / len(times)
 
 
@@ -174,78 +205,89 @@ def main():
     console.rule("Generating data")
     steps = gen_all()
     indices = sample_indices(N_STEPS, PROPRIO_WINDOW, n_samples=200)
+    n = len(indices)
 
     img_bytes = len(pack({"image": steps[0]["image"], "info": steps[0]["info"]}))
     pro_bytes = len(pack({"proprio": steps[0]["proprio"], "info": steps[0]["info"]}))
     console.print(f"img record: {img_bytes:,} B  |  proprio record: {pro_bytes:,} B")
-    console.print(f"per sample: 1 img read + {PROPRIO_WINDOW} proprio reads (batched)")
-    console.print(f"samples: {len(indices)}, rounds: 5\n")
+    console.print(f"per sample: 1 img read + {PROPRIO_WINDOW} proprio reads")
+    console.print(f"samples: {n}, rounds: 5\n")
 
-    # ── Part 1: isolate each modality ─────────────────────────────────────
+    # ── sweep: group_size x chunk_size x load strategy ────────────────────
 
-    console.rule("Part 1: Image read (1 random access per sample)")
-    img_table = Table(title="Image-only timing")
-    img_table.add_column("img group_size", style="cyan")
-    img_table.add_column("time (s)", justify="right")
-    img_table.add_column("samp/s", justify="right")
+    console.rule("Full sweep")
 
-    img_results = {}
-    for img_opt in IMG_OPTIONS:
-        # build with dummy proprio option
-        img_src, _ = build_split(steps, img_opt, "group_size:1")
-        t = bench_img_only(img_src, indices)
-        img_results[img_opt] = t
-        img_table.add_row(img_opt, f"{t:.4f}", f"{len(indices) / t:.0f}")
+    table = Table(title=f"img[T] + proprio[T:T+{PROPRIO_WINDOW}]  ({n} samples)")
+    table.add_column("img gs", style="cyan")
+    table.add_column("pro gs", style="cyan")
+    table.add_column("chunk", justify="right")
+    table.add_column("seq (s)", justify="right")
+    table.add_column("seq s/s", justify="right")
+    table.add_column("thr (s)", justify="right")
+    table.add_column("thr s/s", justify="right")
+    table.add_column("pre4 (s)", justify="right")
+    table.add_column("pre4 s/s", justify="right", style="green")
 
-    console.print(img_table)
+    best_t, best_cfg = float("inf"), {}
 
-    console.rule("Part 2: Proprio window (50 contiguous batched reads per sample)")
-    pro_table = Table(title="Proprio-only timing")
-    pro_table.add_column("pro group_size", style="cyan")
-    pro_table.add_column("time (s)", justify="right")
-    pro_table.add_column("samp/s", justify="right")
-
-    pro_results = {}
-    for pro_opt in PRO_OPTIONS:
-        _, pro_src = build_split(steps, "group_size:1", pro_opt)
-        t = bench_pro_only(pro_src, indices)
-        pro_results[pro_opt] = t
-        pro_table.add_row(pro_opt, f"{t:.4f}", f"{len(indices) / t:.0f}")
-
-    console.print(pro_table)
-
-    # ── Part 2: combined sweep ────────────────────────────────────────────
-
-    console.rule("Part 3: Combined sweep (img + proprio)")
-    combo_table = Table(title=f"img[T] + proprio[T:T+{PROPRIO_WINDOW}]  ({len(indices)} samples)")
-    combo_table.add_column("img gs", style="cyan")
-    combo_table.add_column("pro gs", style="cyan")
-    combo_table.add_column("total (s)", justify="right")
-    combo_table.add_column("samp/s", justify="right")
-    combo_table.add_column("img frac", justify="right")
-    combo_table.add_column("pro frac", justify="right")
-
-    best_t, best_combo = float("inf"), ("", "")
     for img_opt, pro_opt in product(IMG_OPTIONS, PRO_OPTIONS):
+        console.print(f"  building img={img_opt} pro={pro_opt}")
         img_src, pro_src = build_split(steps, img_opt, pro_opt)
-        t = bench_split(img_src, pro_src, indices)
 
-        t_img = img_results[img_opt]
-        t_pro = pro_results[pro_opt]
-        img_frac = t_img / t if t > 0 else 0
-        pro_frac = t_pro / t if t > 0 else 0
+        for chunk in CHUNK_SIZES:
+            t_seq = bench_sequential(img_src, pro_src, indices, chunk=chunk)
+            t_thr = bench_threaded(img_src, pro_src, indices, chunk=chunk)
+            t_pre = bench_threaded_prefetch(img_src, pro_src, indices, chunk=chunk)
 
-        if t < best_t:
-            best_t, best_combo = t, (img_opt, pro_opt)
+            best_here = min(t_seq, t_thr, t_pre)
+            if best_here < best_t:
+                best_t = best_here
+                best_cfg = {"img": img_opt, "pro": pro_opt, "chunk": chunk,
+                            "method": ["seq", "thr", "pre4"][[t_seq, t_thr, t_pre].index(best_here)]}
 
-        combo_table.add_row(
-            img_opt, pro_opt,
-            f"{t:.4f}", f"{len(indices) / t:.0f}",
-            f"{img_frac:.0%}", f"{pro_frac:.0%}",
-        )
+            table.add_row(
+                img_opt, pro_opt, str(chunk),
+                f"{t_seq:.3f}", f"{n / t_seq:.0f}",
+                f"{t_thr:.3f}", f"{n / t_thr:.0f}",
+                f"{t_pre:.3f}", f"{n / t_pre:.0f}",
+            )
 
-    console.print(combo_table)
-    console.print(f"\n[bold green]Best:[/] img={best_combo[0]}  pro={best_combo[1]}  → {len(indices)/best_t:.0f} samp/s")
+    console.print()
+    console.rule("Results")
+    console.print(table)
+    console.print(
+        f"\n[bold green]Best:[/] img={best_cfg['img']}  pro={best_cfg['pro']}"
+        f"  chunk={best_cfg['chunk']}  method={best_cfg['method']}"
+        f"  → {n / best_t:.0f} samp/s"
+    )
+
+    # ── sample spec ───────────────────────────────────────────────────────
+    console.print()
+    console.rule("Sample spec (one loaded sample)")
+
+    # rebuild best combo, load one sample
+    img_src, pro_src = build_split(steps, best_cfg["img"], best_cfg["pro"])
+    t = int(indices[0])
+    img_rec = unpack(img_src[t])
+    pro_recs = [unpack(b) for b in pro_src.__getitems__(list(range(t, t + PROPRIO_WINDOW)))]
+
+    console.print("[bold]image record (step T):[/]")
+    _show_spec(img_rec)
+    console.print(f"\n[bold]proprio records (steps T..T+{PROPRIO_WINDOW-1}):[/]  {len(pro_recs)} records")
+    _show_spec(pro_recs[0], label="each")
+
+
+def _show_spec(d, prefix="", label=None):
+    if label:
+        console.print(f"  [{label}]")
+    for k, v in d.items():
+        key = f"{prefix}{k}"
+        if isinstance(v, dict):
+            _show_spec(v, prefix=f"{key}.")
+        elif isinstance(v, np.ndarray):
+            console.print(f"    {key:35s} {str(v.dtype):10s} {v.shape}")
+        else:
+            console.print(f"    {key:35s} {type(v).__name__:10s} {v}")
 
 
 if __name__ == "__main__":
