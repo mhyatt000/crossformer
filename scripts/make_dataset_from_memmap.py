@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import fnmatch
 from functools import partial
 from pathlib import Path
 
@@ -18,20 +17,14 @@ from crossformer.data.arec.arec import ArrayRecordBuilder
 from crossformer.data.grain.datasets import (
     drop,
 )
-from crossformer.data.utils.trajectory import binarize_gripper_actions as binarize
-from crossformer.data.utils.trajectory import scan_noop
 from crossformer.data.grain.map import flatmap
 from crossformer.data.grain.util.mano import acroll_stacked
-from crossformer.data.grain.util.remap import rekey
+from crossformer.data.grain.util.remap import rekeym
+from crossformer.data.utils.trajectory import binarize_gripper_actions as binarize
+from crossformer.data.utils.trajectory import scan_noop
 from crossformer.utils.io.memmap import read
 from crossformer.utils.spec import spec
 from crossformer.utils.tree import unflat
-
-
-def rekey_match(tree: dict, match, src, tgt) -> dict:
-    srckey = fnmatch.filter(tree.keys(), match)
-    tgtkey = [x.replace(src, tgt) for x in srckey]
-    return rekey(tree, inp=srckey, out=tgtkey)
 
 
 @dataclass
@@ -65,8 +58,8 @@ class BuildConfig:
 
 def standardize(ep: dict, threshold=1e-3) -> dict:
     # rekey
-    ep = rekey_match(ep, "/xgym/camera/*", "/xgym/camera/", "image.")
-    ep = rekey_match(ep, "xarm_*", "xarm_", "proprio.")
+    ep = rekeym(ep, "/xgym/camera/*", "/xgym/camera/", "image.")
+    ep = rekeym(ep, "xarm_*", "xarm_", "proprio.")
 
     ### scale and binarize
     ep["proprio.pose"][:, :3] /= 1e3
