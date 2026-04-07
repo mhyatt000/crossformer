@@ -64,6 +64,49 @@ def unpack(buf: bytes) -> Any:
     return msgpack.unpackb(buf, object_hook=_unpack_hook, raw=False)
 
 
+def _sample_goal_offset(rng, max_offset, decay=0.05):
+    if max_offset <= 0:
+        return 0
+    return min(int(rng.geometric(decay)), max_offset)
+
+
+class _MultiArrayRecordSource:
+    """Mirror of MultiArrayRecordSource for testing without heavy imports."""
+
+    def __init__(self, img_src, pro_src, window=50, goal=False, goal_decay=0.05, seed=0):
+        assert len(img_src) == len(pro_src)
+        self._img, self._pro = img_src, pro_src
+        self._window = window
+        self._goal = goal
+        self._goal_decay = goal_decay
+        self._rng = np.random.default_rng(seed)
+        self._n = len(img_src)
+
+    def __len__(self):
+        return self._n - self._window + 1
+
+    def __getitem__(self, i):
+        img_rec = unpack(self._img[i])
+        end = min(i + self._window, self._n)
+        pro_recs = [unpack(b) for b in self._pro.__getitems__(list(range(i, end)))]
+        pro_stacked = _tree_stack([r["proprio"] for r in pro_recs])
+        out = {**img_rec, "proprio": pro_stacked}
+        if self._goal:
+            max_offset = self._n - 1 - i
+            offset = _sample_goal_offset(self._rng, max_offset, self._goal_decay)
+            goal_rec = unpack(self._img[i + offset])
+            out["goal"] = goal_rec["image"]
+        return out
+
+    def __getitems__(self, indices):
+        return [self[i] for i in indices]
+
+
+def _tree_stack(dicts):
+    keys = dicts[0].keys()
+    return {k: np.stack([d[k] for d in dicts]) for k in keys}
+
+
 # ── data generation ───────────────────────────────────────────────────────
 
 def make_step(rng, ep_id, step_id):
@@ -261,20 +304,32 @@ def main():
         f"  → {n / best_t:.0f} samp/s"
     )
 
-    # ── sample spec ───────────────────────────────────────────────────────
+    # ── MultiArrayRecordSource test ─────────────────────────────────────
     console.print()
-    console.rule("Sample spec (one loaded sample)")
+    console.rule("MultiArrayRecordSource")
 
-    # rebuild best combo, load one sample
+    MultiArrayRecordSource = _MultiArrayRecordSource
+
     img_src, pro_src = build_split(steps, best_cfg["img"], best_cfg["pro"])
-    t = int(indices[0])
-    img_rec = unpack(img_src[t])
-    pro_recs = [unpack(b) for b in pro_src.__getitems__(list(range(t, t + PROPRIO_WINDOW)))]
 
-    console.print("[bold]image record (step T):[/]")
-    _show_spec(img_rec)
-    console.print(f"\n[bold]proprio records (steps T..T+{PROPRIO_WINDOW-1}):[/]  {len(pro_recs)} records")
-    _show_spec(pro_recs[0], label="each")
+    for use_goal in [False, True]:
+        label = "goal=True" if use_goal else "goal=False"
+        multi = MultiArrayRecordSource(img_src, pro_src, window=PROPRIO_WINDOW, goal=use_goal)
+        console.print(f"\n[bold]{label}[/]  len={len(multi)}")
+
+        valid = indices[indices < len(multi)]
+        times = []
+        for _ in range(5):
+            t0 = time.perf_counter()
+            for i in valid:
+                _ = multi[int(i)]
+            times.append(time.perf_counter() - t0)
+        avg = sum(times) / len(times)
+        console.print(f"  {len(valid)/avg:.0f} samp/s  ({avg:.3f}s for {len(valid)} samples)")
+
+        sample = multi[int(valid[0])]
+        console.print(f"  [bold]output spec:[/]")
+        _show_spec(sample)
 
 
 def _show_spec(d, prefix="", label=None):

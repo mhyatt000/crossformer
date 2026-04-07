@@ -52,6 +52,78 @@ class _DecodedArrayRecord:
         return self._ds.__getitems__(indices)
 
 
+def _sample_goal_offset(rng: np.random.Generator, max_offset: int, decay: float = 0.05) -> int:
+    """Sample a future offset with geometric decay (biased toward near future)."""
+    # geometric distribution: P(k) ∝ (1-decay)^k, truncated to [1, max_offset]
+    if max_offset <= 0:
+        return 0
+    k = min(int(rng.geometric(decay)), max_offset)
+    return k
+
+
+class MultiArrayRecordSource:
+    """Joins an image source and a proprio source by step index.
+
+    ``__getitem__(i)`` returns a single dict::
+
+        {
+            "image": {"low": ..., "side": ..., "wrist": ...},   # step i
+            "proprio": {"joints": (W,7), "gripper": (W,1), ...},  # i..i+W stacked
+            "goal": {"low": ..., "side": ..., "wrist": ...},    # future frame (if goal=True)
+            "info": ...,
+        }
+
+    When ``goal=True``, a future image frame is sampled with geometric decay
+    so nearby goals are more likely than distant ones.
+    """
+
+    def __init__(
+        self,
+        img_src: ArrayRecordDataSource,
+        pro_src: ArrayRecordDataSource,
+        window: int = 50,
+        goal: bool = False,
+        goal_decay: float = 0.05,
+        seed: int = 0,
+    ) -> None:
+        assert len(img_src) == len(pro_src), "image and proprio sources must be aligned"
+        self._img = img_src
+        self._pro = pro_src
+        self._window = window
+        self._goal = goal
+        self._goal_decay = goal_decay
+        self._rng = np.random.default_rng(seed)
+        self._n = len(img_src)
+
+    def __len__(self) -> int:
+        return self._n - self._window + 1
+
+    def __getitem__(self, i: int) -> dict:
+        # image: single step
+        img_rec = unpack_record(self._img[i])
+
+        # proprio: batched window
+        end = min(i + self._window, self._n)
+        idxs = list(range(i, end))
+        pro_recs = [unpack_record(b) for b in self._pro.__getitems__(idxs)]
+
+        # stack proprio leaves: (W, ...) per field
+        pro_stacked = jax.tree.map(lambda *xs: np.stack(xs), *[r["proprio"] for r in pro_recs])
+
+        out = {**img_rec, "proprio": pro_stacked}
+
+        if self._goal:
+            max_offset = self._n - 1 - i
+            offset = _sample_goal_offset(self._rng, max_offset, self._goal_decay)
+            goal_rec = unpack_record(self._img[i + offset])
+            out["goal"] = goal_rec["image"]
+
+        return out
+
+    def __getitems__(self, indices: Sequence[int]) -> list[dict]:
+        return [self[i] for i in indices]
+
+
 def _postprocess_episode(items: Sequence[dict[str, Any]], device=cpu, steps=True) -> Sequence[dict[str, jnp.Array]]:
     """postprocess msgpack-decoded episode data into jax arrays.
     unfortunately cannot jit this"""
