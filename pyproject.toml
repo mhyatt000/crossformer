@@ -26,7 +26,6 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "absl-py>=0.12.0",
     "chex>=0.1.85",
     "distrax==0.1.5",
     "einops>=0.6.1",
@@ -68,7 +67,6 @@ dependencies = [
     "array-record>=0.8.1",
     "readerwriterlock>=1.0.9",
     "grain-nightly>=0.2.14.dev20251027",
-    "tfds-nightly>=4.9.9.dev202510250044",
     "xclients",
     "jaxtyping>=0.3.4",
     "typeguard>=4.4.4",
