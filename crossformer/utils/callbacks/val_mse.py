@@ -19,7 +19,7 @@ from crossformer.utils.callbacks.viz import ActionBatchDenormalizer
 class ValMSEConfig:
     """Config for ``ValMSECallback``."""
 
-    every: int = 500
+    every: int = 0
     head_name: str = "xflow"
     ds_key: tuple[str, ...] = ("info", "dataset_name")
     guide_keys: tuple[str, ...] | None = None

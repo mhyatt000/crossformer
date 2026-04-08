@@ -23,7 +23,7 @@ import wandb
 class VizConfig:
     """Config for ``VizCallback``."""
 
-    every: int = 500
+    every: int = 5000
     flow_key: tuple[str, ...] = default(("predict",))
     base_key: tuple[str, ...] = default(("act", "base"))
     sample_idx: int = 0
