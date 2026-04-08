@@ -18,11 +18,17 @@ from crossformer.utils.spec import ModuleSpec
 EPS = 1e-6
 
 
-def generate_proper_pad_mask(
+def build_token_mask(
     tokens: jax.Array,
     pad_mask_dict: dict[str, jax.Array] | None,
     keys: Sequence[str],
 ) -> jax.Array:
+    """Build a token mask by broadcasting per-input masks to token shape.
+
+    Example:
+        per-input mask ``(B, *)`` -> token mask ``(B, *, D)``
+        where ``D`` is the tokenizer output token count for each element.
+    """
     if pad_mask_dict is None:
         logging.warning("No pad_mask_dict found. Nothing will be masked.")
         return jnp.ones(tokens.shape[:-1])
@@ -87,7 +93,50 @@ class ImageTokenizer(nn.Module):
     obs_stack_keys: Sequence[str] = ("image_.*", "depth_.*")
     task_stack_keys: Sequence[str] = ()
     task_film_keys: Sequence[str] = ()
-    proper_pad_mask: bool = True
+    use_obs_mask: bool = True
+
+    @staticmethod
+    def _extract_inputs(keys, inputs, *, check_spatial: bool = False):
+        """Concatenate selected inputs along the feature axis."""
+        out = []
+        for key in keys:
+            if check_spatial:
+                assert len(inputs[key].shape) >= 4
+            out.append(inputs[key])
+        return jnp.concatenate(out, axis=-1)
+
+    def _resolve_obs_stack_keys(self, observations) -> Sequence[str]:
+        """Resolve observation image keys or return an empty set when absent."""
+        obs_stack_keys = regex_filter(self.obs_stack_keys, sorted(observations.keys()))
+        if obs_stack_keys:
+            return obs_stack_keys
+        logging.info(f"No image inputs matching {self.obs_stack_keys} were found.Skipping tokenizer entirely.")
+        assert self.use_obs_mask, "Cannot skip unless using use_obs_mask."
+        return ()
+
+    def _add_task_stack_inputs(self, enc_inputs, observations, tasks):
+        """Append configured spatial task inputs to the encoder input stack."""
+        if not self.task_stack_keys:
+            return enc_inputs, tasks
+        needed_task_keys = regex_filter(self.task_stack_keys, observations.keys())
+        for key in needed_task_keys:
+            if key not in tasks:
+                logging.info(f"No task inputs matching {key} were found. Replacing with zero padding.")
+                tasks = flax.core.copy(tasks, {key: jnp.zeros_like(observations[key][:, 0])})
+        task_stack_keys = regex_filter(self.task_stack_keys, sorted(tasks.keys()))
+        if len(task_stack_keys) == 0:
+            raise ValueError(f"No task inputs matching {self.task_stack_keys} were found.")
+        task_inputs = self._extract_inputs(task_stack_keys, tasks, check_spatial=True)
+        task_inputs = task_inputs[:, None].repeat(enc_inputs.shape[1], axis=1)
+        return jnp.concatenate([enc_inputs, task_inputs], axis=-1), tasks
+
+    def _encoder_input_kwargs(self, tasks, steps: int) -> dict[str, jax.Array]:
+        """Build optional encoder kwargs such as FiLM conditioning inputs."""
+        if not self.task_film_keys:
+            return {}
+        film_inputs = self._extract_inputs(self.task_film_keys, tasks)
+        film_inputs = film_inputs[:, None].repeat(steps, axis=1)
+        return {"cond_var": jnp.reshape(film_inputs, (-1, film_inputs.shape[-1]))}
 
     @nn.compact
     def __call__(
@@ -96,55 +145,26 @@ class ImageTokenizer(nn.Module):
         tasks=None,
         train: bool = True,
     ):
-        def extract_inputs(keys, inputs, check_spatial=False):
-            extracted_outputs = []
-            for key in keys:
-                if check_spatial:
-                    assert len(inputs[key].shape) >= 4
-                extracted_outputs.append(inputs[key])
-            return jnp.concatenate(extracted_outputs, axis=-1)
-
-        obs_stack_keys = regex_filter(self.obs_stack_keys, sorted(observations.keys()))
+        """Tokenize stacked observation images into a TokenGroup with optional task conditioning and masking.
+        Resolve image keys. Stack obs/task inputs. Run the encoder. Optionally apply token learner. Build the token mask."""
+        obs_stack_keys = self._resolve_obs_stack_keys(observations)
         if len(obs_stack_keys) == 0:
-            logging.info(f"No image inputs matching {self.obs_stack_keys} were found.Skipping tokenizer entirely.")
-            assert self.proper_pad_mask, "Cannot skip unless using proper_pad_mask."
             return None
 
-        # stack all spatial observation and task inputs
-        enc_inputs = extract_inputs(obs_stack_keys, observations, check_spatial=True)
-        if self.task_stack_keys:
-            needed_task_keys = regex_filter(self.task_stack_keys, observations.keys())
-            # if any task inputs are missing, replace with zero padding (TODO: be more flexible)
-            for k in needed_task_keys:
-                if k not in tasks:
-                    logging.info(f"No task inputs matching {k} were found. Replacing with zero padding.")
-                    tasks = flax.core.copy(tasks, {k: jnp.zeros_like(observations[k][:, 0])})
-            task_stack_keys = regex_filter(self.task_stack_keys, sorted(tasks.keys()))
-            if len(task_stack_keys) == 0:
-                raise ValueError(f"No task inputs matching {self.task_stack_keys} were found.")
-            task_inputs = extract_inputs(task_stack_keys, tasks, check_spatial=True)
-            task_inputs = task_inputs[:, None].repeat(enc_inputs.shape[1], axis=1)
-            enc_inputs = jnp.concatenate([enc_inputs, task_inputs], axis=-1)
+        enc_inputs = self._extract_inputs(obs_stack_keys, observations, check_spatial=True)
+        enc_inputs, tasks = self._add_task_stack_inputs(enc_inputs, observations, tasks)
         b, t, h, w, c = enc_inputs.shape
         enc_inputs = jnp.reshape(enc_inputs, (b * t, h, w, c))
 
-        # extract non-spatial FiLM inputs
-        encoder_input_kwargs = {}
-        if self.task_film_keys:
-            film_inputs = extract_inputs(self.task_film_keys, tasks)
-            film_inputs = film_inputs[:, None].repeat(t, axis=1)
-            encoder_input_kwargs.update({"cond_var": jnp.reshape(film_inputs, (b * t, -1))})
-
-        # run visual encoder
         encoder_def = ModuleSpec.instantiate(self.encoder)()
-        image_tokens = encoder_def(enc_inputs, **encoder_input_kwargs)
+        image_tokens = encoder_def(enc_inputs, **self._encoder_input_kwargs(tasks, t))
         image_tokens = jnp.reshape(image_tokens, (b, t, -1, image_tokens.shape[-1]))
 
         if self.use_token_learner:
             image_tokens = TokenLearner(num_tokens=self.num_tokens)(image_tokens, train=train)
 
-        if self.proper_pad_mask:
-            pad_mask = generate_proper_pad_mask(
+        if self.use_obs_mask:
+            pad_mask = build_token_mask(
                 image_tokens,
                 observations.get("pad_mask_dict", None),
                 obs_stack_keys,
@@ -166,7 +186,7 @@ class LanguageTokenizer(nn.Module):
 
     encoder: str = None
     finetune_encoder: bool = False
-    proper_pad_mask: bool = True
+    use_task_mask: bool = True
 
     def setup(self):
         if self.encoder is not None:
@@ -186,7 +206,7 @@ class LanguageTokenizer(nn.Module):
     ):
         if "language_instruction" not in tasks:
             logging.warning("No language inputs found. Skipping tokenizer entirely.")
-            assert self.proper_pad_mask, "Cannot skip unless using proper pad mask."
+            assert self.use_task_mask, "Cannot skip unless using use_task_mask."
             return None
 
         if not isinstance(tasks["language_instruction"], (jax.Array, np.ndarray)):
@@ -203,8 +223,8 @@ class LanguageTokenizer(nn.Module):
             tokens = jax.lax.stop_gradient(tokens)
 
         # TODO: incorporate padding info from language tokens here too
-        if self.proper_pad_mask:
-            pad_mask = generate_proper_pad_mask(
+        if self.use_task_mask:
+            pad_mask = build_token_mask(
                 tokens,
                 tasks.get("pad_mask_dict", None),
                 ("language_instruction",),
@@ -265,7 +285,7 @@ class LowdimObsTokenizer(BinTokenizer):
 
     obs_keys: Sequence[str] = ()
     discretize: bool = False
-    proper_pad_mask: bool = True
+    use_obs_mask: bool = True
     dropout_rate: float = 0.0
 
     def setup(self):
@@ -276,7 +296,7 @@ class LowdimObsTokenizer(BinTokenizer):
         assert self.obs_keys, "Need to specify observation keys to tokenize."
         if len(regex_filter(self.obs_keys, sorted(observations.keys()))) == 0:
             logging.warning(f"No observation inputs matching {self.obs_keys} were found.Skipping tokenizer entirely.")
-            assert self.proper_pad_mask, "Cannot skip unless using proper pad mask."
+            assert self.use_obs_mask, "Cannot skip unless using use_obs_mask."
             return None
 
         tokenizer_inputs = []
