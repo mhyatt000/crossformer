@@ -44,10 +44,14 @@ class ModelPolicy(BasePolicy):
         head_name: str = "xflow",
         guide_keys: tuple[str, ...] = ("action.position", "action.orientation"),
         use_guidance: bool = True,
+        flow_steps: int | None = None,
     ):
         self.model: CrossFormerModel = CrossFormerModel.load_pretrained(path, step=step)
         self.params = self.model.params
         self.head_name = head_name
+        self.model.module.heads[head_name].flow_steps = (
+            flow_steps if flow_steps is not None else self.model.heads[head_name].flow_steps
+        )
         self.guide_keys = guide_keys
         self.use_guidance = use_guidance
         self.rng = jax.random.PRNGKey(0)
