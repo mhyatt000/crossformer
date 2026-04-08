@@ -52,7 +52,7 @@ class Arec(DataSource):
     # upgrade: bool = False
     branch: str = "main"
 
-    chunk: int = 50
+    chunk: int = 20
     goal: bool = False
 
     builder: ArrayRecordBuilder = field(init=False)
@@ -128,7 +128,7 @@ class Arec(DataSource):
     def get_shards(self):
         shards = sorted(self.root.glob("*.arrayrecord"))
         if not shards:
-            raise FileNotFoundError(f"No ArrayRecord shards found in {path}")
+            raise FileNotFoundError(f"No ArrayRecord shards found in {self.root}")
         return shards
 
 
@@ -170,7 +170,7 @@ XGYM = [
 ]
 
 NEW = [
-    Arec(name="xgym_sweep_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.2", branch="to_step"),
+    Arec(name="xgym_sweep_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.3", branch="main"),
     Arec(name="sweep_mano", head=Head.MANO, embodiment=HUMAN_SINGLE, version="0.0.2", branch="to_step"),
 ]
 

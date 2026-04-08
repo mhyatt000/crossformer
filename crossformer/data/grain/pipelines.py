@@ -307,96 +307,6 @@ class ArecReader:
     ram_cache: bool = True
 
 
-@with_device_context(device=cpu)
-def dummy_data(*args, **kwargs):
-    myspec = {
-        "action": (8),
-        "action_head_masks": {
-            "mano": (),
-            "single_arm": (),
-        },
-        "action_pad_mask": (8),
-        "observation": {
-            "image": {
-                "overhead": (224, 224, 3),
-                "side": (224, 224, 3),
-                "worm": (224, 224, 3),
-                "wrist": (224, 224, 3),
-            },
-            "pad_mask_dict": {
-                "image": {
-                    "overhead": (1,),
-                    "side": (1,),
-                    "worm": (1,),
-                    "wrist": (1,),
-                },
-                "proprio": {
-                    "gripper": (1,),
-                    "joints": (1,),
-                    "position": (1,),
-                    "single_arm": (1,),
-                },
-                "timestep": (1,),
-            },
-            "proprio": {
-                "gripper": (1),
-                "joints": (7),
-                "position": (6),
-                "single_arm": (14),
-            },
-            "task_completed": (1, 50),
-            "timestep": (1,),
-            "timestep_pad_mask": (1,),
-        },
-        "task": {
-            "image": {
-                "overhead": (224, 224, 3),
-                "side": (224, 224, 3),
-                "worm": (224, 224, 3),
-                "wrist": (224, 224, 3),
-            },
-            "language.embedding": (512,),
-            "pad_mask_dict": {
-                "image": {
-                    "overhead": (),
-                    "side": (),
-                    "worm": (),
-                    "wrist": (),
-                },
-                "language.embedding": (),
-                "proprio": {
-                    "gripper": (),
-                    "joints": (),
-                    "position": (),
-                    "single_arm": (),
-                },
-                "timestep": (),
-            },
-            "proprio": {
-                "gripper": (1,),
-                "joints": (7,),
-                "position": (6,),
-                "single_arm": (14,),
-            },
-            "timestep": (),
-        },
-    }
-
-    def is_leaf(y):
-        return not isinstance(y, dict)
-
-    def stack_em(*x):
-        jnp.stack([*x], axis=0)
-
-    key = jax.random.key(0)
-    n = jax.random.randint(key, (), 500, 1000)
-    return jax.tree.map(lambda x: jax.random.normal(key, x, dtype=np.float32), myspec, is_leaf=is_leaf)
-
-    batch = [make_batch() for _ in range(n)]
-    batch = jax.tree.map(stack_em, *batch)
-    return batch
-
-
 T = TypeVar("T")
 S = TypeVar("S")
 
@@ -757,14 +667,14 @@ def drop_str(batch):
 
 
 def add_mask(x: dict):
-    flag = x["info"]["id"]["episode"] % 2  # 95% of data
+    # flag = x["info"]["id"]["episode"] % 2  # 95% of data
     # merge — embody_transform may have already written mask.act
     x.setdefault("mask", {}).update(
         {
             "action_head_masks": x["action_head_masks"],
             # "action_pad_mask": x["action_pad_mask"],
             "timestep_pad_mask": np.ones_like(x["observation"]["timestep"]).astype(np.bool_),
-            "only_adjustment": ~flag.astype(jnp.bool_),
+            # "only_adjustment": ~flag.astype(jnp.bool_),
         }
     )
 

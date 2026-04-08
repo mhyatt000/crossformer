@@ -12,13 +12,12 @@ import logging
 from typing import Any
 
 import grain.python as gp
-import jax
 import numpy as np
 
 from crossformer.data.grain import metadata
 from crossformer.data.grain.embody import build_action_norm_mask
+from crossformer.data.grain.restructure import _restructure_step_mano, _restructure_trajectory
 from crossformer.embody import Dataset
-from crossformer.utils.jax_utils import str2jax
 from crossformer.utils.spec import ModuleSpec
 
 log = logging.getLogger(__name__)
@@ -74,7 +73,6 @@ class GrainDatasetConfig:
     name: str
     source: Sequence[dict] | gp.RandomAccessDataSource | Callable[[], Any]
     standardize_fn: ModuleSpec | Callable | None = None
-    episode_info: Any = None
 
     keys: Keys = field(default_factory=Keys)
     action_proprio_normalization_type: str = metadata.NormalizationType.NORMAL
@@ -95,75 +93,10 @@ def stable_hash_int(s: str) -> int:
     return int(hashlib.sha256(s.encode()).hexdigest(), 16) / 2**256
 
 
-def _restructure_trajectory(
-    step: dict,
-    *,
-    name: str,
-    config: GrainDatasetConfig,
-) -> dict:
-    if "observation" not in step or "action" not in step:
-        raise ValueError("Trajectory must contain 'observation' and 'action' keys.")
-
-    # @codex add some action processing fn here.
-    # in place of hard coded action definition
-
-    info = step["info"]
-    sid, eid = np.array(info["step"]).reshape(-1), np.array(info["episode"]).reshape(-1)
-    step["info"]["id"] = {"step": sid, "episode": eid}  # patch
-    step["observation"]["timestep"] = sid
-
-    task = {}
-    task[config.keys.lang] = step[config.keys.lang]  # simple
-    if False:
-        """
-        raise DeprecatedError("opaque")
-        if config.keys.lang is not None:
-            language = _sample_match_key(step, config.keys.lang)
-            language = np.asarray(language)
-            if language.shape == ():
-                language = np.repeat(language, traj_len)
-            if language.shape[0] != traj_len:
-                language = np.broadcast_to(language, (traj_len,))
-            task[config.keys.lang] = language  # .astype(object)
-        """
-
-    return {
-        "observation": step["observation"],
-        "task": task,
-        "action": step["action"],  #  action,
-        "dataset_name": str2jax(name),
-        "info": {
-            "dataset_name": str2jax(name),
-            "id": {k.replace("_id", ""): np.array([v]).reshape(-1) for k, v in step.items() if "_id" in k},
-        }
-        | step.get("info", {}),
-    }
-
-
 def note_embodiment(x: dict):
     # mark the dataset's embodiments for mask later
     # for k in action: embodiment[k] = 1
     x["embodiment"] = {k: np.array(1, dtype=np.bool).reshape(-1) for k in x["action"]}
-    return x
-
-
-def _restructure_step_mano(x: dict, *, name: str, config: GrainDatasetConfig) -> dict:
-    task = {}
-    task[config.keys.lang] = x.pop(config.keys.lang)  # simple
-    x["task"] = task
-
-    x["observation"]["timestep"] = x["info"]["id"]["step"]
-    # k3ds is used as an action target here; don't expose it as proprio.
-    x["observation"].get("proprio", {}).pop("k3ds", None)
-
-    # k3ds: (H, 21, 4) → strip homogeneous coord → (H, 21, 3)
-    # derive cart_pos from palm keypoint (index 0) before flatten
-    k3ds = np.array(x["action"]["k3ds"])  # (H, 21, 4)
-    k3ds = k3ds[..., :3]  # (H, 21, 3) drop homogeneous w
-    x["action"]["position"] = k3ds[:, 0, :]  # (H, 3) palm = cart_pos
-    x["action"]["k3ds"] = k3ds.reshape(k3ds.shape[0], -1)  # (H, 63)
-
-    x = jax.tree.map(lambda y: np.array(y), x)  # ensure numpy arrays
     return x
 
 
@@ -203,6 +136,7 @@ def build_trajectory_dataset(
     """Builds a :class:`grain.MapDataset` emitting standardized trajectories."""
 
     ds = source = _resolve_source(config.source)
+    embodiment = Dataset.REGISTRY[config.name].embodiment
 
     filters = [_resolve_callable(fn) for fn in config.filter_fns if fn]
     for f in filters:
@@ -211,28 +145,20 @@ def build_trajectory_dataset(
     standardize = _resolve_callable(config.standardize_fn)
 
     r = _restructure_step_mano if "k3ds" in ds[0]["action"] else _restructure_trajectory
-    restructure = ModuleSpec.create(r, name=config.name, config=config)
+    restructure = ModuleSpec.create(r, name=config.name, lang_key=config.keys.lang)
     ds = ds.map(ModuleSpec.instantiate(restructure))
     ds = ds.map(note_embodiment)
-    embodiment = Dataset.REGISTRY[config.name].embodiment
-    ds = ds.map(lambda x: x | {"action_norm_mask": build_action_norm_mask(x["action"], embodiment)})
 
     stats = _load_dataset_statistics(config, ds)
-    # stats = jax.tree.map(jax.device_get, stats)
+    norm_mask: dict = build_action_norm_mask(ds[0]["action"], embodiment)
 
-    mask = config.action_normalization_mask
-    norm: Callable = metadata.normalize_action_and_proprio
-    norm = partial(
-        norm,
-        metadata=stats,
-        normalization_type=config.action_proprio_normalization_type,
-        proprio_keys=list(config.keys.proprio.keys()),
-        action_mask=mask,
-        skip_norm_keys=config.skip_norm_keys,
-    )
+    def norm_all(x: dict, stats: metadata.DatasetStatistics):
+        _norm = partial(metadata.normalize_tree, mask=norm_mask) if norm_mask else metadata.normalize_tree
+        x["action"] = _norm(x["action"], stats.action)
+        x["observation"]["proprio"] = _norm(x["observation"]["proprio"], stats.proprio)
+        return x
 
-    log.info("Applying lazy normalization to dataset...")
-    log.info("TODO vectorize normalization fn on batch")
-    ds = ds.map(norm) if not config.skip_norm else ds
+    ds = ds.map(partial(norm_all, stats=stats)) if not config.skip_norm else ds
+
     ds.dataset_statistics = stats  # type: ignore[attr-defined]
     return ds, stats

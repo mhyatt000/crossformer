@@ -12,6 +12,7 @@ from typing import Iterable, Mapping, Sequence
 import grain
 import jax
 import numpy as np
+from rich import print
 from tqdm import tqdm
 
 from crossformer.utils import databrief
@@ -192,56 +193,33 @@ def compute_dataset_statistics(
     sample = ds[0]
 
     def _make_stream(x):
-        a = np.array(x)
-        return OnlineStats(a[0].shape, dtype=a.dtype)
+        return OnlineStats(x.shape, dtype=x.dtype)
 
-    streams = {
-        "action": jax.tree.map(_make_stream, sample["action"]),
-        "proprio": jax.tree.map(_make_stream, sample["observation"]["proprio"]),
-    }
+    streams: dict = jax.tree.map(_make_stream, sample["observation"]["proprio"])
 
-    def _update(x):
-        for key, value in x["action"].items():
-            action_mask = x.get("action_norm_mask", {}).get(key)
-            streams["action"][key].update(value[0], mask=action_mask)
-        for key, value in x["observation"]["proprio"].items():
-            streams["proprio"][key].update(value[0])
+    def _update(x: dict):
+        p = x["observation"]["proprio"]
+        for key, value in p.items():
+            streams[key].update(value)
         return x
 
-    # ds = ds.slice(slice(5))
-    mpds = (
-        ds.to_iter_dataset(grain.ReadOptions(num_threads=16, prefetch_buffer_size=128))
-        # .batch(_bs)
-        # .mp_prefetch(grain.MultiprocessingOptions(num_workers=0))
-        .map(_update)
-    )
+    mpds = ds.to_iter_dataset(grain.ReadOptions(num_threads=16, prefetch_buffer_size=128)).map(_update)
 
     def take_keys(x):
         return {k: v for k, v in x.items() if k == "action" or k == "observation"}
 
     mpds = mpds.map(take_keys)
 
+    print("computing stats for dataset with", N, "transitions and", t, "trajectories")
     mpit = iter(mpds)
     trees = list(tqdm(mpit, desc="Loading ds for stats computation...", total=t // _bs))
     stats = jax.tree.map(lambda s: ArrayStatistics(**s.finalize()), streams)
 
     print(stats)
 
-    # trees = [next(mpit) for _ in tqdm(range(2), desc="Computing ds stats...", total=t)]
-
-    # for ep-wise
-    # trees = jax.tree.map(lambda *a: np.concatenate([*a], axis=0), *trees)
-    # for step-wise
-    # trees = jax.tree.map(lambda *a: np.stack([*a], axis=0), *trees)
-
-    # actions = trees["action"]
-    # assert t, "No transitions found in dataset."
-    # proprio = trees["observation"]["proprio"]
-
-    print("computing stats for dataset with", N, "transitions and", t, "trajectories")
     stats = DatasetStatistics(
-        action=stats["action"],
-        proprio=stats["proprio"],
+        proprio=stats,  # all the stats are proprio for now
+        action=stats,
         num_transitions=N,
         num_trajectories=t,
     )
@@ -277,6 +255,19 @@ def _apply_action_mask(action: np.ndarray, normalized: np.ndarray, mask: np.ndar
     if mask.shape[-1] != normalized.shape[-1]:
         raise ValueError(f"Length of action mask {mask.shape} does not match action dimension {normalized.shape}.")
     return np.where(mask, normalized, action)
+
+
+def normalize_arr(arr, *, stats: ArrayStatistics, mask: np.ndarray | None = None) -> np.ndarray:
+    """normalize arr using stats, applying norm mask if provided."""
+    norm = stats.normalize(arr)
+    return norm if mask is None else np.where(mask, norm, arr)
+
+
+def normalize_tree(tree: dict, stats: dict, mask: dict | None = None):
+    """normalize a tree of arrays"""
+    if mask is None:
+        return jax.tree_map(lambda x, s: normalize_arr(x, stats=s), tree, stats)
+    return jax.tree.map(lambda x, s, m: normalize_arr(x, stats=s, mask=m), tree, stats, mask)
 
 
 def normalize_action_and_proprio(

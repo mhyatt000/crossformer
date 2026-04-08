@@ -16,12 +16,13 @@ from grain.experimental import ThreadPrefetchIterDataset
 import jax
 import jax.numpy as jnp
 import numpy as np
+from rich import print
 
 from crossformer import cn
 from crossformer.cn.dataset.mix import Arec, MultiDataSource
 from crossformer.data.grain import builders, transforms
 from crossformer.data.grain.datasets import (
-    EpisodeInfo,
+    MultiArrayRecordSource,
     unpack_record,
 )
 from crossformer.data.grain.embody import embody_transform
@@ -37,17 +38,15 @@ from crossformer.data.grain.pipelines import (
 )
 from crossformer.data.grain.util.remap import _remap_lang, rekey
 from crossformer.utils.jax_utils import cpu
-from crossformer.utils.spec import diff, ezdiff, spec
-from crossformer.utils.tree import do_fn_key, drop, flat, unflat
+from crossformer.utils.spec import diff, spec
+from crossformer.utils.tree import drop, flat, unflat
+from crossformer.utils.type_checking import Image, jtyped, ShapeError, Windowed
 
 log = logging.getLogger(__name__)
 
 
 def np2jax(x):
     return jax.tree.map(lambda y: jnp.array(y, device=cpu), x)
-
-
-from crossformer.utils.type_checking import Image, jtyped, ShapeError, Windowed
 
 
 @jtyped
@@ -119,12 +118,7 @@ def make_source_by_mix(
 
     grain.config.update("py_debug_mode", log.isEnabledFor(logging.DEBUG))
 
-    def exists(x: dict[Any] | None):
-        return x is not None
-
     log.debug("mix source: %s (%d)", mix.name, len(mix.source))
-
-    epinfo = EpisodeInfo(mix.source, mix)
 
     def maybe_init_lang(x: dict):
         if "language_instruction" not in x:
@@ -133,23 +127,36 @@ def make_source_by_mix(
             x["language_embedding"] = np.zeros((512,), dtype=np.float32)
         return x
 
-    ds = (
-        grain.MapDataset.source(mix.source)
-        .seed(42)
-        .map(unpack_record)
-        .map(maybe_init_lang)
-        # .map(partial(_postprocess_episode, steps=False))
-        # .filter(exists)
-        .map(partial(drop, keys=["discount", "is_terminal", "reward", "is_first", "is_last"]))
-        .map(
-            partial(
-                rekey,
-                inp=["language_instruction", "language_embedding"],
-                out=["language.instruction", "language.embedding"],
-            )
+    if isinstance(mix.source, MultiArrayRecordSource):
+        ds = (
+            grain.MapDataset.source(mix.source)
+            .seed(42)
+            .map(lambda x: x | {"action": x["proprio"].copy()})
+            .map(
+                lambda x: x | {"proprio": jax.tree.map(lambda y: y[0], x["proprio"])}
+            )  # select first item from horizon
+            .map(lambda x: x | {"observation": {k: x.pop(k) for k in ["image", "proprio"]}})
+            .map(lambda x: x | {"language.embedding": np.zeros((512,), dtype=np.float32)})
+            .map(lambda x: x | {"info": jax.tree.map(lambda y: y[0], x["info"])})
         )
-        .map(drop_str)  # TODO refactor to drop_type(typ=str)
-    )
+
+    else:
+        ds = (
+            grain.MapDataset.source(mix.source)
+            .seed(42)
+            .map(unpack_record)
+            .map(maybe_init_lang)
+            # .map(partial(_postprocess_episode, steps=False))
+            .map(partial(drop, keys=["discount", "is_terminal", "reward", "is_first", "is_last"]))
+            .map(
+                partial(
+                    rekey,
+                    inp=["language_instruction", "language_embedding"],
+                    out=["language.instruction", "language.embedding"],
+                )
+            )
+            .map(drop_str)  # TODO refactor to drop_type(typ=str)
+        )
 
     dsit = iter(ds)
     example = next(dsit)
@@ -170,7 +177,6 @@ def make_source_by_mix(
     dataset_config = builders.GrainDatasetConfig(
         name=mix.name,
         source=ds,
-        episode_info=epinfo,
         keys=keys,
         standardize_fn=standardize_fn,
         skip_norm_keys=cfg.data.transform.skip_norm_keys,
@@ -245,9 +251,8 @@ def make_single_dataset(
             # unsqueeze proprio horizon dim to 1
             # in the current state of data transforms, we dont use many horizon steps
             # code still expects horizon dim
-            if not fnmatch.filter(flat(x).keys(), "observation.proprio.*"):
-                return x
-            return do_fn_key(x, "observation.proprio.*", lambda y: y[None])
+            x["observation"]["proprio"] = jax.tree.map(lambda y: y[None], x["observation"]["proprio"])
+            return x
 
         ds = ds.map(unsqueeze_img_horizon)
 
@@ -305,7 +310,8 @@ class GrainDataFactory:
 
             _a, _b = spec(flat(a), simple=simple), spec(flat(b), simple=simple)
             _d = diff(_a, _b, simple=simple)
-            assert not _d.get("changed"), ("mismatched shape on the same key", {"changed": _d["changed"]})
+            # print("diff", _d)
+            # assert not _d.get("changed"), ("mismatched shape on the same key", {"changed": _d["changed"]})
             d["added"] = {**d.get("added", {}), **_d["added"]}
             d["removed"] = {**d.get("removed", {}), **_d["removed"]}
 
@@ -313,11 +319,15 @@ class GrainDataFactory:
 
         # double check
         dsets = [ds.map(partial(mix_compatibility, diff=d)) for ds in dsets]
-        if False:
+        if True:
             samples = [next(iter(ds)) for ds in dsets]
             a = samples[0]
             for b in samples[1:]:
-                ezdiff(a, b, simple=False)
+                # ezdiff(a, b, simple=False)
+                _a, _b = spec(flat(a), simple=simple), spec(flat(b), simple=simple)
+                _d = diff(_a, _b, simple=simple)
+                print(_d)
+                assert not _d.get("changed"), ("mismatched shape on the same key", {"changed": _d["changed"]})
             # print(spec(a))
 
         ds = grain.MapDataset.mix(dsets, weights=[1.0] * len(dsets))

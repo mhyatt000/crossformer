@@ -81,7 +81,7 @@ class MultiArrayRecordSource:
         self,
         img_src: ArrayRecordDataSource,
         pro_src: ArrayRecordDataSource,
-        chunk: int = 50,
+        chunk: int = 20,
         goal: bool = False,
         goal_decay: float = 0.05,
         seed: int = 0,

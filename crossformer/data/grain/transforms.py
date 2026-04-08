@@ -45,7 +45,7 @@ def _mask(fn, *args, **kwargs):
     return fn(*args, **kwargs)
 
 
-def add_pad_mask_dict(step: Step, device=cpu) -> Step:
+def add_pad_mask_dict(step: Step) -> Step:
     """Annotates ``step`` with padding masks for observation/task dictionaries."""
 
     # every item says if mask at that time
