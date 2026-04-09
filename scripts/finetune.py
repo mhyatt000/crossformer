@@ -16,14 +16,10 @@ from ml_collections import ConfigDict
 import optax
 
 # from crossformer.utils import nowarn
-import tensorflow as tf
 import tqdm
 import tyro
 
 from crossformer import cn
-from crossformer.data.oxe.oxe_standardization_transforms import (
-    OXE_STANDARDIZATION_TRANSFORMS,
-)
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.utils.callbacks.inspect import InspectCallback
 from crossformer.utils.callbacks.viz import VizCallback
@@ -48,9 +44,6 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     #
     # Setup
     #
-
-    tf.random.set_seed(cfg.seed + jax.process_index())
-    tf.config.set_visible_devices([], "GPU")
 
     cfg.vprint(cfg, level=2)
     initialize_compilation_cache()
@@ -137,10 +130,6 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
         dataset = GrainDataFactory().make(cfg, shard_fn=shard, train=True)
         _apply_fd_limit(512**2)
         dsit = iter(dataset.dataset)
-    else:
-        dataset = cfg.data.create(OXE_STANDARDIZATION_TRANSFORMS, train=True)
-        dsit = dataset.iterator(prefetch=cfg.data.loader.prefetch)
-        dsit = map(shard, map(process_batch, dsit))
 
     log.warning("TODO shard with mp")
     example_batch = next(dsit)

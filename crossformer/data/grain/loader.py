@@ -200,7 +200,6 @@ def make_source_by_mix(
 def make_single_dataset(
     config: builders.GrainDatasetConfig,
     *,
-    train: bool,
     tfconfig: TransformConfig | None = TransformConfig(),
     shuffle_buffer_size: int | None = None,
     drop_remainder: bool = True,
@@ -276,10 +275,12 @@ class GrainDataFactory:
     shuffle_slot: bool = True  # shuffle body-part slot order in embody_transform; disable for eval/debug
     imaug: bool = True  # apply augmax image augmentations (channel shuffle, random aspect, rotate)
 
-    def source2ds(self, dconfig, tfconfig, cfg: cn.Train, dataset: Arec, max_a: int = 0) -> GrainDataLoader:
+    def source2ds(
+        self, dconfig, tfconfig, train: bool, cfg: cn.Train, dataset: Arec, max_a: int = 0
+    ) -> GrainDataLoader:
         ds, stats = make_single_dataset(
             dconfig,
-            train=True,
+            train,
             tfconfig=tfconfig,
             shuffle_buffer_size=1,
             seed=cfg.seed,
@@ -289,8 +290,8 @@ class GrainDataFactory:
                 embody_transform,
                 embodiment=dataset.embodiment,
                 max_a=max_a,
-                mask_prob=0.25 if self.mask_slot else 0.0,
-                shuffle_slot=self.shuffle_slot,
+                mask_prob=0.25 if train else 0.0,
+                shuffle_slot=train,
             )
             ds = ds.map(embody_fn)
             log.debug("applied embody transform: %s (max_a=%d)", dconfig.name, max_a)
