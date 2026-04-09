@@ -7,8 +7,6 @@ from dataclasses import dataclass
 import fnmatch
 from functools import partial
 import logging
-import multiprocessing
-import os
 from pathlib import Path
 from typing import Any, Sequence, TypeVar
 
@@ -40,6 +38,7 @@ from crossformer.utils.deco import deprecate
 from crossformer.utils.jax_utils import cpu, with_device_context
 from crossformer.utils.spec import ModuleSpec, spec
 from crossformer.utils.tree import flat, unflat
+from crossformer.utils.tree.core import drop_fn
 
 log = logging.getLogger(__name__)
 
@@ -311,45 +310,6 @@ T = TypeVar("T")
 S = TypeVar("S")
 
 
-if multiprocessing.parent_process() is not None:
-    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-    os.environ["JAX_PLATFORMS"] = "cpu"
-    os.environ["JAX_PLATFORM_NAME"] = "cpu"
-
-
-def worker_init_fn(worker_id: int, worker_count: int):
-    """Initialize each worker process."""
-    logging.getLogger().handlers.clear()
-    logging.getLogger().setLevel(logging.CRITICAL + 1)
-    import os
-
-    # 3. Force unified memory (usually a bad idea)
-    # os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
-    # This allows paging to host RAM.
-    # os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.01"
-
-    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-    os.environ["JAX_DEFAULT_DEVICE"] = "cpu"
-    os.environ["JAX_PLATFORM_NAME"] = "cpu"
-    os.environ["JAX_PLATFORMS"] = "cpu"
-
-    import jax
-
-    jax.default_device(cpu)
-    pprint(jax.devices())
-
-    import faulthandler
-    import warnings
-
-    faulthandler.enable()
-    os.environ["PYTHONWARNINGS"] = "error"  # promote many warnings to errors
-    warnings.simplefilter("error", ResourceWarning)  # unclosed files, etc.
-    os.environ["JAX_TRACEBACK_FILTERING"] = "off"  # full JAX traces
-    # global cpu
-    # cpu = jax.devices("cpu")[0]
-
-
 def get_episode_lengths(path: Path) -> list[list[int]] | None:
     import json
 
@@ -583,7 +543,7 @@ def get_frame_transform(
         chain = augmax.Chain(
             augmax.Resize(re_wh),
             augmax.ChannelShuffle(p=0.5),
-            RandomAspect(x_range=(0.9, 1.1), y_range=(0.9, 1.1), p=0.5),
+            # RandomAspect(x_range=(0.9, 1.1), y_range=(0.9, 1.1), p=0.5),
             # augmax.RandomGrayscale(p= 0.5),
             augmax.Rotate((-15, 15), p=0.3),
             # augmax.ByteToFloat(),
@@ -655,15 +615,8 @@ def sharding_put(
     return ds
 
 
-def drop_str(batch):
-    # if 'info' in batch: batch.pop('info')
-    # pprint(spec(batch))
-
-    if "language.instruction" in batch:
-        batch.pop("language.instruction")
-    if "dataset_name" in batch:
-        batch.pop("dataset_name")
-    return batch
+def drop_str(x: dict):
+    return drop_fn(x, lambda k, v: isinstance(v, str))
 
 
 def add_mask(x: dict):
@@ -768,12 +721,8 @@ def make_single_dataset(
         )
 
         ds = ds.batch(config.batch_size, drop_remainder=drop_remainder)  # , batch_fn=batch_fn)
-        ds = ds.mp_prefetch(
-            grain.MultiprocessingOptions(num_workers=8, per_worker_buffer_size=10), worker_init_fn=worker_init_fn
-        )
+        ds = ds.mp_prefetch(grain.MultiprocessingOptions(num_workers=8, per_worker_buffer_size=10))
         # ds = FlatMapIterDataset(ds, transform=flatmap.UnpackFlatMap(key="info.id.episode_id", use_np=True))
-
-        # debug_dataset(ds, config, n=1e3)
 
         def unbatch(items):
             for item in items:
@@ -805,25 +754,3 @@ def make_single_dataset(
 
         print("Dataset created... please be very patient while threads start up")
         return GrainDataLoader(dataset=ds, statistics=stats, config=config)
-
-        log.warning("TODO add img dropout")
-        log.warning("TODO add img or lang dropout")
-
-        ds = ThreadPrefetchIterDataset(ds, prefetch_buffer_size=config.batch_size)
-        ds = (
-            # @maddie is it better to use mp or to jit with constant size?
-            ds.random_map(lambda x, rng: frame_aug_with_reshape(rng=to_jax_key(rng), batch=x)).map(
-                jax.jit(compatibility)
-            )
-        )
-        # pprint(spec(next(iter(ds))))
-        # quit()
-
-        # ds = sharding_put(ds, shard_fn=shard_fn, cpu_buffer_size=8, device_buffer_size=0)
-        # debug_dataset(ds, config, n=1e2)
-
-    ds.dataset_statistics = stats  # type: ignore[attr-defined]
-    log.info("returning final dataset")
-
-    print("Dataset created... please be very patient while threads start up")
-    return GrainDataLoader(dataset=ds, statistics=stats, config=config)
