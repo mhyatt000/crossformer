@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 import flax
 from rich import print
 
-from crossformer.cn.base import CN, default
+from crossformer.cn.base import CN
 from crossformer.cn.heads import _SINGLE, HeadFactory
+from crossformer.model.components.heads.xflow import XFlowHead
 from crossformer.model.components.vit_encoders import vit_encoder_configs
 from crossformer.model.config import ImageTokenizerCfg, LowdimTokenizerCfg, ModelCfg, TransformerCfg
 from crossformer.utils.spec import ModuleSpec
@@ -42,7 +43,40 @@ class Size(Enum):
 @dataclass
 class Vision(CN):
     use_film: bool = True
-    encoder: str = "resnetv2-26-film"
+    encoder: Literal[*vit_encoder_configs] = "resnetv2-26-film"
+
+
+@dataclass
+class XFlow(CN):
+    readout_name: str = "action"
+    readout_tokens: int = 4
+    max_dofs: int = 8
+    max_horizon: int = 20
+    head_channels: int = 256
+    head_depth: int = 2
+    head_heads: int = 8
+    flow_steps: int = 50
+    use_guidance: bool = False
+    guidance_input_dim: int | None = None
+    compress_guidance: bool = False
+    num_guidance_latents: int = 4
+
+    def create(self, *, token_dim: int) -> ModuleSpec:
+        return ModuleSpec.create(
+            XFlowHead,
+            readout_key=f"readout_{self.readout_name}",
+            max_dofs=self.max_dofs,
+            max_horizon=self.max_horizon,
+            num_query_channels=self.head_channels,
+            num_heads=self.head_heads,
+            num_self_attend_layers=self.head_depth,
+            flow_steps=self.flow_steps,
+            use_guidance=self.use_guidance,
+            guidance_embed_dim=token_dim,
+            guidance_input_dim=self.guidance_input_dim,
+            compress_guidance=self.compress_guidance,
+            num_guidance_latents=self.num_guidance_latents,
+        )
 
 
 @dataclass
@@ -52,12 +86,12 @@ class ModelFactory(CN):
     image_keys: tuple[str, ...] = _DEFAULT_IMAGE_KEYS
     proprio_keys: tuple[str, ...] = _DEFAULT_PROPRIO_KEYS
     vision: Vision = Vision().field()
-    readouts: dict[str, int] = default({_SINGLE: 20, "k3ds": 20})
+    xflow: XFlow = XFlow().field()
     debug: bool = False
 
     @property
     def heads(self) -> list[str]:
-        return list(self.readouts.keys())
+        return [self.xflow.readout_name]
 
     def _obs_tokenizers(self):
         toks = []
@@ -67,22 +101,16 @@ class ModelFactory(CN):
         toks.extend(self.make_obs_proprio(key) for key in self.proprio_keys)
         return toks
 
-    def _head_specs(self) -> dict[str, ModuleSpec]:
-        specs = {}
-        for name, readout_tokens in self.readouts.items():
-            assert name in _HEAD_TEMPLATES, f"Unknown head/readout: {name}"
-            head = HeadFactory(**_HEAD_TEMPLATES[name].asdict())
-            head.horizon = self.window
-            specs[name] = head.create()
-            assert readout_tokens > 0, f"readouts[{name!r}] must be positive"
-        return specs
+    def _head_specs(self, *, token_dim: int) -> dict[str, ModuleSpec]:
+        return {self.xflow.readout_name: self.xflow.create(token_dim=token_dim)}
 
     def to_model_cfg(self) -> ModelCfg:
+        transformer = TransformerCfg.from_size(self.size.value, max_horizon=self.window)
         return ModelCfg(
             observation_tokenizers=self._obs_tokenizers(),
-            readouts=dict(self.readouts),
-            heads=self._head_specs(),
-            transformer=TransformerCfg.from_size(self.size.value, max_horizon=self.window),
+            readouts={self.xflow.readout_name: self.xflow.readout_tokens},
+            heads=self._head_specs(token_dim=transformer.token_embedding_size),
+            transformer=transformer,
         )
 
     def create(self) -> dict[str, Any]:
@@ -144,5 +172,4 @@ class ModelFactory(CN):
         return self.window
 
     def max_action_dim(self) -> int:
-        dims = [_HEAD_TEMPLATES[name].dim.value for name in self.readouts]
-        return max(dims)
+        return self.xflow.max_dofs

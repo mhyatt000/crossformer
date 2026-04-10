@@ -192,6 +192,7 @@ class ModuleSpec(TypedDict):
             )
             module, name = callable_or_full_name.split(":")
         else:
+            callable_or_full_name, args, kwargs = _unwrap_partial(callable_or_full_name, args, kwargs)
             module, name = _infer_full_name(callable_or_full_name)
 
         return ModuleSpec(module=module, name=name, args=args, kwargs=kwargs)
@@ -225,6 +226,14 @@ def _infer_full_name(o: object):
             "Please pass in a fully qualified import string instead "
             "e.g. 'crossformer.model.components.transformer:Transformer'"
         )
+
+
+def _unwrap_partial(o: object, args: tuple[Any, ...], kwargs: dict[str, Any]):
+    while isinstance(o, partial):
+        args = (*o.args, *args)
+        kwargs = {**(o.keywords or {}), **kwargs}
+        o = o.func
+    return o, args, kwargs
 
 
 def _import_from_string(module_string: str, name: str):

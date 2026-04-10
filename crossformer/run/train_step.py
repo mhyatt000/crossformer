@@ -72,7 +72,7 @@ def make_train_step(
             bound = module.bind({"params": params}, rngs={"dropout": rng})
             transformer_outputs = bound.crossformer_transformer(obs, task, pad_mask, train=train)
 
-            loss, metrics = bound.heads["xflow"].loss(
+            loss, metrics = bound.heads["action"].loss(
                 transformer_outputs,
                 actions,
                 dof_ids,

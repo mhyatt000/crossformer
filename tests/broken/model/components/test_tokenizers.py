@@ -8,7 +8,7 @@ import pytest
 from crossformer.model.components.base import TokenGroup
 from crossformer.model.components.tokenizers import (
     BinTokenizer,
-    generate_proper_pad_mask,
+    build_token_mask,
     ImageTokenizer,
     LanguageTokenizer,
     LowdimObsTokenizer,
@@ -20,13 +20,13 @@ from crossformer.model.components.vit_encoders import PatchEncoder
 from crossformer.utils.spec import ModuleSpec
 
 
-def test_generate_proper_pad_mask_combines_sources():
+def test_build_token_mask_combines_sources():
     tokens = jnp.zeros((2, 3, 4, 2))
     pad_mask_dict = {
         "a": jnp.array([[True, False, True], [False, True, True]]),
         "b": jnp.array([[False, False, False], [False, False, False]]),
     }
-    mask = generate_proper_pad_mask(tokens, pad_mask_dict, ("a", "b"))
+    mask = build_token_mask(tokens, pad_mask_dict, ("a", "b"))
     expected = jnp.array(
         [
             [[True], [False], [True]],
@@ -109,7 +109,7 @@ def test_image_tokenizer_with_token_learner():
 
 
 def test_language_tokenizer_uses_pad_mask():
-    tokenizer = LanguageTokenizer(proper_pad_mask=True)
+    tokenizer = LanguageTokenizer(use_task_mask=True)
     tasks = {
         "language_instruction": jnp.array([[[[1]], [[2]], [[3]]]]),
         "pad_mask_dict": {"language_instruction": jnp.array([[True, True, False]])},

@@ -16,8 +16,8 @@ import jax.numpy as jnp
 from jax.typing import ArrayLike
 import numpy as np
 import orbax.checkpoint
-from rich import print
 
+# from rich import print # conflict with tabulate model
 from crossformer.data.utils.normalization import NormalizationType
 from crossformer.data.utils.text_processing import TextProcessor
 from crossformer.model.components.heads import ActionHead

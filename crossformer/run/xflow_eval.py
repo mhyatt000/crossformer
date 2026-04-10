@@ -6,11 +6,11 @@ from typing import Any, Callable, Iterable, Iterator, Mapping
 import jax
 import jax.numpy as jnp
 import numpy as np
-import wandb
 
 from crossformer.embody import DOF
 from crossformer.run.train_step import lookup_guide
 from crossformer.utils.callbacks.viz import ActionBatchDenormalizer
+import wandb
 
 JOINT_NAMES = tuple(f"j{i}" for i in range(7))
 JOINT_IDS = tuple(DOF[name] for name in JOINT_NAMES)
@@ -20,7 +20,7 @@ RAST_IDS = tuple(DOF[name] for name in RAST_NAMES)
 RAST_ID_TO_IDX = {dof_id: i for i, dof_id in enumerate(RAST_IDS)}
 
 
-def normalize_obs(obs, obs_keys):
+def flatten_obs(obs, obs_keys):
     """Flatten selected lowdim inputs to (B, W, D)."""
     out = dict(obs)
     for key in obs_keys:
@@ -181,7 +181,7 @@ class XFlowEvalLoop:
             self._it = iter(self.loader)
             batch = next(self._it)
         batch = dict(batch)
-        batch["observation"] = normalize_obs(batch["observation"], self.obs_keys)
+        batch["observation"] = flatten_obs(batch["observation"], self.obs_keys)
         return batch
 
     def _collect_batches(self, first_batch, frames: int) -> list[Mapping[str, Any]]:
@@ -193,7 +193,9 @@ class XFlowEvalLoop:
             seen += int(np.asarray(batch["act"]["id"]).shape[0])
         return out
 
-    def _predict_metrics(self, model, params, batch, *, need_hist: bool, need_viz: bool, rast_batches=None) -> dict[str, Any]:
+    def _predict_metrics(
+        self, model, params, batch, *, need_hist: bool, need_viz: bool, rast_batches=None
+    ) -> dict[str, Any]:
         obs = batch["observation"]
         task = batch.get("task", {"pad_mask_dict": {}})
         _, dof_ids, chunk_steps = extract_bundled_actions(batch, max_h=0)
@@ -206,7 +208,7 @@ class XFlowEvalLoop:
             obs["timestep_pad_mask"],
             train=False,
         )
-        pred = bound.heads["xflow"].predict_action(
+        pred = bound.heads["action"].predict_action(
             transformer_outputs,
             rng=self.pred_rng,
             dof_ids=dof_ids,
@@ -227,7 +229,7 @@ class XFlowEvalLoop:
         if not need_viz:
             return out
 
-        pred_flow = bound.heads["xflow"].predict_action(
+        pred_flow = bound.heads["action"].predict_action(
             transformer_outputs,
             rng=self.pred_rng,
             dof_ids=dof_ids,
@@ -304,7 +306,7 @@ class XFlowEvalLoop:
             obs["timestep_pad_mask"],
             train=False,
         )
-        pred_flow = bound.heads["xflow"].predict_action(
+        pred_flow = bound.heads["action"].predict_action(
             transformer_outputs,
             rng=self.pred_rng,
             dof_ids=dof_ids,

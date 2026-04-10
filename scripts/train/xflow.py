@@ -14,8 +14,6 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
-import re
-from typing import Literal
 
 import jax
 from jax.experimental import multihost_utils
@@ -31,14 +29,11 @@ import crossformer.cn as cn
 from crossformer.cn.base import default
 from crossformer.cn.dataset import DataSourceE
 from crossformer.cn.dataset.dataset import Loader
+from crossformer.cn.model_factory import Vision
 from crossformer.data.grain.embody import decode_embody_name
-from crossformer.model.components.heads.xflow import XFlowHead
-from crossformer.model.components.tokenizers import ImageTokenizer, LowdimObsTokenizer
-from crossformer.model.components.transformer import common_transformer_sizes
-from crossformer.model.components.vit_encoders import vit_encoder_configs
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.run.train_step import lookup_guide, make_train_step
-from crossformer.run.xflow_eval import extract_bundled_actions, normalize_obs, XFlowEvalCallbacks, XFlowEvalLoop
+from crossformer.run.xflow_eval import extract_bundled_actions, flatten_obs, XFlowEvalCallbacks, XFlowEvalLoop
 from crossformer.utils.callbacks.rast import RastConfig
 from crossformer.utils.callbacks.save import SaveCallback
 from crossformer.utils.callbacks.val_mse import ValMSEConfig
@@ -48,7 +43,7 @@ from crossformer.utils.callbacks.viz import (
     VizConfig,
 )
 from crossformer.utils.jax_utils import initialize_compilation_cache
-from crossformer.utils.spec import ModuleSpec, spec
+from crossformer.utils.spec import spec
 from crossformer.utils.train_utils import create_optimizer, Timer, TrainState
 import wandb
 
@@ -64,23 +59,18 @@ class Config:
     lr: float = 1e-3  # learning rate
     log_every: int = 100  # log interval
     batch_size: int = 256  # global batch size
-    mix: str = "xgym_sweep"  # dataset mix name
+    mix: str = "xgym_sweep_single"  # dataset mix name
     horizon: int = 20  # action horizon from data pipeline
-    transformer_size: str = "dummy"  # transformer size preset
-    obs_keys: tuple[str, ...] = ("proprio_.*",)  # lowdim obs keys to tokenize
-    lowdim_token_dropout_rate: float = 0.2  # elementwise dropout inside lowdim tokenizer
-    # lowdim_drop_prob: float = 0.2  # prob of zeroing all lowdim obs for a step
-
-    # Vision backbone
-    use_vision: bool = True  # enable image tokenizer
-    vision_encoder: Literal[*vit_encoder_configs] = "resnetv2-50-film"
-    image_keys: tuple[str, ...] = ("image_primary", "image_side", "image_left_wrist")  # image obs keys to tokenize
-
-    # XFlowHead sizing
-    head_channels: int = 256  # num_query_channels
-    head_depth: int = 2  # num_self_attend_layers
-    head_heads: int = 8  # num_heads
-    flow_steps: int = 50  # high flow steps for now
+    verbose: bool = False  # print model tabulation during init
+    model: cn.ModelFactory = default(
+        cn.ModelFactory(
+            size=cn.Size.DUMMY,
+            window=20,
+            image_keys=(),
+            proprio_keys=(),
+            vision=Vision(use_film=False, encoder="resnetv2-50-film"),
+        )
+    )
 
     # Optimizer
     weight_decay: float = 1e-4  # adamw weight decay
@@ -104,6 +94,7 @@ class Config:
     mp: int = 8  # grain multiproc (for data loading)
     eval_frames: int = 64  # eval examples to poll for rast videos
     hist_every: int = 0  # histogram log interval
+    quit_after_model: bool = False  # stop after model creation for debugging
     viz: VizConfig = default(VizConfig())
     val_mse: ValMSEConfig = default(ValMSEConfig())
     rast: RastConfig = default(RastConfig())
@@ -114,72 +105,11 @@ class Config:
 # -- helpers ------------------------------------------------------------------
 
 
-def make_model_config(cfg, max_h, max_a, max_w, guide_dim=None):
-    """Build CrossFormerModel config with XFlowHead."""
-    token_dim, transformer_kwargs = common_transformer_sizes(cfg.transformer_size)
-    readout_name = "xflow"
-    readout_key = f"readout_{readout_name}"
-
-    obs_tokenizers = {
-        "lowdim": ModuleSpec.create(
-            LowdimObsTokenizer,
-            obs_keys=list(cfg.obs_keys),
-            dropout_rate=cfg.lowdim_token_dropout_rate,
-        ),
-    }
-    if cfg.use_vision:
-        encoder_cls = vit_encoder_configs.get(cfg.vision_encoder)
-        if encoder_cls is None:
-            raise ValueError(f"Unknown vision_encoder={cfg.vision_encoder!r}, choose from {list(vit_encoder_configs)}")
-        image_tokenizer_kwargs = {
-            "obs_stack_keys": list(cfg.image_keys),
-            "encoder": ModuleSpec.create(encoder_cls),
-        }
-        if cfg.vision_encoder.endswith("-film"):
-            image_tokenizer_kwargs["task_film_keys"] = ["language_instruction"]
-        obs_tokenizers["image"] = ModuleSpec.create(
-            ImageTokenizer,
-            **image_tokenizer_kwargs,
-        )
-
-    return {
-        "model": {
-            "observation_tokenizers": obs_tokenizers,
-            "task_tokenizers": {},
-            "heads": {
-                "xflow": ModuleSpec.create(
-                    XFlowHead,
-                    readout_key=readout_key,
-                    max_dofs=max_a,
-                    max_horizon=max_h,
-                    num_query_channels=cfg.head_channels,
-                    num_heads=cfg.head_heads,
-                    num_self_attend_layers=cfg.head_depth,
-                    flow_steps=cfg.flow_steps,
-                    use_guidance=cfg.use_guidance,
-                    guidance_embed_dim=token_dim,
-                    guidance_input_dim=guide_dim,
-                    compress_guidance=cfg.compress_guidance,
-                    num_guidance_latents=cfg.num_guidance_latents,
-                ),
-            },
-            "readouts": {readout_name: 4},
-            "token_embedding_size": token_dim,
-            "transformer_kwargs": transformer_kwargs,
-            "max_horizon": max_w,
-        },
-        "text_processor": None,
-    }
-
-
-def resolve_obs_keys(obs, patterns):
-    """Resolve regex patterns against real observation keys."""
-    keys = []
-    for pat in patterns:
-        keys.extend(k for k in sorted(obs) if k not in keys and re.fullmatch(pat, k))
-    if not keys:
-        raise ValueError(f"No observation keys matched {patterns}. available={tuple(sorted(obs))}")
-    return tuple(keys)
+def infer_model_keys(obs):
+    """Infer image and proprio tokenizer keys from a real observation batch."""
+    image_keys = tuple(k.removeprefix("image_") for k in sorted(obs) if k.startswith("image_"))
+    proprio_keys = tuple(k.removeprefix("proprio_") for k in sorted(obs) if k.startswith("proprio_"))
+    return image_keys, proprio_keys
 
 
 def per_embodiment_metrics(batch, update_info):
@@ -266,8 +196,10 @@ def main(cfg: Config):
         imaug=False,
     ).make(eval_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=False)
     print(spec(example_batch))
-    obs_keys = resolve_obs_keys(example_batch["observation"], cfg.obs_keys)
-    print(f"  obs_keys: {obs_keys}")
+    inferred_image_keys, inferred_proprio_keys = infer_model_keys(example_batch["observation"])
+    obs_keys: tuple[str, ...] = ()
+    print(f"  image_keys: {inferred_image_keys}")
+    print(f"  proprio_keys (available): {inferred_proprio_keys}")
 
     guide_example = None
     if cfg.use_guidance:
@@ -282,19 +214,22 @@ def main(cfg: Config):
     # Build model
     print(Rule("building CrossFormerModel"))
     max_w = example_batch["observation"]["timestep_pad_mask"].shape[1]
-    example_obs = normalize_obs(example_batch["observation"], obs_keys)
-    config = make_model_config(cfg, max_h, max_a, max_w, None if guide_example is None else guide_example.shape[-1])
-    config["model"]["observation_tokenizers"]["lowdim"] = ModuleSpec.create(
-        LowdimObsTokenizer,
-        obs_keys=[f"^{re.escape(k)}$" for k in obs_keys],
-        dropout_rate=cfg.lowdim_token_dropout_rate,
-    )
+    cfg.model.window = max_w
+    cfg.model.image_keys = inferred_image_keys
+    cfg.model.proprio_keys = ()
+    cfg.model.xflow.max_dofs = max_a
+    cfg.model.xflow.max_horizon = max_h
+    cfg.model.xflow.use_guidance = cfg.use_guidance
+    cfg.model.xflow.guidance_input_dim = None if guide_example is None else guide_example.shape[-1]
+    example_obs = flatten_obs(example_batch["observation"], obs_keys)
+
     init_obs = dict(example_obs)
-    if cfg.use_vision:
-        init_obs |= {
-            k: v for k, v in example_batch["observation"].items() if any(re.fullmatch(pat, k) for pat in cfg.image_keys)
-        }
-        print(f"  image keys in init_obs: {[k for k in init_obs if 'image' in k or 'depth' in k]}")
+    init_obs |= {
+        k: v
+        for k, v in example_batch["observation"].items()
+        if any(k == f"image_{name}" for name in cfg.model.image_keys)
+    }
+    print(f"  image keys in init_obs: {[k for k in init_obs if 'image' in k or 'depth' in k]}")
     init_batch = {
         "observation": init_obs,
         "task": example_batch.get("task", {"pad_mask_dict": {}}),
@@ -304,7 +239,7 @@ def main(cfg: Config):
             "example_batch_spec": spec(example_batch),
             "obs_keys": obs_keys,
             "max_a": max_a,
-            "model_config": config,
+            **cfg.model.create(),
         },
         allow_val_change=True,
     )
@@ -313,13 +248,16 @@ def main(cfg: Config):
     init_rng, train_rng, pred_rng = jax.random.split(rng, 3)
 
     model = CrossFormerModel.from_config(
-        config,
+        cfg.model.create(),
         init_batch,
         text_processor=None,
-        verbose=False,
+        verbose=cfg.verbose,
         rng=init_rng,
         dataset_statistics=dataset.dataset_statistics,
     )
+    if cfg.quit_after_model:
+        print("quit_after_model=True; stopping after model creation")
+        return
     model = model.replace(
         params=jax.tree.map(lambda x: jax.device_put(x, replicated_sharding), model.params),
         example_batch=jax.tree.map(lambda x: jax.device_put(x, replicated_sharding), model.example_batch),
@@ -410,7 +348,7 @@ def main(cfg: Config):
         timer.tick("total")
         with timer("dataset"):
             batch = next(dsit)
-            obs = normalize_obs(batch["observation"], obs_keys)
+            obs = flatten_obs(batch["observation"], obs_keys)
             task = batch.get("task", {"pad_mask_dict": {}})
             pad_mask = obs["timestep_pad_mask"]
             lowdim_active = True
