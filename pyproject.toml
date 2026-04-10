@@ -81,6 +81,7 @@ dependencies = [
     # "nvdiffrast",
     "nvdiffrast>=0.4.0",
     "zarr>=3.1.6",
+    "grain>=0.2.16",
 ]
 
 [dependency-groups]
