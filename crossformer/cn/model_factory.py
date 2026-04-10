@@ -2,17 +2,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Sequence
+from typing import Any
 
 import flax
 from rich import print
 
 from crossformer.cn.base import CN, default
-from crossformer.cn.heads import HeadFactory, _SINGLE
-from crossformer.model.components.tokenizers import ImageTokenizer, LowdimObsTokenizer
-from crossformer.model.components.transformer import common_transformer_sizes
-from crossformer.model.components.vit_encoders import ResNet26FILM
+from crossformer.cn.heads import _SINGLE, HeadFactory
+from crossformer.model.components.vit_encoders import vit_encoder_configs
+from crossformer.model.config import ImageTokenizerCfg, LowdimTokenizerCfg, ModelCfg, TransformerCfg
 from crossformer.utils.spec import ModuleSpec
+
+_DEFAULT_IMAGE_KEYS = ("primary", "side", "left_wrist")
+_DEFAULT_PROPRIO_KEYS = (_SINGLE,)
+_HEAD_TEMPLATES = {
+    _SINGLE: HeadFactory(name=_SINGLE),
+    "action": HeadFactory(name=_SINGLE),
+    "bimanual": HeadFactory(name="bimanual"),
+    "mano": HeadFactory(name="mano"),
+    "k3ds": HeadFactory(name="k3ds"),
+}
 
 
 class Size(Enum):
@@ -31,65 +40,70 @@ class Size(Enum):
 
 
 @dataclass
-class ModelFactory(CN):
-    im: Sequence[str] = default(["primary", "side", "left_wrist"])
-    proprio: Sequence[str] = default([_SINGLE])
-    heads: Sequence[str] = default([_SINGLE, "k3ds"])
-    single: HeadFactory = HeadFactory(name=_SINGLE).field()
-    bimanual: HeadFactory = HeadFactory(name="bimanual").field()
-    mano: HeadFactory = HeadFactory(name="mano").field()
-    k3ds: HeadFactory = HeadFactory(name="k3ds").field()
+class Vision(CN):
+    use_film: bool = True
+    encoder: str = "resnetv2-26-film"
 
+
+@dataclass
+class ModelFactory(CN):
     size: Size = Size.DETR
+    window: int = 20
+    image_keys: tuple[str, ...] = _DEFAULT_IMAGE_KEYS
+    proprio_keys: tuple[str, ...] = _DEFAULT_PROPRIO_KEYS
+    vision: Vision = Vision().field()
+    readouts: dict[str, int] = default({_SINGLE: 20, "k3ds": 20})
     debug: bool = False
 
-    def get_all_heads(self) -> dict[str, HeadFactory]:
-        def _make(x):
-            try:
-                return HeadFactory(**x)
-            except Exception:
-                return False
+    @property
+    def heads(self) -> list[str]:
+        return list(self.readouts.keys())
 
-        heads = {k: _make(v) for k, v in self.asdict().items() if _make(v)}
-        return heads
+    def _obs_tokenizers(self):
+        toks = []
+        if self.image_keys:
+            encoder = self.make_obs_im_encoder()
+            toks.extend(self.make_obs_im(key, encoder=encoder) for key in self.image_keys)
+        toks.extend(self.make_obs_proprio(key) for key in self.proprio_keys)
+        return toks
 
-    def get_selected_heads(self) -> dict[str, HeadFactory]:
-        all_heads = self.get_all_heads()
-        heads = {k: v for k, v in all_heads.items() if k in self.heads and v.name in self.heads}
-        return heads
+    def _head_specs(self) -> dict[str, ModuleSpec]:
+        specs = {}
+        for name, readout_tokens in self.readouts.items():
+            assert name in _HEAD_TEMPLATES, f"Unknown head/readout: {name}"
+            head = HeadFactory(**_HEAD_TEMPLATES[name].asdict())
+            head.horizon = self.window
+            specs[name] = head.create()
+            assert readout_tokens > 0, f"readouts[{name!r}] must be positive"
+        return specs
+
+    def to_model_cfg(self) -> ModelCfg:
+        return ModelCfg(
+            observation_tokenizers=self._obs_tokenizers(),
+            readouts=dict(self.readouts),
+            heads=self._head_specs(),
+            transformer=TransformerCfg.from_size(self.size.value, max_horizon=self.window),
+        )
 
     def create(self) -> dict[str, Any]:
-        token_embedding_size, transformer_kwargs = common_transformer_sizes(self.size.value)
+        return {"model": self.to_model_cfg().create()}
 
-        encoder = self.make_obs_im_encoder()
-        im = {k: self.make_obs_im(k, encoder=encoder) for k in self.im}
-        prop = {k: self.make_obs_proprio(k) for k in self.proprio}
-        tok = im | prop
-
-        heads = self.get_selected_heads()
-        assert len(heads) > 0, "No heads selected"
-        model = {
-            "observation_tokenizers": tok,
-            "heads": {k: v.create() for k, v in heads.items()},
-            "readouts": {k: v.horizon for k, v in heads.items()},
-            "token_embedding_size": token_embedding_size,
-            "transformer_kwargs": transformer_kwargs,
-        }
-        return {"model": model}
+    def build(self):
+        return self.to_model_cfg().build()
 
     def spec(self) -> dict[str, Any]:
         model = self.create()["model"]
-        model = {
-            "observation_tokenizers": {k: v["module"] for k, v in model["observation_tokenizers"].items()},
-            "heads": {k: v["module"] for k, v in model["heads"].items()},
-            "readouts": dict(model["readouts"].items()),
+        return {
+            "model": {
+                "observation_tokenizers": {k: v["module"] for k, v in model["observation_tokenizers"].items()},
+                "heads": {k: v["module"] for k, v in model["heads"].items()},
+                "readouts": dict(model["readouts"].items()),
+            }
         }
-        return {"model": model}
 
     def flatten(self) -> list[str]:
         flattened = flax.traverse_util.flatten_dict(self.spec(), keep_empty_nodes=True)
-        flattened = list(flattened.keys())
-        return flattened
+        return list(flattened.keys())
 
     def delete(self, flat, verbose=False) -> dict[str, Any]:
         _print = print if verbose else lambda *args, **kwargs: None
@@ -108,37 +122,27 @@ class ModelFactory(CN):
             if any(inside(d, c) for d in deletespec):
                 _print(f"del: {'.'.join(c)}")
                 del flat[c]
-
         return flat
 
-    def make_obs_proprio(self, key: str):
-        return ModuleSpec.create(LowdimObsTokenizer, obs_keys=[f"proprio_{key}"], dropout_rate=0.2)
+    def make_obs_proprio(self, key: str) -> LowdimTokenizerCfg:
+        return LowdimTokenizerCfg(name=key, obs_keys=(f"proprio_{key}",), dropout_rate=0.2)
 
-    def make_obs_im(self, keys: str | Sequence[str], encoder=None):
-        if isinstance(keys, str):
-            keys = [keys]
-        if encoder is None:
-            encoder = self.make_obs_im_encoder()
-
-        return ModuleSpec.create(
-            ImageTokenizer,
-            obs_stack_keys=[f"image_{k}" for k in keys],
-            task_stack_keys=[f"image_{k}" for k in keys],
-            task_film_keys=["language_instruction"],
+    def make_obs_im(self, key: str, *, encoder: ModuleSpec) -> ImageTokenizerCfg:
+        return ImageTokenizerCfg(
+            name=key,
+            obs_stack_keys=(f"image_{key}",),
+            task_stack_keys=(f"image_{key}",),
+            task_film_keys=("language_instruction",) if self.vision.use_film else (),
             encoder=encoder,
         )
 
     def make_obs_im_encoder(self):
-        return ModuleSpec.create(ResNet26FILM)
+        assert self.vision.encoder in vit_encoder_configs, f"Unknown vision encoder: {self.vision.encoder}"
+        return ModuleSpec.create(vit_encoder_configs[self.vision.encoder], use_film=self.vision.use_film)
 
     def max_horizon(self) -> int:
-        h = 0
-        for head in self.get_selected_heads().values():
-            h = max(h, head.horizon)
-        return h
+        return self.window
 
     def max_action_dim(self) -> int:
-        d = 0
-        for head in self.get_selected_heads().values():
-            d = max(d, head.dim.value)
-        return d
+        dims = [_HEAD_TEMPLATES[name].dim.value for name in self.readouts]
+        return max(dims)

@@ -57,6 +57,8 @@ class Config(cn.Train):
     host: str = "0.0.0.0"
     port: int | None = None
 
+    flow_steps: int = 50
+
 
 def resolve_obs_keys(obs, patterns):
     keys = []
@@ -163,12 +165,18 @@ def main(cfg: Config) -> None:
 
     # --- grain_raw + GrainlikeWrapper ---
     print(Rule("grain_raw + GrainlikeWrapper"))
-    _, dconfig, _ = make_source_by_mix(arec, cfg)
+    _, dconfig = make_source_by_mix(arec, cfg)
     proprio_keys = list(dconfig.keys.proprio.keys())
     max_a = max(Arec.from_name(m[0]).embodiment.action_dim for m in mix_items)
 
     print(Rule("building wrapper + policy"))
-    policy = ModelPolicy(str(cfg.path), step=cfg.step, guide_keys=cfg.guide_keys, use_guidance=cfg.use_guidance)
+    policy = ModelPolicy(
+        str(cfg.path),
+        step=cfg.step,
+        guide_keys=cfg.guide_keys,
+        use_guidance=cfg.use_guidance,
+        flow_steps=cfg.flow_steps,
+    )
     policy = ActionDenormWrapper(policy, loader_full.dataset_statistics, dataset_name=arec.name)
     policy = GrainlikeWrapper(
         policy,

@@ -15,10 +15,10 @@ from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 import re
+from typing import Literal
 
 import jax
 from jax.experimental import multihost_utils
-import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 import numpy as np
 from rich import print
@@ -35,7 +35,7 @@ from crossformer.data.grain.embody import decode_embody_name
 from crossformer.model.components.heads.xflow import XFlowHead
 from crossformer.model.components.tokenizers import ImageTokenizer, LowdimObsTokenizer
 from crossformer.model.components.transformer import common_transformer_sizes
-from crossformer.model.components.vit_encoders import ResNet26FILM, SmallStem
+from crossformer.model.components.vit_encoders import vit_encoder_configs
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.run.train_step import lookup_guide, make_train_step
 from crossformer.run.xflow_eval import extract_bundled_actions, normalize_obs, XFlowEvalCallbacks, XFlowEvalLoop
@@ -72,11 +72,11 @@ class Config:
     transformer_size: str = "dummy"  # transformer size preset
     obs_keys: tuple[str, ...] = ("proprio_.*",)  # lowdim obs keys to tokenize
     lowdim_token_dropout_rate: float = 0.2  # elementwise dropout inside lowdim tokenizer
-    lowdim_drop_prob: float = 0.2  # prob of zeroing all lowdim obs for a step
+    # lowdim_drop_prob: float = 0.2  # prob of zeroing all lowdim obs for a step
 
     # Vision backbone
     use_vision: bool = True  # enable image tokenizer
-    vision_encoder: str = "small_stem"  # small_stem | resnet26
+    vision_encoder: Literal[*vit_encoder_configs] = "resnetv2-50-film"
     image_keys: tuple[str, ...] = ("image_primary", "image_side", "image_left_wrist")  # image obs keys to tokenize
 
     # XFlowHead sizing
@@ -93,7 +93,7 @@ class Config:
     frozen_keys: tuple[str, ...] = ()  # fnmatch patterns for frozen params
 
     # Token guidance
-    use_guidance: bool = True  # enable guidance tokens
+    use_guidance: bool = False  # enable guidance tokens
     guidance_drop_prob: float = 0.5  # prob of dropping guidance each step
     compress_guidance: bool = False  # compress via perceiver latents
     num_guidance_latents: int = 4  # latent count when compress=True
@@ -106,7 +106,7 @@ class Config:
     train_loader: Loader = default(Loader(use_grain=True))
     mp: int = 8  # grain multiproc (for data loading)
     eval_frames: int = 64  # eval examples to poll for rast videos
-    hist_every: int = 500  # histogram log interval
+    hist_every: int = 0  # histogram log interval
     viz: VizConfig = default(VizConfig())
     val_mse: ValMSEConfig = default(ValMSEConfig())
     rast: RastConfig = default(RastConfig())
@@ -115,12 +115,6 @@ class Config:
 
 
 # -- helpers ------------------------------------------------------------------
-
-
-VISION_ENCODERS = {
-    "small_stem": SmallStem,
-    "resnet26": ResNet26FILM,
-}
 
 
 def make_model_config(cfg, max_h, max_a, max_w, guide_dim=None):
@@ -137,13 +131,18 @@ def make_model_config(cfg, max_h, max_a, max_w, guide_dim=None):
         ),
     }
     if cfg.use_vision:
-        encoder_cls = VISION_ENCODERS.get(cfg.vision_encoder)
+        encoder_cls = vit_encoder_configs.get(cfg.vision_encoder)
         if encoder_cls is None:
-            raise ValueError(f"Unknown vision_encoder={cfg.vision_encoder!r}, choose from {list(VISION_ENCODERS)}")
+            raise ValueError(f"Unknown vision_encoder={cfg.vision_encoder!r}, choose from {list(vit_encoder_configs)}")
+        image_tokenizer_kwargs = {
+            "obs_stack_keys": list(cfg.image_keys),
+            "encoder": ModuleSpec.create(encoder_cls),
+        }
+        if cfg.vision_encoder.endswith("-film"):
+            image_tokenizer_kwargs["task_film_keys"] = ["language_instruction"]
         obs_tokenizers["image"] = ModuleSpec.create(
             ImageTokenizer,
-            obs_stack_keys=list(cfg.image_keys),
-            encoder=ModuleSpec.create(encoder_cls),
+            **image_tokenizer_kwargs,
         )
 
     return {
@@ -184,14 +183,6 @@ def resolve_obs_keys(obs, patterns):
     if not keys:
         raise ValueError(f"No observation keys matched {patterns}. available={tuple(sorted(obs))}")
     return tuple(keys)
-
-
-def zero_lowdim_obs(obs, obs_keys):
-    """Zero resolved lowdim observation keys for whole-modality dropout."""
-    out = dict(obs)
-    for key in obs_keys:
-        out[key] = jnp.zeros_like(out[key])
-    return out
 
 
 def per_embodiment_metrics(batch, update_info):
@@ -442,9 +433,10 @@ def main(cfg: Config):
             task = batch.get("task", {"pad_mask_dict": {}})
             pad_mask = obs["timestep_pad_mask"]
             lowdim_active = True
-            if cfg.lowdim_drop_prob > 0.0 and lowdim_rng.random() < cfg.lowdim_drop_prob:
-                obs = zero_lowdim_obs(obs, obs_keys)
-                lowdim_active = False
+            # if cfg.lowdim_drop_prob > 0.0 and lowdim_rng.random() < cfg.lowdim_drop_prob:
+            # raise NotImplementedError("lowdim_drop_prob > 0 is not implemented yet")
+            # obs = zero_lowdim_obs(obs, obs_keys)
+            # lowdim_active = False
 
             guide_input = None
             if cfg.use_guidance:
