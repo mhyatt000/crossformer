@@ -199,7 +199,7 @@ def make_source_by_mix(
 
 def make_single_dataset(
     config: builders.GrainDatasetConfig,
-    *,
+    train,
     tfconfig: TransformConfig | None = TransformConfig(),
     shuffle_buffer_size: int | None = None,
     drop_remainder: bool = True,
@@ -360,12 +360,14 @@ class GrainDataFactory:
         # if single then make single source and single dataset
         if len(sources) == 1:
             _, dconfig, tfconfig = sources[0]
-            ds = self.source2ds(dconfig, tfconfig, cfg, dataset=mix[0], max_a=max_a)
+            ds = self.source2ds(dconfig, tfconfig, train, cfg, dataset=mix[0], max_a=max_a)
 
         # if multi then make sources for each
         # then interleave them
         else:
-            dsets = [self.source2ds(dc, tc, cfg, dataset=m, max_a=max_a) for (s, dc, tc), m in zip(sources, mix)]
+            dsets = [
+                self.source2ds(dc, tc, train, cfg, dataset=m, max_a=max_a) for (s, dc, tc, t), m in zip(sources, mix)
+            ]
             ds = self.pad_and_mix(dsets)
 
         ds = ds.seed(cfg.seed)
