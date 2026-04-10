@@ -257,17 +257,17 @@ def _apply_action_mask(action: np.ndarray, normalized: np.ndarray, mask: np.ndar
     return np.where(mask, normalized, action)
 
 
-def normalize_arr(arr, *, stats: ArrayStatistics, mask: np.ndarray | None = None) -> np.ndarray:
+def normalize_arr(arr, *, stats: ArrayStatistics, mask: np.ndarray | None = None, inv=False) -> np.ndarray:
     """normalize arr using stats, applying norm mask if provided."""
-    norm = stats.normalize(arr)
+    norm = stats.normalize(arr) if not inv else stats.unnormalize(arr)
     return norm if mask is None else np.where(mask, norm, arr)
 
 
-def normalize_tree(tree: dict, stats: dict, mask: dict | None = None):
+def normalize_tree(tree: dict, stats: dict, mask: dict | None = None, inv=False):
     """normalize a tree of arrays"""
     if mask is None:
-        return jax.tree_map(lambda x, s: normalize_arr(x, stats=s), tree, stats)
-    return jax.tree.map(lambda x, s, m: normalize_arr(x, stats=s, mask=m), tree, stats, mask)
+        return jax.tree_map(lambda x, s: normalize_arr(x, stats=s, inv=inv), tree, stats)
+    return jax.tree.map(lambda x, s, m: normalize_arr(x, stats=s, mask=m, inv=inv), tree, stats, mask)
 
 
 def normalize_action_and_proprio(
