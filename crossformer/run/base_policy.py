@@ -7,6 +7,8 @@ import jax.numpy as jnp
 import numpy as np
 from webpolicy.base_policy import BasePolicy
 
+from crossformer.data.grain import metadata
+from crossformer.data.grain.embody import build_action_norm_mask
 from crossformer.embody import DOF
 from crossformer.model.components.heads.dof import pad_chunk_steps, pad_dof_ids
 from crossformer.model.crossformer_model import CrossFormerModel
@@ -41,7 +43,7 @@ class ModelPolicy(BasePolicy):
         path: str,
         *,
         step: int | None = None,
-        head_name: str = "xflow",
+        head_name: str = "action",
         guide_keys: tuple[str, ...] = ("action.position", "action.orientation"),
         use_guidance: bool = True,
         flow_steps: int | None = None,
@@ -90,8 +92,12 @@ class ModelPolicy(BasePolicy):
     def step(self, payload: dict, *, accumulate: bool = False) -> dict:
         self.rng, key = jax.random.split(self.rng)
         obs = payload["observation"]
-        task = payload.get("task", {"pad_mask_dict": {}})
         B = jnp.asarray(obs["timestep_pad_mask"]).shape[0]
+        task = payload.get("task", jax.tree.map(lambda x: x[:B], self.model.example_batch["task"]))
+
+        # print(obs['timestep_pad_mask'])
+        # print({k:v for k,v in obs.items() if 'proprio' in k})
+
         dof_ids = jnp.tile(self._dof_ids_1, (B, 1))
         chunk_steps = jnp.tile(self._chunk_steps_1, (B, 1))
         guide_input = lookup_guide(payload, self.guide_keys) if self.use_guidance else None
@@ -106,7 +112,83 @@ class ModelPolicy(BasePolicy):
             key,
             accumulate=accumulate,
         )
-        return {"actions": jax.device_get(pred), "dof_ids": jax.device_get(dof_ids)}
+        out = {"actions": jax.device_get(pred), "dof_ids": jax.device_get(dof_ids)}
+        # print(out['actions'][...,:8])
+        # print(out['dof_ids'][:,:8])
+        return out
+
+
+from crossformer.embody import DOF, MASK_ID
+
+
+def slots_to_action_dict(actions: np.ndarray, dof_ids: np.ndarray) -> dict[str, np.ndarray]:
+    xs = np.asarray(actions, dtype=np.float32)
+    ids = np.asarray(dof_ids)
+    if ids.ndim == 2:
+        if xs.shape[0] != ids.shape[0]:
+            raise ValueError(f"Batch mismatch: actions {xs.shape}, dof_ids {ids.shape}")
+        rows = [slots_to_action_dict(xs[b], ids[b]) for b in range(xs.shape[0])]
+        keys = sorted({k for row in rows for k in row})
+        return {k: np.stack([row[k] for row in rows], axis=0) for k in keys}
+    ids = ids.reshape(-1)
+    n = min(xs.shape[-1], ids.shape[0])
+    xs = xs[..., :n]
+    ids = ids[:n]
+
+    out: dict[str, list[tuple[int, np.ndarray]]] = {
+        "joints": [],
+        "gripper": [],
+        "position": [],
+        "orientation": [],
+    }
+
+    for slot, dof_id in enumerate(ids):
+        dof_id = int(dof_id)
+        if dof_id == MASK_ID:
+            continue
+
+        if DOF["j0"] <= dof_id <= DOF["j6"]:
+            out["joints"].append((dof_id - DOF["j0"], xs[..., slot]))
+        elif dof_id == DOF["gripper"]:
+            out["gripper"].append((0, xs[..., slot]))
+        elif DOF["ee_x"] <= dof_id <= DOF["ee_z"]:
+            out["position"].append((dof_id - DOF["ee_x"], xs[..., slot]))
+        elif DOF["ee_rx"] <= dof_id <= DOF["ee_rz"]:
+            out["orientation"].append((dof_id - DOF["ee_rx"], xs[..., slot]))
+
+    return {k: np.stack([v for _, v in sorted(vals)], axis=-1) for k, vals in out.items() if vals}
+
+
+def action_dict_to_slots(action: dict[str, np.ndarray], dof_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    xs = {k: np.asarray(v, dtype=np.float32) for k, v in action.items()}
+    ids = np.asarray(dof_ids)
+    if ids.ndim == 2:
+        if not xs:
+            return np.zeros(ids.shape, dtype=np.float32), ids
+        if any(v.shape[0] != ids.shape[0] for v in xs.values()):
+            shapes = {k: v.shape for k, v in xs.items()}
+            raise ValueError(f"Batch mismatch: action {shapes}, dof_ids {ids.shape}")
+        rows = [action_dict_to_slots({k: v[b] for k, v in xs.items()}, ids[b])[0] for b in range(ids.shape[0])]
+        return np.stack(rows, axis=0), ids
+    ids = ids.reshape(-1)
+    out_shape = (*next(iter(xs.values())).shape[:-1], ids.shape[0]) if xs else (ids.shape[0],)
+    out = np.zeros(out_shape, dtype=np.float32)
+
+    for slot, dof_id in enumerate(ids):
+        dof_id = int(dof_id)
+        if dof_id == MASK_ID:
+            continue
+
+        if DOF["j0"] <= dof_id <= DOF["j6"] and "joints" in xs:
+            out[..., slot] = xs["joints"][..., dof_id - DOF["j0"]]
+        elif dof_id == DOF["gripper"] and "gripper" in xs:
+            out[..., slot] = xs["gripper"][..., 0]
+        elif DOF["ee_x"] <= dof_id <= DOF["ee_z"] and "position" in xs:
+            out[..., slot] = xs["position"][..., dof_id - DOF["ee_x"]]
+        elif DOF["ee_rx"] <= dof_id <= DOF["ee_rz"] and "orientation" in xs:
+            out[..., slot] = xs["orientation"][..., dof_id - DOF["ee_rx"]]
+
+    return out, ids
 
 
 class ActionDenormWrapper(PolicyWrapper):
@@ -117,16 +199,25 @@ class ActionDenormWrapper(PolicyWrapper):
     per-sample using dof_ids and dataset_name (fixed at construction time).
     """
 
-    def __init__(self, inner, stats, dataset_name: str):
+    def __init__(self, inner, stats, embodiment):  # , dataset_name: str):
         self.inner = inner
         self._denorm = ActionBatchDenormalizer(stats)
-        self.dataset_name = dataset_name
+        # self.dataset_name = dataset_name
+        self.embodiment = embodiment
+        self.stats = stats
+
+        eb = self.unwrapped().model.example_batch
+        fake_action = prop = {k.replace("proprio_", ""): v for k, v in eb["observation"].items() if "proprio" in k}
+        self.norm_mask: dict = build_action_norm_mask(fake_action, self.embodiment)
 
     def step(self, payload: dict, **kwargs) -> dict:
         result = dict(self.inner.step(payload, **kwargs))
-        B = np.asarray(result["dof_ids"]).shape[0]
-        ds_names = [self.dataset_name] * B
-        result["actions"] = self._denorm_actions(result["actions"], result["dof_ids"], ds_names)
+        result["actions"] = slots_to_action_dict(result["actions"], result["dof_ids"])
+        result = self.denorm_new(result)
+
+        # B = np.asarray(result["dof_ids"]).shape[0]
+        # ds_names = [self.dataset_name] * B
+        # result["actions"] = self._denorm_actions(result["actions"], result["dof_ids"], ds_names)
         return result
 
     def _denorm_actions(self, actions, dof_ids, ds_names: list[str]) -> np.ndarray:
@@ -143,6 +234,26 @@ class ActionDenormWrapper(PolicyWrapper):
                 out[b, k] = self._denorm.denormalize_slot(flat[b, k], ids[b], ds_name)
         arr = out.reshape(orig_shape)
         return np.moveaxis(arr, 0, 1) if flow else arr
+
+    def denorm_new(self, x: dict):
+        # 8. normalize action when present; debug server payloads may omit GT actions.
+        # eb = self.unwrapped().model.example_batch
+        # print(spec(eb))
+        # self.norm_mask: dict = build_action_norm_mask(eb["action"], embodiment)
+
+        actk = "actions"  # 'action'
+
+        def denorm_all(x: dict, stats: metadata.DatasetStatistics):
+            # we do this to fix jax.tree.map keyerror of normalize_tree
+            norm_mask = {k: self.norm_mask[k] for k in x[actk]}
+            stats_action = {k: stats.action[k] for k in x[actk]}
+            denorm = partial(metadata.normalize_tree, mask=norm_mask, inv=True)
+            # if has_action and self.norm_action:
+            x[actk] = denorm(x[actk], stats_action)
+            # x["observation"]["proprio"] = denorm(x["observation"]["proprio"], stats.proprio)
+            return x
+
+        return denorm_all(x, self.stats)
 
 
 class CorePolicy(BasePolicy):
