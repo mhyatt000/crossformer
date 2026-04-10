@@ -24,7 +24,10 @@ def _restructure_trajectory(
     step["observation"]["timestep"] = sid
 
     task = {}
-    task[lang_key] = step[lang_key]  # simple
+    # PATCH 0.5.2 to 0.5.3
+    # task[lang_key] = step[lang_key]  # simple
+    if "pose" in step["observation"]["proprio"]:
+        step["observation"]["proprio"].pop("pose")
 
     return {
         "observation": step["observation"],

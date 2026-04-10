@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-import fnmatch
 from functools import partial
 import logging
 import resource
@@ -20,7 +19,7 @@ from rich import print
 
 from crossformer import cn
 from crossformer.cn.dataset.mix import Arec, MultiDataSource
-from crossformer.data.grain import builders, transforms
+from crossformer.data.grain import builders
 from crossformer.data.grain.datasets import (
     MultiArrayRecordSource,
     unpack_record,
@@ -60,6 +59,7 @@ def center_crop(img, h, w):
 def mix_precompatibility(x):
     """ensure mixed datasets have same keys"""
 
+    # """
     # GENERAL SHAPE and TYPE compatibility
     def shape_check(item: Image | Windowed[Image]):
         if item.ndim == 3:
@@ -77,6 +77,7 @@ def mix_precompatibility(x):
     x["observation"]["image"] = jax.tree.map(
         lambda img: np.array(cv2.resize(np.asarray(img), (224, 224))), x["observation"]["image"]
     )
+    # """
 
     def _reshape_int(y):
         """reshape int arrays to (-1,)"""
@@ -85,6 +86,7 @@ def mix_precompatibility(x):
     x["info"]["id"] = jax.tree.map(_reshape_int, x["info"]["id"])
     x["observation"]["timestep"] = _reshape_int(x["observation"]["timestep"])
 
+    """
     # RENAMING SOME IMAGE KEYS
     # worm -> low
     x = flat(x)
@@ -94,6 +96,7 @@ def mix_precompatibility(x):
     overhead = fnmatch.filter(x.keys(), "*overhead*")
     x = rekey(x, inp=overhead, out=[k.replace("overhead", "over") for k in overhead])
     x = unflat(x)
+    """
 
     return x
 
@@ -110,10 +113,24 @@ def mix_compatibility(x, diff: dict):
     return x
 
 
+def make_tfconfig(cfg: cn.Train) -> TransformConfig:
+    traj_kwargs = cfg.data.traj.create(with_head_to_dataset=False)
+    traj_kwargs["window_size"] = cfg.window_size or traj_kwargs.get("window_size", 1)
+    log.warning("TODO move cfg.window_size to cfg.data")
+    traj_kwargs.pop("task_augment_strategy")
+    traj_kwargs.pop("task_augment_kwargs")
+    return TransformConfig(
+        traj_transform_kwargs=traj_kwargs,
+        frame_transforms={},
+        resize_frames_to=64,
+        resize_frame_keys=None,
+    )
+
+
 def make_source_by_mix(
     mix: Arec | MultiDataSource,
     cfg: cn.Train,
-) -> tuple[grain.Dataset, builders.GrainDatasetConfig, transforms.TransformConfig]:
+) -> tuple[grain.Dataset, builders.GrainDatasetConfig]:
     # TODO reduce config scope by only passing cfg.data ?
 
     grain.config.update("py_debug_mode", log.isEnabledFor(logging.DEBUG))
@@ -182,36 +199,18 @@ def make_source_by_mix(
         skip_norm_keys=cfg.data.transform.skip_norm_keys,
         force_recompute_dataset_statistics=cfg.data.recompute,
     )
-
-    traj_kwargs = cfg.data.traj.create(with_head_to_dataset=False)
-    traj_kwargs["window_size"] = cfg.window_size or traj_kwargs.get("window_size", 1)
-    log.warning("TODO move cfg.window_size to cfg.data")
-    traj_kwargs.pop("task_augment_strategy")
-    traj_kwargs.pop("task_augment_kwargs")
-    tfconfig = TransformConfig(
-        traj_transform_kwargs=traj_kwargs,
-        frame_transforms={},
-        resize_frames_to=64,
-        resize_frame_keys=None,
-    )
-    return ds, dataset_config, tfconfig
+    return ds, dataset_config
 
 
 def make_single_dataset(
     config: builders.GrainDatasetConfig,
     *,
     train: bool,
-    tfconfig: TransformConfig | None = TransformConfig(),
     shuffle_buffer_size: int | None = None,
     drop_remainder: bool = True,
     seed: int = 0,
 ) -> GrainDataLoader:
-    """Builds a dataset of frames for a single dataset configuration.
-
-    When ``resize_frames_to`` is provided the image observations within each
-    frame are resized via :func:`transforms.resize_frame_images` before applying
-    any additional ``frame_transforms``.
-    """
+    """Builds a dataset of frames for a single dataset configuration."""
 
     log.warning("TODO see update notes")
     # pack steps by episode_id
@@ -276,11 +275,10 @@ class GrainDataFactory:
     shuffle_slot: bool = True  # shuffle body-part slot order in embody_transform; disable for eval/debug
     imaug: bool = True  # apply augmax image augmentations (channel shuffle, random aspect, rotate)
 
-    def source2ds(self, dconfig, tfconfig, cfg: cn.Train, dataset: Arec, max_a: int = 0) -> GrainDataLoader:
+    def source2ds(self, dconfig, cfg: cn.Train, dataset: Arec, max_a: int = 0) -> GrainDataLoader:
         ds, stats = make_single_dataset(
             dconfig,
             train=True,
-            tfconfig=tfconfig,
             shuffle_buffer_size=1,
             seed=cfg.seed,
         )
@@ -349,6 +347,7 @@ class GrainDataFactory:
         mix = [Arec.from_name(m[0]) for m in mix]  # m[1] is weights
         log.debug("arec sources: %s", mix)
 
+        tfconfig = make_tfconfig(cfg)
         sources = [make_source_by_mix(m, cfg) for m in mix]
 
         # compute max action dim across all embodiments in the mix
@@ -358,13 +357,13 @@ class GrainDataFactory:
 
         # if single then make single source and single dataset
         if len(sources) == 1:
-            _, dconfig, tfconfig = sources[0]
-            ds = self.source2ds(dconfig, tfconfig, cfg, dataset=mix[0], max_a=max_a)
+            _, dconfig = sources[0]
+            ds = self.source2ds(dconfig, cfg, dataset=mix[0], max_a=max_a)
 
         # if multi then make sources for each
         # then interleave them
         else:
-            dsets = [self.source2ds(dc, tc, cfg, dataset=m, max_a=max_a) for (s, dc, tc), m in zip(sources, mix)]
+            dsets = [self.source2ds(dc, cfg, dataset=m, max_a=max_a) for (_, dc), m in zip(sources, mix)]
             ds = self.pad_and_mix(dsets)
 
         ds = ds.seed(cfg.seed)
@@ -399,7 +398,7 @@ class GrainDataFactory:
             ds = ds.map(shard_fn)
 
         # quick hack with keys
-        dconfig, tfconfig = sources[0][1], sources[0][2]
+        dconfig = sources[0][1]
         dconfig.keys.image = list(batch["observation"]["image"].keys())
         ds = do_frame_transforms(dconfig, tfconfig, ds, imaug=self.imaug)
         ds = ds.map(compatibility)
