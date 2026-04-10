@@ -59,7 +59,7 @@ def add_pad_mask_dict(step: Step) -> Step:
 
     # is_mask = lambda x: ~ utils.is_padding(x)
     def is_mask(*args):
-        return np.zeros((), dtype=bool)  # no native strings
+        return np.ones((), dtype=bool)
 
     pad_masks = jax.tree.map(is_mask, step)
     pad_masks = jax.tree.map(maybe_full, pad_masks)
