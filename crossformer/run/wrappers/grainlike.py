@@ -8,6 +8,7 @@ functions wherever possible to maintain parity.
 from __future__ import annotations
 
 import fnmatch
+from functools import partial
 
 import augmax
 import jax
@@ -61,6 +62,7 @@ class GrainlikeWrapper(PolicyWrapper):
         mask_prob: float = 0.0,
         shuffle_slot: bool = False,
         shard_fn=None,
+        norm_action=False,
     ):
         super().__init__(inner)
         self.dataset_name = dataset_name
@@ -73,6 +75,11 @@ class GrainlikeWrapper(PolicyWrapper):
         self.mask_prob = mask_prob
         self.shuffle_slot = shuffle_slot
         self.shard_fn = shard_fn if shard_fn is not None else (lambda x: x)
+        self.norm_action = norm_action
+
+        eb = self.unwrapped().model.example_batch
+        fake_action = prop = {k.replace("proprio_", ""): v for k, v in eb["observation"].items() if "proprio" in k}
+        self.norm_mask: dict = build_action_norm_mask(fake_action, embodiment)
 
     def preprocess_batch(self, payload: dict) -> dict:
         """Unbatch, preprocess each sample, rebatch (no inference)."""
@@ -127,25 +134,24 @@ class GrainlikeWrapper(PolicyWrapper):
 
         # 7. build action_norm_mask
         if has_action:
-            x["action_norm_mask"] = build_action_norm_mask(x["action"], self.embodiment)
+            x["action_norm_mask"] = self.norm_mask
 
         # 8. normalize action when present; debug server payloads may omit GT actions.
-        if has_action:
-            x = metadata.normalize_action_and_proprio(
-                x,
-                metadata=self.stats,
-                normalization_type=metadata.NormalizationType.NORMAL,
-                proprio_keys=self.proprio_keys,
-                skip_norm_keys=self.skip_norm_keys,
-            )
-        else:
-            x = metadata.normalize_proprio(
-                x,
-                metadata=self.stats,
-                normalization_type=metadata.NormalizationType.NORMAL,
-                proprio_keys=self.proprio_keys,
-                skip_norm_keys=self.skip_norm_keys,
-            )
+        stats = self.stats
+        # eb = self.unwrapped().model.example_batch
+        # print(spec(eb))
+        # self.norm_mask: dict = build_action_norm_mask(eb["action"], embodiment)
+
+        def norm_all(x: dict, stats: metadata.DatasetStatistics):
+            _norm = partial(metadata.normalize_tree, mask=self.norm_mask) if self.norm_mask else metadata.normalize_tree
+            if has_action and self.norm_action:
+                x["action"] = _norm(x["action"], stats.action)
+            x["observation"]["proprio"] = _norm(x["observation"]["proprio"], stats.proprio)
+            return x
+
+        # TODO bad practice. bug prone
+        f = partial(norm_all, stats=stats)  #  if not self.skip_norm else ds
+        x = f(x)
 
         # 9. add_pad_mask_dict
         x = transforms.add_pad_mask_dict(x)
@@ -188,7 +194,6 @@ class GrainlikeWrapper(PolicyWrapper):
 
         # 19. task from checkpoint example_batch (strip leading batch dim — preprocess is per-sample)
         x["task"] = jax.tree.map(lambda v: np.asarray(v[0]), self.unwrapped().model.example_batch["task"])
-
         return x
 
     def _restructure(self, x: dict) -> dict:
