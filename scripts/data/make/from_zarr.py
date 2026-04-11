@@ -181,10 +181,16 @@ class ZarrLoader:
         keys = sorted(self.root.keys())
         if not keys:
             raise ValueError(f"empty zarr dataset: {self.path}")
-        bad = [k for k in keys if not k.startswith("episode_")]
+        bad = [k for k in keys if not self._is_episode_group(k)]
         if bad:
-            raise ValueError(f"root keys must be episode_*; got {bad}")
+            raise ValueError(f"root keys must contain steps/topics groups; got {bad}")
         return tuple(keys)
+
+    def _is_episode_group(self, key: str) -> bool:
+        node = self.root[key]
+        if not isinstance(node, zarr.Group):
+            return False
+        return "steps" in node and "topics" in node
 
     def _collect_topic_keys(self) -> tuple[str, ...]:
         keys: set[str] = set()
@@ -196,10 +202,9 @@ class ZarrLoader:
         episodes: list[EpisodeInfo] = []
         steps: list[StepInfo] = []
         start_idx = 0
-        for ep_key in self._episode_keys:
+        for episode_idx, ep_key in enumerate(self._episode_keys):
             ep = self.root[ep_key]
             n_steps = int(ep["steps"]["timestamp_ns"].shape[0])
-            episode_idx = int(ep_key.removeprefix("episode_"))
             lengths = self._topic_field_lengths(ep["topics"])
             min_len = min([n_steps, *lengths.values()])
             if self.missing == "error":
@@ -415,6 +420,7 @@ def standardize(step: dict[str, Any], threshold: float = 1e-3) -> dict[str, Any]
     jpos = np.concatenate((out["proprio.joints"], out["proprio.gripper"]), axis=-1)
     jnoop = np.asarray(scan_noop(jnp.asarray(jpos), threshold=threshold))
     mask = np.logical_and(~noops, ~jnoop)
+    print(f"mask {sum(mask)} / {len(mask)}")
     out = jax.tree.map(lambda x: x[mask], out)
     n = len(out["info"]["id"]["step"])
     out["info"]["len"] = np.full((n,), n)
@@ -436,8 +442,11 @@ def main(cfg: Config) -> None:
     print(f"len={len(loader)}")
     print(f"keys={loader.keys}")
     if loader.missing_counts:
+        dropped_missing = sum(ep.length - ep.n_valid for ep in loader._episodes)
+        n_remaining = sum(ep.n_valid for ep in loader._episodes)
         print(f"missing_policy={loader.missing}")
-        print(f"dropped_steps={sum(ep.length for ep in loader._episodes) - len(loader)}")
+        print(f"dropped_steps={dropped_missing}")
+        print(f"remaining_steps={n_remaining}")
         print(f"missing_fields={loader.missing_counts}")
 
     if cfg.mode == "preview":
@@ -447,13 +456,19 @@ def main(cfg: Config) -> None:
         return
 
     ckpt = list(tqdm(ds, total=len(ds)))
+    remaining_after_missing = sum(ep.n_valid for ep in loader._episodes)
     n_step = sum(len(x["info"]["id"]["step"]) for x in tqdm(ckpt, total=len(ckpt)))
+    noop_filtered = remaining_after_missing - n_step
+    print(f"noop_filtered={noop_filtered}")
+    print(f"remaining_after_noop={n_step}")
 
     ds = FlatMapIterDataset(
         grain.MapDataset.source(ckpt),
         transform=flatmap.UnpackFlatMap(key="info.id.step", use_np=True),
     )
-    ds = grain.MapDataset.source(list(ds))
+    flat = list(ds)
+    print(f"flatmap_samples={len(flat)}")
+    ds = grain.MapDataset.source(flat)
 
     bar = tqdm(total=n_step, desc="Building dataset")
 
