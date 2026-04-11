@@ -17,7 +17,7 @@ from rich import print
 from tqdm import tqdm
 import tyro
 
-from crossformer import cn
+from crossformer.cn.dataset import Dataset
 from crossformer.data.grain import pipelines
 from crossformer.data.grain.loader import GrainDataFactory
 from crossformer.utils.spec import spec
@@ -27,13 +27,16 @@ grain.config.update("py_debug_mode", True)
 
 
 @dataclass
-class Config(cn.Train):
+class Config:
     arec_path: Path | None = None
     dataset_name: str | None = None
     recompute: bool = False  # recompute data stats? y/n
     mp: int = 8
+    seed: int = 42
+    window_size: int = 1
     once: bool = True
 
+    data: Dataset = Dataset().field()
     log_level: Literal["debug", "info", "warning", "error"] = "warning"  # logging verbosity
 
 
