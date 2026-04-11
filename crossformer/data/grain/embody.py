@@ -225,6 +225,14 @@ def _encode_name(name: str, length: int = 32) -> np.ndarray:
     return out
 
 
+def note_bodypart(sample: dict, *, embodiment: Embodiment) -> dict:
+    """Annotate sample mask with body-part and embodiment presence."""
+    mask = sample.setdefault("mask", {})
+    mask["bodypart"] = {k: np.array(1, dtype=np.bool_).reshape(-1) for k in sample["action"]}
+    mask["embodiment"] = {embodiment.name: np.array(1, dtype=np.bool_).reshape(-1)}
+    return sample
+
+
 def decode_embody_name(arr: np.ndarray) -> str:
     """Decode a uint8 array (from act.embody) back to a string."""
     return arr.astype(np.uint8).tobytes().rstrip(b"\x00").decode("utf-8")
@@ -240,6 +248,7 @@ def embody_transform(
 ) -> dict:
     """Grain .map() transform: adds act.base, act.id, act.embody, mask.act."""
     rng = np.random.default_rng()
+    sample = note_bodypart(sample, embodiment=embodiment)
     block = build_embodiment_action(
         sample["action"],
         embodiment,

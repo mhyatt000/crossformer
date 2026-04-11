@@ -17,7 +17,7 @@ import numpy as np
 from webpolicy.base_policy import BasePolicy
 
 from crossformer.data.grain import metadata, transforms
-from crossformer.data.grain.embody import build_action_norm_mask, embody_transform
+from crossformer.data.grain.embody import build_action_norm_mask, embody_transform, note_bodypart
 from crossformer.data.grain.loader import mix_precompatibility
 from crossformer.data.grain.pipelines import add_mask, compatibility, drop_str
 from crossformer.data.grain.util.remap import rekey
@@ -128,9 +128,9 @@ class GrainlikeWrapper(PolicyWrapper):
 
         has_action = "action" in x
 
-        # 6. note embodiment (action keys only)
+        # 6. note bodypart + embodiment info
         if has_action:
-            x["embodiment"] = {k: np.array(1, dtype=np.bool_).reshape(-1) for k in x["action"]}
+            x = note_bodypart(x, embodiment=self.embodiment)
 
         # 7. build action_norm_mask
         if has_action:

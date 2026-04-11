@@ -12,10 +12,9 @@ import logging
 from typing import Any
 
 import grain.python as gp
-import numpy as np
 
 from crossformer.data.grain import metadata
-from crossformer.data.grain.embody import build_action_norm_mask
+from crossformer.data.grain.embody import build_action_norm_mask, note_bodypart
 from crossformer.data.grain.restructure import _restructure_step_mano, _restructure_trajectory
 from crossformer.embody import Dataset
 from crossformer.utils.spec import ModuleSpec
@@ -93,13 +92,6 @@ def stable_hash_int(s: str) -> int:
     return int(hashlib.sha256(s.encode()).hexdigest(), 16) / 2**256
 
 
-def note_embodiment(x: dict):
-    # mark the dataset's embodiments for mask later
-    # for k in action: embodiment[k] = 1
-    x["embodiment"] = {k: np.array(1, dtype=np.bool).reshape(-1) for k in x["action"]}
-    return x
-
-
 def _load_dataset_statistics(
     config: GrainDatasetConfig,
     ds: Sequence[dict],
@@ -147,7 +139,7 @@ def build_trajectory_dataset(
     r = _restructure_step_mano if "k3ds" in ds[0]["action"] else _restructure_trajectory
     restructure = ModuleSpec.create(r, name=config.name, lang_key=config.keys.lang)
     ds = ds.map(ModuleSpec.instantiate(restructure))
-    ds = ds.map(note_embodiment)
+    ds = ds.map(partial(note_bodypart, embodiment=embodiment))
 
     stats = _load_dataset_statistics(config, ds)
     norm_mask: dict = build_action_norm_mask(ds[0]["action"], embodiment)
