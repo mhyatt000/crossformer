@@ -19,7 +19,6 @@ import zarr
 
 from crossformer.data.arec.arec import ArrayRecordBuilder, WriterSpec
 from crossformer.data.grain.map import flatmap
-from crossformer.data.utils.trajectory import binarize_gripper_actions as binarize
 from crossformer.data.utils.trajectory import scan_noop
 from crossformer.utils.spec import spec
 from crossformer.utils.tree import flat, unflat
@@ -27,7 +26,7 @@ from crossformer.utils.tree import flat, unflat
 
 @dataclass
 class Config:
-    path: Path = Path.home() / "2026-04-03_2241"
+    path: Path
     mode: Literal["preview", "build"] = "preview"
     unit: Literal["step", "episode"] = "episode"
     max_depth: int = 10
@@ -408,7 +407,8 @@ def standardize(step: dict[str, Any], threshold: float = 1e-3) -> dict[str, Any]
     out["proprio.gripper"] = step["observation.xgym.gripper.position"]
     out["proprio.joints"] = step["observation.xarm.joint_states.position"]
 
-    out["proprio.gripper"] = np.asarray(binarize(jnp.asarray(out["proprio.gripper"]), open=0.95, close=0.4))
+    # remove hysteresis binarization for training label... gpt reccomendation. use only as postprocess for control if needed
+    # out["proprio.gripper"] = np.asarray(binarize(jnp.asarray(out["proprio.gripper"]), open=0.95, close=0.4))
 
     pos = np.concatenate((out["proprio.position"], out["proprio.gripper"]), axis=-1)
     noops = np.asarray(scan_noop(jnp.asarray(pos), threshold=threshold))
