@@ -59,7 +59,7 @@ class Config:
     lr: float = 1e-3  # learning rate
     log_every: int = 100  # log interval
     batch_size: int = 256  # global batch size
-    mix: str = "xgym_sweep_single"  # dataset mix name
+    mix: str = "xgym_sweep"  # dataset mix name
     horizon: int = 20  # action horizon from data pipeline
     verbose: bool = False  # print model tabulation during init
     model: cn.ModelFactory = default(
