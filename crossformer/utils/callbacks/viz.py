@@ -5,7 +5,6 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable, Mapping
 
-from matplotlib.animation import FFMpegWriter
 import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image
@@ -207,10 +206,7 @@ class VizCallback:
         fps = self.fps if fps is None else fps
         if path.suffix.lower() == ".gif":
             return self._save_gif(frames, path, fps)
-        if path.suffix.lower() == ".mp4":
-            self._save_mp4(frames, path, fps)
-            return path
-        raise ValueError(f"Expected '.gif' or '.mp4', got {path}")
+        raise ValueError(f"Expected '.gif', got {path}")
 
     def _select_base(self, arr: Any) -> np.ndarray:
         base = np.asarray(arr, dtype=np.float32)
@@ -276,22 +272,6 @@ class VizCallback:
             optimize=False,
         )
         return path
-
-    def _save_mp4(self, frames: np.ndarray, path: Path, fps: int) -> None:
-        if not FFMpegWriter.isAvailable():
-            raise RuntimeError("FFMpegWriter is unavailable; cannot write mp4")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        h, w = frames.shape[1:3]
-        fig = plt.figure(figsize=(w / self.dpi, h / self.dpi), dpi=self.dpi)
-        ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
-        ax.axis("off")
-        im = ax.imshow(frames[0])
-        writer = FFMpegWriter(fps=fps)
-        with writer.saving(fig, str(path), self.dpi):
-            for frame in frames:
-                im.set_data(frame)
-                writer.grab_frame()
-        plt.close(fig)
 
 
 @dataclass
