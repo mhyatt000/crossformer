@@ -26,23 +26,33 @@ class VizConfig:
     every: int = 5000
     flow_key: tuple[str, ...] = default(("predict",))
     base_key: tuple[str, ...] = default(("act", "base"))
+    robot_xyz_flow_key: tuple[str, ...] = default(("robot_xyz", "predict"))
+    robot_xyz_base_key: tuple[str, ...] = default(("robot_xyz", "base"))
+    human_xyz_flow_key: tuple[str, ...] = default(("human_xyz", "predict"))
+    human_xyz_base_key: tuple[str, ...] = default(("human_xyz", "base"))
     sample_idx: int = 0
     figsize: tuple[float, float] = (12.0, 6.0)
     fps: int = 12
     dpi: int = 120
     joint_dim: int = 7
     fk_link: str = "link_eef"
+    max_pts: int | None = None
 
     def create(self) -> VizCallback:
         return VizCallback(
             flow_key=self.flow_key,
             base_key=self.base_key,
+            robot_xyz_flow_key=self.robot_xyz_flow_key,
+            robot_xyz_base_key=self.robot_xyz_base_key,
+            human_xyz_flow_key=self.human_xyz_flow_key,
+            human_xyz_base_key=self.human_xyz_base_key,
             sample_idx=self.sample_idx,
             figsize=self.figsize,
             fps=self.fps,
             dpi=self.dpi,
             joint_dim=self.joint_dim,
             fk_link=self.fk_link,
+            max_pts=self.max_pts,
         )
 
 
@@ -52,12 +62,17 @@ class VizCallback:
 
     flow_key: tuple[str, ...] = ("action",)
     base_key: tuple[str, ...] = ("observation", "proprio", "joints")
+    robot_xyz_flow_key: tuple[str, ...] = ("robot_xyz", "predict")
+    robot_xyz_base_key: tuple[str, ...] = ("robot_xyz", "base")
+    human_xyz_flow_key: tuple[str, ...] = ("human_xyz", "predict")
+    human_xyz_base_key: tuple[str, ...] = ("human_xyz", "base")
     sample_idx: int = 0
     figsize: tuple[float, float] = (12.0, 6.0)
     fps: int = 12
     dpi: int = 120
     joint_dim: int = 7
     fk_link: str = "link_eef"
+    max_pts: int | None = None
     _fk_fn: Callable[[np.ndarray], np.ndarray] | None = None
 
     def every(self, batch: Data, step: int, log_every: int) -> np.ndarray | None:
@@ -66,18 +81,39 @@ class VizCallback:
         return self(batch)
 
     def __call__(self, batch: dict) -> np.ndarray:
-        base = self._select_base(self._get(batch, self.base_key))
-        flow = self._select_flow(self._get(batch, self.flow_key))
+        base = self._maybe_select(batch, self.base_key, self._select_base)
+        flow = self._maybe_select(batch, self.flow_key, self._select_flow)
+        robot_xyz_base = self._maybe_select(batch, self.robot_xyz_base_key, self._select_xyz)
+        robot_xyz_flow = self._maybe_select(batch, self.robot_xyz_flow_key, self._select_xyz)
+        human_xyz_base = self._maybe_select(batch, self.human_xyz_base_key, self._select_xyz)
+        human_xyz_flow = self._maybe_select(batch, self.human_xyz_flow_key, self._select_xyz)
 
         t0 = perf_counter()
-        base_sub, flow_sub = prep_data(base, flow)
-        if self._fk_fn is None:
-            self._fk_fn = make_fk_fn(link=self.fk_link)
-        base_fk_xyz, flow_fk_xyz = compute_fk(base_sub, flow_sub, self._fk_fn)
+        base_sub = flow_sub = None
+        base_fk_xyz = flow_fk_xyz = None
+        if base is not None and flow is not None:
+            base_sub, flow_sub = prep_data(base, flow, max_pts=self.max_pts)
+            if self._fk_fn is None:
+                self._fk_fn = make_fk_fn(link=self.fk_link)
+            base_fk_xyz, flow_fk_xyz = compute_fk(base_sub, flow_sub, self._fk_fn)
+
+        robot_xyz_base_sub = robot_xyz_flow_sub = None
+        if robot_xyz_base is not None and robot_xyz_flow is not None:
+            robot_xyz_base_sub, robot_xyz_flow_sub = prep_data(robot_xyz_base, robot_xyz_flow)
+
+        human_xyz_base_sub = human_xyz_flow_sub = None
+        if human_xyz_base is not None and human_xyz_flow is not None:
+            human_xyz_base_sub, human_xyz_flow_sub = prep_data(human_xyz_base, human_xyz_flow)
+
+        if base_fk_xyz is None and robot_xyz_base_sub is None and human_xyz_base_sub is None:
+            raise ValueError("Expected robot joints or xyz inputs for VizCallback")
+
+        base_xyz = [x for x in (base_fk_xyz, robot_xyz_base_sub, human_xyz_base_sub) if x is not None]
+        base_xyz = np.concatenate(base_xyz, axis=0)
         t1 = perf_counter()
         print(f"[VizCallback] Data Prep & FK Time: {t1 - t0:.3f}s")
 
-        joint_state, fk_state, base_joint_2d, base_fk_2d, joint_lim, fk_lim = fit_pca(base_sub, base_fk_xyz)
+        joint_state, fk_state, base_joint_2d, base_fk_2d, joint_lim, fk_lim = fit_pca(base_sub, base_xyz)
         frames = render_frames(
             flow_sub,
             flow_fk_xyz,
@@ -88,9 +124,81 @@ class VizCallback:
             joint_lim,
             fk_lim,
             self.figsize,
+            robot_xyz_flow=robot_xyz_flow_sub,
+            human_flow_xyz=human_xyz_flow_sub,
         )
         t2 = perf_counter()
         print(f"[VizCallback] Render Loop Time: {t2 - t1:.3f}s")
+
+        return frames
+
+    def _call_v2(self, batch: dict) -> np.ndarray:
+        """Simplified path for the split-by-bodypart batch layout.
+
+        Expects:
+            batch["actions"][{joints,position,...}]   (B, W, H, n)
+            batch["pred"][{joints,position,...}]      (F, B, W, H, n)
+            batch["mask"]["embodiment"][{single,human_single}]  (B, 1) bool
+        """
+        actions = batch["actions"]
+        pred = batch["pred"]
+        emb_mask = batch["mask"]["embodiment"]
+
+        def _slice(arr: np.ndarray, mask: np.ndarray, axis: int) -> np.ndarray:
+            keep = np.asarray(mask).reshape(-1).astype(bool)
+            return np.take(np.asarray(arr), np.flatnonzero(keep), axis=axis)
+
+        t0 = perf_counter()
+        base_sub = flow_sub = base_fk_xyz = flow_fk_xyz = None
+        robot_xyz_base_sub = robot_xyz_flow_sub = None
+        human_xyz_base_sub = human_xyz_flow_sub = None
+
+        if "joints" in actions and "joints" in pred and "single" in emb_mask:
+            j_base = _slice(actions["joints"], emb_mask["single"], axis=0)
+            j_flow = _slice(pred["joints"], emb_mask["single"], axis=1)
+            if j_base.size:
+                base_sub, flow_sub = prep_data(j_base, j_flow, max_pts=self.max_pts)
+                if self._fk_fn is None:
+                    self._fk_fn = make_fk_fn(link=self.fk_link)
+                base_fk_xyz, flow_fk_xyz = compute_fk(base_sub, flow_sub, self._fk_fn)
+
+        if "position" in actions and "position" in pred and "single" in emb_mask:
+            r_base = _slice(actions["position"], emb_mask["single"], axis=0)
+            r_flow = _slice(pred["position"], emb_mask["single"], axis=1)
+            if r_base.size:
+                robot_xyz_base_sub, robot_xyz_flow_sub = prep_data(r_base, r_flow, max_pts=self.max_pts)
+
+        if "position" in actions and "position" in pred and "human_single" in emb_mask:
+            h_base = _slice(actions["position"], emb_mask["human_single"], axis=0)
+            h_flow = _slice(pred["position"], emb_mask["human_single"], axis=1)
+            if h_base.size:
+                human_xyz_base_sub, human_xyz_flow_sub = prep_data(h_base, h_flow, max_pts=self.max_pts)
+
+        if base_fk_xyz is None and robot_xyz_base_sub is None and human_xyz_base_sub is None:
+            raise ValueError("Expected joints or position inputs for VizCallback._call_v2")
+
+        base_xyz = np.concatenate(
+            [x for x in (base_fk_xyz, robot_xyz_base_sub, human_xyz_base_sub) if x is not None], axis=0
+        )
+        t1 = perf_counter()
+        print(f"[VizCallback v2] Data Prep & FK Time: {t1 - t0:.3f}s")
+
+        joint_state, fk_state, base_joint_2d, base_fk_2d, joint_lim, fk_lim = fit_pca(base_sub, base_xyz)
+        frames = render_frames(
+            flow_sub,
+            flow_fk_xyz,
+            joint_state,
+            fk_state,
+            base_joint_2d,
+            base_fk_2d,
+            joint_lim,
+            fk_lim,
+            self.figsize,
+            robot_xyz_flow=robot_xyz_flow_sub,
+            human_flow_xyz=human_xyz_flow_sub,
+        )
+        t2 = perf_counter()
+        print(f"[VizCallback v2] Render Loop Time: {t2 - t1:.3f}s")
 
         return frames
 
@@ -120,11 +228,38 @@ class VizCallback:
             raise ValueError(f"Expected flow dim >= {self.joint_dim}, got {flow.shape[-1]}")
         return flow[..., : self.joint_dim]
 
+    def _select_xyz(self, arr: Any) -> np.ndarray:
+        xyz = np.asarray(arr, dtype=np.float32)
+        if xyz.ndim < 2:
+            raise ValueError(f"Expected xyz ndim >= 2, got {xyz.shape}")
+        if xyz.shape[-1] < 3:
+            raise ValueError(f"Expected xyz dim >= 3, got {xyz.shape[-1]}")
+        return xyz[..., :3]
+
     def _get(self, batch: Mapping[str, Any], path: tuple[str, ...]) -> Any:
         cur: Any = batch
         for key in path:
             cur = cur[key]
         return cur
+
+    def _maybe_get(self, batch: Mapping[str, Any], path: tuple[str, ...]) -> Any | None:
+        cur: Any = batch
+        for key in path:
+            if not isinstance(cur, Mapping) or key not in cur:
+                return None
+            cur = cur[key]
+        return cur
+
+    def _maybe_select(
+        self,
+        batch: Mapping[str, Any],
+        path: tuple[str, ...],
+        fn: Callable[[Any], np.ndarray],
+    ) -> np.ndarray | None:
+        arr = self._maybe_get(batch, path)
+        if arr is None:
+            return None
+        return fn(arr)
 
     def _save_gif(self, frames: np.ndarray, path: Path, fps: int) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
+from einops import rearrange
 import matplotlib.pyplot as plt
 import numpy as np
 import pcax
@@ -55,38 +56,37 @@ def make_fk_fn(link: str = "link_eef") -> Callable[[np.ndarray], np.ndarray]:
 # ---------------------------------------------------------------------------
 
 
-def prep_data(
-    base_joints: np.ndarray,
-    flow: np.ndarray,
-    max_pts: int = 1000,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Flatten spatial dims, print convergence stats, subsample.
-
-    Args:
-        base_joints: Ground-truth joints [B, W, H, A].
-        flow:        Predicted trajectory  [F, B, W, H, A].
-        max_pts:     Maximum subsampled points S (default 1000).
-
-    Returns:
-        base_sub [S, A], flow_sub [F, S, A].
-    """
-    f = flow.shape[0]
-    a = flow.shape[-1]
-
-    base_flat = base_joints.reshape(-1, a)
-
-    flow_flat = flow.reshape(f, -1, a)
-
-    n = base_flat.shape[0]
-
-    mse = float(np.mean((flow_flat[-1] - base_flat) ** 2))
-    print(f"[Debug] Target Manifold   | Mean: {base_flat.mean():.4f}, Std: {base_flat.std():.4f}")
-    print(f"[Debug] Flow t=0 (Noise)  | Mean: {flow_flat[0].mean():.4f}, Std: {flow_flat[0].std():.4f}")
-    print(f"[Debug] Flow t=F (Pred)   | Mean: {flow_flat[-1].mean():.4f}, Std: {flow_flat[-1].std():.4f}")
+def print_mse(base: np.ndarray, flow: np.ndarray) -> None:
+    """Print convergence stats: base manifold vs flow start/end and final MSE."""
+    mse = float(np.mean((flow[-1] - base) ** 2))
+    print(f"[Debug] Target Manifold   | Mean: {base.mean():.4f}, Std: {base.std():.4f}")
+    print(f"[Debug] Flow t=0 (Noise)  | Mean: {flow[0].mean():.4f}, Std: {flow[0].std():.4f}")
+    print(f"[Debug] Flow t=F (Pred)   | Mean: {flow[-1].mean():.4f}, Std: {flow[-1].std():.4f}")
     print(f"[Debug] MSE(Flow_Final, Target): {mse:.6f}")
 
-    s = min(max_pts, n)
-    idx = np.random.choice(n, size=s, replace=False)
+
+def prep_data(
+    base: np.ndarray,
+    flow: np.ndarray,
+    max_pts: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Flatten spatial dims; optionally subsample to ``max_pts``.
+
+    Args:
+        base:    Ground-truth array [B, W, H, A].
+        flow:    Predicted trajectory [F, B, W, H, A].
+        max_pts: If set, randomly subsample down to this many points.
+
+    Returns:
+        base_flat [N, A], flow_flat [F, N, A] (N <= B*W*H, == max_pts if given).
+    """
+    base_flat = rearrange(base, "... a -> (...) a")
+    flow_flat = rearrange(flow, "f ... a -> f (...) a")
+    print_mse(base_flat, flow_flat)
+
+    if max_pts is None or max_pts >= base_flat.shape[0]:
+        return base_flat, flow_flat
+    idx = np.random.choice(base_flat.shape[0], size=max_pts, replace=False)
     return base_flat[idx], flow_flat[:, idx]
 
 
@@ -122,9 +122,9 @@ def compute_fk(
 
 
 def fit_pca(
-    base_sub: np.ndarray,
+    base_sub: np.ndarray | None,
     base_fk_xyz: np.ndarray,
-) -> tuple[PCAState, PCAState, np.ndarray, np.ndarray, AxisLim, AxisLim]:
+) -> tuple[PCAState | None, PCAState, np.ndarray, np.ndarray, AxisLim, AxisLim]:
     """Fit PCA exclusively on ground-truth data to anchor the coordinate frame.
 
     Args:
@@ -136,10 +136,13 @@ def fit_pca(
         base_joint_2d [S, 2], base_fk_2d [S, 2],
         joint_lim, fk_lim  (each a pair of (min, max) per axis with ±0.5 pad).
     """
-    joint_state: PCAState = pcax.fit(base_sub, n_components=2)
+    joint_state: PCAState | None = None
+    if base_sub is not None and len(base_sub) > 0:
+        joint_state = pcax.fit(base_sub, n_components=2)
+        base_joint_2d = np.asarray(pcax.transform(joint_state, base_sub), dtype=np.float32)
+    else:
+        base_joint_2d = np.zeros((0, 2), dtype=np.float32)
     fk_state: PCAState = pcax.fit(base_fk_xyz, n_components=2)
-
-    base_joint_2d = np.asarray(pcax.transform(joint_state, base_sub), dtype=np.float32)
     base_fk_2d = np.asarray(pcax.transform(fk_state, base_fk_xyz), dtype=np.float32)
 
     def _lim(pts: np.ndarray) -> AxisLim:
@@ -148,7 +151,8 @@ def fit_pca(
             (float(pts[:, 1].min()) - 0.5, float(pts[:, 1].max()) + 0.5),
         )
 
-    return joint_state, fk_state, base_joint_2d, base_fk_2d, _lim(base_joint_2d), _lim(base_fk_2d)
+    joint_lim = _lim(base_joint_2d) if len(base_joint_2d) > 0 else ((-1.0, 1.0), (-1.0, 1.0))
+    return joint_state, fk_state, base_joint_2d, base_fk_2d, joint_lim, _lim(base_fk_2d)
 
 
 # ---------------------------------------------------------------------------
@@ -157,15 +161,17 @@ def fit_pca(
 
 
 def render_frames(
-    flow_sub: np.ndarray,
-    flow_fk_xyz: np.ndarray,
-    joint_state: PCAState,
+    flow_sub: np.ndarray | None,
+    flow_fk_xyz: np.ndarray | None,
+    joint_state: PCAState | None,
     fk_state: PCAState,
     base_joint_2d: np.ndarray,
     base_fk_2d: np.ndarray,
     joint_lim: AxisLim,
     fk_lim: AxisLim,
     figsize: tuple[float, float] = (12.0, 6.0),
+    robot_xyz_flow: np.ndarray | None = None,
+    human_flow_xyz: np.ndarray | None = None,
 ) -> np.ndarray:
     """Render joint-PCA and FK-PCA flow animation; capture frames via canvas.
 
@@ -183,16 +189,28 @@ def render_frames(
     Returns:
         frames [F, H, W, 3] uint8.
     """
-    f = flow_sub.shape[0]
+    if flow_sub is not None:
+        f = flow_sub.shape[0]
+    elif robot_xyz_flow is not None:
+        f = robot_xyz_flow.shape[0]
+    elif human_flow_xyz is not None:
+        f = human_flow_xyz.shape[0]
+    else:
+        raise ValueError("Expected joint flow or human xyz flow")
     fig, axes = plt.subplots(1, 2, figsize=figsize, dpi=120)
 
     # Static background — ground-truth manifold
-    axes[0].scatter(base_joint_2d[:, 0], base_joint_2d[:, 1], c="grey", s=1, alpha=0.15, zorder=1)
+    if len(base_joint_2d) > 0:
+        axes[0].scatter(base_joint_2d[:, 0], base_joint_2d[:, 1], c="grey", s=1, alpha=0.15, zorder=1)
+    else:
+        axes[0].text(0.5, 0.5, "no robot joints", ha="center", va="center", transform=axes[0].transAxes)
     axes[1].scatter(base_fk_2d[:, 0], base_fk_2d[:, 1], c="grey", s=1, alpha=0.15, zorder=1)
 
     # Foreground animated scatters — initialised empty
-    joint_sc = axes[0].scatter([], [], c="blue", s=2, alpha=0.2, zorder=2)
-    fk_sc = axes[1].scatter([], [], c="red", s=2, alpha=0.2, zorder=2)
+    joint_sc = axes[0].scatter([], [], c="blue", s=2, alpha=0.2, zorder=2) if joint_state is not None else None
+    robot_fk_sc = axes[1].scatter([], [], c="blue", s=8, alpha=0.25, zorder=2)
+    robot_xyz_sc = axes[1].scatter([], [], c="blue", s=20, marker="x", alpha=0.5, zorder=3)
+    human_sc = axes[1].scatter([], [], c="red", s=20, marker="x", alpha=0.5, zorder=4)
 
     # Lock axes permanently — no dynamic rescaling
     axes[0].set_xlim(*joint_lim[0])
@@ -211,15 +229,31 @@ def render_frames(
 
     frames: list[np.ndarray] = []
     for t in range(f):
-        joint_2d = np.asarray(pcax.transform(joint_state, flow_sub[t]), dtype=np.float32)
-        fk_2d = np.asarray(pcax.transform(fk_state, flow_fk_xyz[t]), dtype=np.float32)
+        if joint_state is not None and flow_sub is not None and joint_sc is not None:
+            joint_2d = np.asarray(pcax.transform(joint_state, flow_sub[t]), dtype=np.float32)
+            joint_sc.set_offsets(np.c_[joint_2d[:, 0], joint_2d[:, 1]])
 
-        joint_sc.set_offsets(np.c_[joint_2d[:, 0], joint_2d[:, 1]])
-        fk_sc.set_offsets(np.c_[fk_2d[:, 0], fk_2d[:, 1]])
+        if flow_fk_xyz is not None:
+            fk_2d = np.asarray(pcax.transform(fk_state, flow_fk_xyz[t]), dtype=np.float32)
+            robot_fk_sc.set_offsets(np.c_[fk_2d[:, 0], fk_2d[:, 1]])
+        else:
+            robot_fk_sc.set_offsets(np.zeros((0, 2), dtype=np.float32))
+
+        if robot_xyz_flow is not None:
+            robot_xyz_2d = np.asarray(pcax.transform(fk_state, robot_xyz_flow[t]), dtype=np.float32)
+            robot_xyz_sc.set_offsets(np.c_[robot_xyz_2d[:, 0], robot_xyz_2d[:, 1]])
+        else:
+            robot_xyz_sc.set_offsets(np.zeros((0, 2), dtype=np.float32))
+
+        if human_flow_xyz is not None:
+            human_2d = np.asarray(pcax.transform(fk_state, human_flow_xyz[t]), dtype=np.float32)
+            human_sc.set_offsets(np.c_[human_2d[:, 0], human_2d[:, 1]])
+        else:
+            human_sc.set_offsets(np.zeros((0, 2), dtype=np.float32))
 
         t_norm = t / max(f - 1, 1)
         axes[0].set_title(f"Joint PCA  t={t_norm:.2f}")
-        axes[1].set_title(f"FK XYZ PCA  t={t_norm:.2f}")
+        axes[1].set_title(f"XYZ PCA  t={t_norm:.2f}")
 
         fig.canvas.draw()
         w, h = fig.canvas.get_width_height()
