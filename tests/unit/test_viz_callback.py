@@ -93,6 +93,15 @@ class TestFitPCA:
         assert jlim[0][0] == pytest.approx(float(base_j2d[:, 0].min()) - 0.5)
         assert jlim[0][1] == pytest.approx(float(base_j2d[:, 0].max()) + 0.5)
 
+    def test_without_joint_data(self, base_and_flow):
+        base, _ = base_and_flow
+        base_fk = _fake_fk(base)
+        joint_st, _fk_st, base_j2d, base_fk2d, jlim, _flim = fit_pca(None, base_fk)
+        assert joint_st is None
+        assert base_j2d.shape == (0, 2)
+        assert base_fk2d.shape == (S, 2)
+        assert jlim == ((-1.0, 1.0), (-1.0, 1.0))
+
 
 # ── render_frames ──────────────────────────────────────────────
 
@@ -139,6 +148,28 @@ class TestRenderFrames:
             figsize=(4.0, 2.0),
         )
         assert not np.array_equal(frames[0], frames[-1])
+
+    def test_supports_human_xyz_overlay_without_robot_joint_panel(self, base_and_flow):
+        base, flow = base_and_flow
+        base_fk = _fake_fk(base)
+        human_flow = flow[:, :, :3]
+        _joint_st, fk_st, base_j2d, base_fk2d, jlim, flim = fit_pca(None, base_fk)
+
+        frames = render_frames(
+            None,
+            None,
+            None,
+            fk_st,
+            base_j2d,
+            base_fk2d,
+            jlim,
+            flim,
+            figsize=(4.0, 2.0),
+            human_flow_xyz=human_flow,
+        )
+        assert frames.ndim == 4
+        assert frames.shape[0] == F
+        assert frames.shape[3] == 3
 
 
 # ── VizCallback.save ───────────────────────────────────────────
