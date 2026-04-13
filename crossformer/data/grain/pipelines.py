@@ -199,7 +199,7 @@ def do_frame_transforms(config, tfconfig, ds, *, imaug: bool = True):
 
     ds = (
         # @todo is it better to use mp or to jit with constant size?
-        ds.random_map(lambda x, rng: frame_aug_with_reshape(rng=rng_for_batch(rng, x), batch=x))
+        ds.random_map(lambda x, rng: frame_aug_with_reshape(rng=rng_for_batch(rng, x), batch=x), seed=0)
     )
     return ds
 
