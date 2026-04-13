@@ -253,14 +253,14 @@ def freeze_weights(
     # freeze anything that matches fnmatch patterns in `frozen_keys`
     # path is a string of .-separated module names, e.g. ('crossformer_transformer.BlockTransformer_0...')
     param_partitions = flax.traverse_util.path_aware_map(
-        lambda path, v: ("frozen" if any(fnmatch(".".join(path), key) for key in frozen_keys) else "trainable"),
+        lambda path, v: "frozen" if any(fnmatch(".".join(path), key) for key in frozen_keys) else "trainable",
         params_or_params_shape,
     )
     tx = optax.multi_transform(partition_optimizers, param_partitions)
 
     logging.debug("Frozen params:")
     flax.traverse_util.path_aware_map(
-        lambda path, opt_status: (logging.debug(".".join(path)) if opt_status == "frozen" else None),
+        lambda path, opt_status: logging.debug(".".join(path)) if opt_status == "frozen" else None,
         param_partitions,
     )
     total_params = sum(jax.tree_util.tree_leaves(jax.tree.map(lambda x: x.size, params_or_params_shape)))
@@ -419,7 +419,9 @@ def _open_binary(path: str):
     try:
         import tensorflow as tf
     except ImportError as e:
-        raise ImportError(f"Reading non-local path {path!r} requires tensorflow or another remote filesystem client.") from e
+        raise ImportError(
+            f"Reading non-local path {path!r} requires tensorflow or another remote filesystem client."
+        ) from e
     return tf.io.gfile.GFile(path, "rb")
 
 

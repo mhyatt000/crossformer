@@ -6,11 +6,11 @@ from typing import Any, Callable, Iterable, Iterator, Mapping
 import jax
 import jax.numpy as jnp
 import numpy as np
-import wandb
 
 from crossformer.embody import DOF
 from crossformer.run.train_step import lookup_guide
 from crossformer.utils.callbacks.viz import ActionBatchDenormalizer
+import wandb
 
 JOINT_NAMES = tuple(f"j{i}" for i in range(7))
 JOINT_IDS = tuple(DOF[name] for name in JOINT_NAMES)
@@ -45,11 +45,8 @@ def extract_bundled_actions(batch, max_h):
     return actions, dof_ids, chunk_steps
 
 
-def adapt_canonical_batch(act, flow, dof_id_to_idx):
-    """Map bundled slot actions to a canonical DOF order."""
-    base = np.asarray(act["base"], dtype=np.float32)
-    dof_ids = np.asarray(act["id"])
-    flow = np.asarray(flow, dtype=np.float32)
+def _validate_shapes(base, flow, dof_ids):
+    """Validate input tensor dimensions and batch consistency"""
     if base.ndim == 3:
         base = base[:, None, :, :]
     if base.ndim != 4:
@@ -60,11 +57,16 @@ def adapt_canonical_batch(act, flow, dof_id_to_idx):
         raise ValueError(f"Expected act.id ndim 2, got {dof_ids.shape}")
     if base.shape[0] != dof_ids.shape[0] or flow.shape[1] != dof_ids.shape[0]:
         raise ValueError(f"Batch mismatch: base={base.shape} flow={flow.shape} dof_ids={dof_ids.shape}")
+    return base
 
-    keep = []
+
+def _remap_dofs(base, flow, dof_ids, dof_id_to_idx):
+    """Remap DOF columns from source ordering to canonical ordering"""
     out_dim = len(dof_id_to_idx)
     base_joint = np.zeros((*base.shape[:-1], out_dim), dtype=np.float32)
     flow_joint = np.zeros((*flow.shape[:-1], out_dim), dtype=np.float32)
+    keep = []
+
     for b, row in enumerate(dof_ids):
         has_target = False
         for src, dof_id in enumerate(row):
@@ -77,8 +79,21 @@ def adapt_canonical_batch(act, flow, dof_id_to_idx):
         if has_target:
             keep.append(b)
 
+    return base_joint, flow_joint, keep
+
+
+def adapt_canonical_batch(act, flow, dof_id_to_idx):
+    """Map bundled slot actions to a canonical DOF order."""
+    base = np.asarray(act["base"], dtype=np.float32)
+    dof_ids = np.asarray(act["id"])
+    flow = np.asarray(flow, dtype=np.float32)
+
+    base = _validate_shapes(base, flow, dof_ids)
+    base_joint, flow_joint, keep = _remap_dofs(base, flow, dof_ids, dof_id_to_idx)
+
     if not keep:
         return None, None
+
     keep = np.asarray(keep, dtype=np.int32)
     return {
         "act": {"base": base_joint[keep]},
@@ -193,7 +208,9 @@ class XFlowEvalLoop:
             seen += int(np.asarray(batch["act"]["id"]).shape[0])
         return out
 
-    def _predict_metrics(self, model, params, batch, *, need_hist: bool, need_viz: bool, rast_batches=None) -> dict[str, Any]:
+    def _predict_metrics(
+        self, model, params, batch, *, need_hist: bool, need_viz: bool, rast_batches=None
+    ) -> dict[str, Any]:
         obs = batch["observation"]
         task = batch.get("task", {"pad_mask_dict": {}})
         _, dof_ids, chunk_steps = extract_bundled_actions(batch, max_h=0)
@@ -252,12 +269,13 @@ class XFlowEvalLoop:
         out.update(cam_videos)
         return out
 
-    def _rast_videos(self, model, params, batches) -> dict[str, Any]:
-        per_cam: list[list[np.ndarray]] | None = None
+    def _extract_chunks(self, model, params, batches):
+        """Yield denormalized chunks from batches up to eval_frames limit."""
         frames_left = self.callbacks.eval_frames
         for batch in batches:
             if frames_left <= 0:
                 break
+
             pred_flow_np = self._predict_flow(model, params, batch)
             rast_batch, rast_keep = adapt_rast_batch(batch["act"], pred_flow_np)
             if rast_batch is None:
@@ -267,30 +285,41 @@ class XFlowEvalLoop:
                 jax.device_get(batch["info"]["dataset_name"]),
             )
             kept = np.asarray(rast_keep, dtype=np.int32)
-            n_take = min(frames_left, len(kept))
-            for local_idx in range(n_take):
+
+            for local_idx in range(min(frames_left, len(kept))):
                 ds_name = ds_names[int(kept[local_idx])]
                 chunk = rast_batch["predict"][-1, local_idx]
                 if chunk.ndim == 3:
                     chunk = chunk[0]
                 chunk = denorm_canonical(chunk, self.callbacks.chunk_cb.denorm, ds_name, np.asarray(RAST_IDS))
-                traj_frames = self.callbacks.rast_cb.render_trajectory(chunk)
-                if per_cam is None:
-                    per_cam = [[] for _ in range(len(traj_frames))]
-                for ci, frame in enumerate(traj_frames):
-                    per_cam[ci].append(frame)
+                yield chunk
                 frames_left -= 1
-                if frames_left <= 0:
-                    break
 
+    def _render_to_cameras(self, chunks):
+        """Render chunks into per-camera frame lists."""
+        per_cam = None
+        for chunk in chunks:
+            traj_frames = self.callbacks.rast_cb.render_trajectory(chunk)
+            if per_cam is None:
+                per_cam = [[] for _ in range(len(traj_frames))]
+            for ci, frame in enumerate(traj_frames):
+                per_cam[ci].append(frame)
+        return per_cam
+
+    def _encode_videos(self, per_cam):
+        """Stack per-camera frames into wandb Videos."""
+        fps = getattr(self.callbacks.viz_cb, "fps", 10)
+        return {
+            f"rast/cam_{ci}": wandb.Video(np.moveaxis(np.stack(frames), -1, 1), fps=fps)
+            for ci, frames in enumerate(per_cam)
+        }
+
+    def _rast_videos(self, model, params, batches) -> dict[str, Any]:
+        chunks = self._extract_chunks(model, params, batches)
+        per_cam = self._render_to_cameras(chunks)
         if per_cam is None:
             return {}
-        out = {}
-        fps = getattr(self.callbacks.viz_cb, "fps", 10)
-        for ci, frames in enumerate(per_cam):
-            video = np.stack(frames, axis=0)
-            out[f"rast/cam_{ci}"] = wandb.Video(np.moveaxis(video, -1, 1), fps=fps)
-        return out
+        return self._encode_videos(per_cam)
 
     def _predict_flow(self, model, params, batch) -> np.ndarray:
         obs = batch["observation"]
