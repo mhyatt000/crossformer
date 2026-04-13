@@ -134,9 +134,11 @@ def make_model_config(cfg, max_h, max_a, max_w, guide_dim=None):
         encoder_cls = vit_encoder_configs.get(cfg.vision_encoder)
         if encoder_cls is None:
             raise ValueError(f"Unknown vision_encoder={cfg.vision_encoder!r}, choose from {list(vit_encoder_configs)}")
+        encoder_kwargs = encoder_cls.keywords if isinstance(encoder_cls, partial) else {}
+        encoder_base = encoder_cls.func if isinstance(encoder_cls, partial) else encoder_cls
         image_tokenizer_kwargs = {
             "obs_stack_keys": list(cfg.image_keys),
-            "encoder": ModuleSpec.create(encoder_cls),
+            "encoder": ModuleSpec.create(encoder_base, **encoder_kwargs),
         }
         if cfg.vision_encoder.endswith("-film"):
             image_tokenizer_kwargs["task_film_keys"] = ["language_instruction"]
