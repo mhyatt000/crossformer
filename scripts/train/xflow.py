@@ -33,7 +33,12 @@ from crossformer.cn.model_factory import Vision
 from crossformer.data.grain.embody import decode_embody_name
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.run.train_step import lookup_guide, make_train_step
-from crossformer.run.xflow_eval import extract_bundled_actions, flatten_obs, XFlowEvalCallbacks, XFlowEvalLoop
+from crossformer.run.xflow_eval import (
+    extract_bundled_actions,
+    flatten_obs,
+    XFlowEvalCallbacks,
+    XFlowEvalLoop,
+)
 from crossformer.utils.callbacks.rast import RastConfig
 from crossformer.utils.callbacks.save import SaveCallback
 from crossformer.utils.callbacks.val_mse import ValMSEConfig
@@ -60,6 +65,7 @@ class Config:
     log_every: int = 100  # log interval
     batch_size: int = 256  # global batch size
     mix: str = "xgym_sweep_single"  # dataset mix name
+    mix_version: str | None = None  # defaults to latest
     horizon: int = 20  # action horizon from data pipeline
     verbose: bool = False  # print model tabulation during init
     model: cn.ModelFactory = default(
@@ -131,6 +137,17 @@ def shard_batch(batch, mesh):
     return multihost_utils.host_local_array_to_global_array(batch, mesh, PartitionSpec("batch"))
 
 
+def _resolve_version(mix_version: str | None, dataset_name: str = "xgym_sweep_single") -> str:
+    """Return mix version if given, else the latest version on disk"""
+    if mix_version is not None:
+        return mix_version
+    cache = Path("~/.cache/arrayrecords").expanduser() / dataset_name
+    versions = sorted(v.name for v in cache.iterdir() if v.is_dir())
+    if not versions:
+        raise FileNotFoundError(f"No versions found for {dataset_name} in {cache}")
+    return versions[-1]
+
+
 def make_data_cfg(mix: str, batch_size: int, loader: Loader) -> cn.Train:
     """Build a Train config for a specific loader."""
     return cn.Train(
@@ -169,7 +186,12 @@ def main(cfg: Config):
 
     # Load data
     print(Rule("loading data"))
+    from crossformer.cn.dataset.mix import DataSource
     from crossformer.data.grain.loader import _apply_fd_limit, GrainDataFactory
+
+    version = _resolve_version(cfg.mix_version)
+    DataSource.REGISTRY[cfg.mix].version = version
+    print(f" {cfg.mix}: {version}")
 
     _apply_fd_limit(512**2)
     train_cfg = make_data_cfg(cfg.mix, cfg.batch_size, cfg.train_loader)
