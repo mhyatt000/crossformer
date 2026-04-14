@@ -42,9 +42,10 @@ def _restructure_trajectory(
     }
 
 
-def _restructure_step_mano(x: dict, *, name: str, lang_key: str) -> dict:
+def _restructure_step_mano(x: dict, *, name: str, lang_key: str | None) -> dict:
     task = {}
-    task[lang_key] = x.pop(lang_key)  # simple
+    if lang_key is not None and lang_key in x:
+        task[lang_key] = x.pop(lang_key)
     x["task"] = task
 
     x["observation"]["timestep"] = x["info"]["id"]["step"]
