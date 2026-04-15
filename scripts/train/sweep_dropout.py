@@ -46,6 +46,12 @@ RUNS: list[tuple[str, set[str]]] = [
     ("shuffle_only", {"key_shuf"}),
 ]
 
+# (name, extra CLI args) — each run is executed once per variant
+VARIANTS: list[tuple[str, list[str]]] = [
+    ("default", []),
+    ("stem8_nofilm", ["--model.vision.encoder", "small-stem-8-film", "--model.vision.use-film", "False"]),
+]
+
 
 @dataclass
 class Args:
@@ -58,12 +64,14 @@ class Args:
 
 
 def main(args: Args):
-    n = len(RUNS)
+    jobs = [(i, r, j, v) for i, r in enumerate(RUNS) for j, v in enumerate(VARIANTS)]
+    n = len(jobs)
     only = {int(x) for x in args.only.split(",") if x.strip()} if args.only else set(range(n))
 
-    for i, (name, on_set) in enumerate(RUNS):
-        if i not in only:
+    for idx, (i, (name, on_set), j, (vname, vextra)) in enumerate(jobs):
+        if idx not in only:
             continue
+        full_name = f"drop_{i:02d}_{name}_{vname}"
         cmd = [
             "uv",
             "run",
@@ -73,17 +81,18 @@ def main(args: Args):
             "--batch-size",
             str(args.batch_size),
             "--name",
-            f"drop_{i:02d}_{name}",
+            full_name,
             "--wandb.group",
             args.wandb_group,
         ]
         for method in METHODS:
             flag, default_prob = PROB_FLAGS[method]
             cmd += [flag, str(default_prob if method in on_set else 0.0)]
+        cmd += vextra
         if args.extra:
             cmd += args.extra.split()
 
-        print(f"[{i:2d}/{n}] {name}")
+        print(f"[{idx:2d}/{n}] {full_name}")
         print(" ", " ".join(cmd))
         if args.dry_run:
             continue
