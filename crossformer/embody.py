@@ -21,7 +21,24 @@ from typing import ClassVar, Iterator, Protocol, runtime_checkable, Sequence
 # ---------------------------------------------------------------------------
 
 MASK_ID = 0
-
+_KPT_LOCS = (
+    "base",
+    "j0",
+    "j1",
+    "j2",
+    "j3",
+    "j4",
+    "j5",
+    "j6",
+    "eef",
+    "tcp",
+    "gdrv",
+    "lfin",
+    "linn",
+    "rout",
+    "rfin",
+    "rinn",
+)
 DOF: dict[str, int] = {
     "MASK": MASK_ID,
     "j0": 1,
@@ -54,9 +71,16 @@ DOF: dict[str, int] = {
     **{f"ftip_{i}": 155 + i for i in range(15)},
     # Hand finger joint 3D keypoints (3 non-tip joints per finger x 5 fingers x xyz)
     **{f"fjoint_{i}": 170 + i for i in range(45)},
+    **{f"kpt2d_{loc}_{ax}": 215 + i * 2 + j for i, loc in enumerate(_KPT_LOCS) for j, ax in enumerate(["u", "v"])},
+    **{
+        f"kpt3dc_{loc}_{ax}": 247 + i * 3 + j for i, loc in enumerate(_KPT_LOCS) for j, ax in enumerate(["x", "y", "z"])
+    },
+    **{
+        f"kpt3dw_{loc}_{ax}": 295 + i * 3 + j for i, loc in enumerate(_KPT_LOCS) for j, ax in enumerate(["x", "y", "z"])
+    },
 }
 
-VOCAB_SIZE = 256
+VOCAB_SIZE = 384
 
 
 def ids(*names: str) -> tuple[int, ...]:
@@ -235,6 +259,25 @@ KP_FINGER_JOINTS = BodyPart(
     "kp_finger_joints", tuple(f"fjoint_{i}" for i in range(45)), Frame.ABSOLUTE, PartKind.SPATIAL3D
 )
 
+KPT2D_16 = BodyPart(
+    "kpt2d_16",
+    tuple(f"kpt2d_{loc}_{ax}" for loc in _KPT_LOCS for ax in ("u", "v")),
+    Frame.ABSOLUTE,
+    PartKind.SPATIAL2D,
+)
+KPT3D_CAM_16 = BodyPart(
+    "kpt3d_cam_16",
+    tuple(f"kpt3dc_{loc}_{ax}" for loc in _KPT_LOCS for ax in ("x", "y", "z")),
+    Frame.ABSOLUTE,
+    PartKind.SPATIAL3D,
+)
+KPT3D_WORLD_16 = BodyPart(
+    "kpt3d_world_16",
+    tuple(f"kpt3dw_{loc}_{ax}" for loc in _KPT_LOCS for ax in ("x", "y", "z")),
+    Frame.ABSOLUTE,
+    PartKind.SPATIAL3D,
+)
+
 # Mobile base
 BASE_2D = BodyPart("base_2d", ("base_vx", "base_vy", "base_wz"), Frame.RELATIVE, PartKind.SPATIAL2D)
 
@@ -330,7 +373,7 @@ HUMAN_SINGLE = Embodiment("human_single", (CART_POS,))  #  HUMAN_TCP, KP_FINGERT
 NAV = Embodiment("nav", (BASE_2D,))
 XARM_RUKA = Embodiment("xarm_ruka", (ARM_7DOF, HAND_11))
 POSE_RUKA = Embodiment("pose_ruka", (CART_POSE, HAND_11))
-
+SINGLE_GRIP_CAL = Embodiment("single_grip_cal", (KPT2D_16, KPT3D_CAM_16, KPT3D_WORLD_16))
 
 # ---------------------------------------------------------------------------
 # Dataset
@@ -480,6 +523,21 @@ sweep_mano = Dataset(
     state_keys=_MANO_STATE,
     version="0.0.2",
     branch="to_step",
+)
+
+_XARM_DREAM_IMG = ImageObs(primary="image")
+_XARM_DREAM_PROPRIO = ProprioObs(key="proprio", dim=8)  # joints(7) + gripper(1)
+_XARM_DREAM_STATE = ("kp_visible", "camera_K", "camera_c2w")  # elements to carry
+
+xarm_dream = Dataset(
+    "xarm_dream_100k",
+    SINGLE_GRIP_CAL,
+    SourceType.AREC,
+    images=_XARM_DREAM_IMG,
+    proprio=_XARM_DREAM_PROPRIO,
+    state_keys=_XARM_DREAM_STATE,
+    version="0.0.1",
+    branch="main",
 )
 
 # ---------------------------------------------------------------------------
