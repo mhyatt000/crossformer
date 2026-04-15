@@ -7,7 +7,7 @@ module-root = ""
 
 [tool.uv.extra-build-dependencies]
 crossformer = ["uv_build"]
-nvdiffrast = ["torch"]
+nvdiffrast = ["torch", "setuptools"]
 
 [tool.uv]
 no-build-isolation-package = ["nvdiffrast"]
@@ -84,6 +84,7 @@ dependencies = [
     # "nvdiffrast",
     "nvdiffrast>=0.4.0",
     "zarr>=3.1.6",
+    "setuptools>=80.9.0",
 ]
 
 [dependency-groups]

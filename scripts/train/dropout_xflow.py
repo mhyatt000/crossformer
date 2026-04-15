@@ -141,6 +141,10 @@ def image_key_shuffle(obs: dict, rng: np.random.Generator, prob: float) -> dict:
     pmd = dict(obs.get("pad_mask_dict", {}))
     srcs = {k: np.asarray(out[k]).copy() for k in ikeys}
     msrcs = {k: (np.asarray(pmd[k], dtype=bool).copy() if k in pmd else None) for k in ikeys}
+    for k in ikeys:
+        out[k] = srcs[k].copy()
+        if k in pmd:
+            pmd[k] = msrcs[k].copy()
     for bi in np.flatnonzero(apply):
         perm = rng.permutation(len(ikeys))
         for i, k in enumerate(ikeys):
