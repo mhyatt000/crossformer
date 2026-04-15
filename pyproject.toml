@@ -7,8 +7,10 @@ module-root = ""
 
 [tool.uv.extra-build-dependencies]
 crossformer = ["uv_build"]
+nvdiffrast = ["torch"]
 
 [tool.uv]
+no-build-isolation-package = ["nvdiffrast"]
 override-dependencies = [
     # "tensorflow>=2.15.0",
     # "tensorflow<=2.18.0",
@@ -59,6 +61,7 @@ dependencies = [
     "python-box>=7.3.2",
     "augmax>=0.4.1",
     "more-itertools>=10.8.0",
+    "torch",
     "torch2jax>=0.1.0",
     "pyroki",
     "jaxlie>=1.5.0",
