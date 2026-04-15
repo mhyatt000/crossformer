@@ -1,57 +1,69 @@
-"""Sweep all 16 combinations of the 4 dropout methods in dropout_xflow.py.
+"""Run a targeted set of dropout configurations from dropout_xflow.py.
 
-Each combination runs for --steps (default 100k). Runs are launched as
-subprocesses so they are fully isolated (fresh JAX process, clean wandb run).
+Each run is launched as its own subprocess for isolation.
+
+Configs:
+  0. none                — all dropouts off, no shuffle
+  1. patch               — patch occlusion only
+  2. view                — per-sample image-view drop only
+  3. prop_sample         — per-sample proprio drop only
+  4. prop_token          — per-sample proprio-token drop only
+  5. all4                — all 4 dropouts on
+  6. shuffle_only        — no dropout, image-key shuffle on
 
 Usage:
     uv run scripts/train/sweep_dropout.py
     uv run scripts/train/sweep_dropout.py --steps 100000 --dry-run
-    uv run scripts/train/sweep_dropout.py --only 0,5,15   # by combo index
+    uv run scripts/train/sweep_dropout.py --only 0,5   # by run index
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from itertools import product
 import subprocess
 import sys
 
 import tyro
 
-METHODS = ("patch", "view", "prop_sample", "prop_token")
+METHODS = ("patch", "view", "key_shuf", "prop_sample", "prop_token")
 
 PROB_FLAGS = {
     "patch": ("--patch-prob", 0.5),
     "view": ("--view-drop-prob", 0.3),
+    "key_shuf": ("--image-key-shuffle-prob", 0.3),
     "prop_sample": ("--proprio-sample-drop-prob", 0.2),
     "prop_token": ("--proprio-token-drop-prob", 0.3),
 }
+
+# (name, set of methods to enable)
+RUNS: list[tuple[str, set[str]]] = [
+    ("none", set()),
+    ("patch", {"patch"}),
+    ("view", {"view"}),
+    ("prop_sample", {"prop_sample"}),
+    ("prop_token", {"prop_token"}),
+    ("all4", {"patch", "view", "prop_sample", "prop_token"}),
+    ("shuffle_only", {"key_shuf"}),
+]
 
 
 @dataclass
 class Args:
     steps: int = 100_000
     batch_size: int = 256
-    only: str = ""  # comma-separated combo indices (0..15); empty = all
+    only: str = ""  # comma-separated run indices; empty = all
     dry_run: bool = False
     wandb_group: str = "dropout_sweep"
     extra: str = ""  # extra args appended to every invocation, e.g. "--mp 8"
 
 
-def _combo_name(flags: tuple[bool, ...]) -> str:
-    on = [m for m, f in zip(METHODS, flags) if f]
-    return "none" if not on else "+".join(on)
-
-
 def main(args: Args):
-    combos = list(product([False, True], repeat=len(METHODS)))
-    assert len(combos) == 16
-    only = {int(x) for x in args.only.split(",") if x.strip()} if args.only else set(range(16))
+    n = len(RUNS)
+    only = {int(x) for x in args.only.split(",") if x.strip()} if args.only else set(range(n))
 
-    for i, flags in enumerate(combos):
+    for i, (name, on_set) in enumerate(RUNS):
         if i not in only:
             continue
-        name = _combo_name(flags)
         cmd = [
             "uv",
             "run",
@@ -65,19 +77,19 @@ def main(args: Args):
             "--wandb.group",
             args.wandb_group,
         ]
-        for method, on in zip(METHODS, flags):
+        for method in METHODS:
             flag, default_prob = PROB_FLAGS[method]
-            cmd += [flag, str(default_prob if on else 0.0)]
+            cmd += [flag, str(default_prob if method in on_set else 0.0)]
         if args.extra:
             cmd += args.extra.split()
 
-        print(f"[{i:2d}/16] {name}")
+        print(f"[{i:2d}/{n}] {name}")
         print(" ", " ".join(cmd))
         if args.dry_run:
             continue
         rc = subprocess.call(cmd)
         if rc != 0:
-            print(f"  !! exited {rc}; continuing to next combo", file=sys.stderr)
+            print(f"  !! exited {rc}; continuing to next run", file=sys.stderr)
 
 
 if __name__ == "__main__":

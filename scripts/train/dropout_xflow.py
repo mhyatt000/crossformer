@@ -21,15 +21,21 @@ Use scripts/train/sweep_dropout.py to iterate all 16 on/off combinations.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import tyro
 
+from crossformer.cn.base import default
 from crossformer.cn.dataset.mix import DataSource
 from crossformer.data.arec.arec import ArrayRecordBuilder
+from crossformer.utils.callbacks.rast import RastConfig
 from scripts.train import xflow
 from scripts.train.xflow import _resolve_version
 from scripts.train.xflow import Config as XFlowConfig
+
+_EXTR = Path("~/data/extr/cam").expanduser()
+_CAMS = (_EXTR / "over/HT.npz", _EXTR / "side/HT.npz", _EXTR / "low/HT.npz")
 
 # -- dropout primitives -------------------------------------------------------
 
@@ -118,6 +124,36 @@ def image_view_drop(
     return out
 
 
+def image_key_shuffle(obs: dict, rng: np.random.Generator, prob: float) -> dict:
+    """Per sample, permute which view occupies each image_* key slot.
+
+    Image contents are untouched; only the mapping from view -> key is shuffled.
+    pad_mask_dict entries are permuted to track their associated view.
+    """
+    ikeys = _image_keys(obs)
+    if prob <= 0.0 or len(ikeys) < 2:
+        return obs
+    b = obs[ikeys[0]].shape[0]
+    apply = rng.random((b,)) < prob
+    if not apply.any():
+        return obs
+    out = dict(obs)
+    pmd = dict(obs.get("pad_mask_dict", {}))
+    srcs = {k: np.asarray(out[k]).copy() for k in ikeys}
+    msrcs = {k: (np.asarray(pmd[k], dtype=bool).copy() if k in pmd else None) for k in ikeys}
+    for bi in np.flatnonzero(apply):
+        perm = rng.permutation(len(ikeys))
+        for i, k in enumerate(ikeys):
+            src_k = ikeys[int(perm[i])]
+            out[k][bi] = srcs[src_k][bi]
+            if msrcs[src_k] is not None or msrcs[k] is not None:
+                if k not in pmd:
+                    pmd[k] = np.ones(out[k].shape[:2], bool)
+                pmd[k][bi] = msrcs[src_k][bi] if msrcs[src_k] is not None else np.ones(out[k].shape[1], bool)
+    out["pad_mask_dict"] = pmd
+    return out
+
+
 def proprio_sample_drop(obs: dict, rng: np.random.Generator, prob: float) -> dict:
     """Per sample, Bernoulli zero out ALL proprio_* tensors together."""
     pkeys = _proprio_keys(obs)
@@ -192,6 +228,9 @@ class Config(XFlowConfig):
     view_drop_prob: float = 0.0
     always_keep_key: str | None = None
 
+    # (2b) per-sample image-key shuffle (permute view -> key mapping)
+    image_key_shuffle_prob: float = 0.0
+
     # (3) per-sample full-proprio drop
     proprio_sample_drop_prob: float = 0.0
 
@@ -199,6 +238,8 @@ class Config(XFlowConfig):
     proprio_token_drop_prob: float = 0.0
 
     dropout_seed: int = 7
+
+    rast: RastConfig = default(RastConfig(cams=_CAMS))
 
 
 def _pin(name: str, version: str) -> None:
@@ -224,6 +265,7 @@ def main(cfg: Config):
     def flatten_with_dropout(obs, obs_keys):
         obs = patch_occlude(obs, rng, cfg.patch_prob, cfg.patch_count, cfg.patch_max_frac)
         obs = image_view_drop(obs, rng, cfg.view_drop_prob, cfg.always_keep_key)
+        obs = image_key_shuffle(obs, rng, cfg.image_key_shuffle_prob)
         obs = proprio_sample_drop(obs, rng, cfg.proprio_sample_drop_prob)
         obs = proprio_token_drop(obs, rng, cfg.proprio_token_drop_prob)
         return orig(obs, obs_keys)
