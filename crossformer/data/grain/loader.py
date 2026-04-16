@@ -37,7 +37,7 @@ from crossformer.data.grain.pipelines import (
 )
 from crossformer.data.grain.util.remap import _remap_lang, rekey
 from crossformer.utils.jax_utils import cpu
-from crossformer.utils.spec import diff, spec
+from crossformer.utils.spec import diff, ModuleSpec, spec
 from crossformer.utils.tree import drop, flat, unflat
 from crossformer.utils.type_checking import Image, jtyped, ShapeError, Windowed
 
@@ -157,6 +157,11 @@ def make_source_by_mix(
             .map(lambda x: x | {"info": jax.tree.map(lambda y: y[0], x["info"])})
         )
 
+    elif hasattr(mix, "restructure") and mix.restructure is not None:
+        base_fn = ModuleSpec.instantiate(mix.restructure)  # partial(restructure_fn)
+        r = partial(base_fn, name=mix.name, lang_key=None)
+        ds = grain.MapDataset.source(mix.source).seed(42).map(unpack_record).map(r)
+
     else:
         ds = (
             grain.MapDataset.source(mix.source)
@@ -196,6 +201,7 @@ def make_source_by_mix(
         source=ds,
         keys=keys,
         standardize_fn=standardize_fn,
+        restructure_fn=getattr(mix, "restructure", None),
         skip_norm_keys=cfg.data.transform.skip_norm_keys,
         force_recompute_dataset_statistics=cfg.data.recompute,
     )
