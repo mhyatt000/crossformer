@@ -12,7 +12,6 @@ from typing import Iterable, Mapping, Sequence
 import grain
 import jax
 import numpy as np
-from rich import print
 from tqdm import tqdm
 
 from crossformer.utils import databrief
@@ -178,6 +177,9 @@ def compute_dataset_statistics(
 
     log.info(f"checking cache for stats {save_dir}")
     cache_path = _cache_path(hash_dependencies, save_dir)
+    from rich import print
+
+    print(f"[bold]dataset stats path:[/bold] {cache_path}")
     if cache_path.exists() and not force_recompute:
         log.info("they were in the cache")
         with cache_path.open("r") as f:
