@@ -63,3 +63,65 @@ def _restructure_step_mano(x: dict, *, name: str, lang_key: str) -> dict:
 
     x = jax.tree.map(lambda y: np.array(y), x)  # ensure numpy arrays
     return x
+
+
+def restructure_xarm_dream(step: dict, *, name: str, lang_key: str | None = None) -> dict:
+    """Restructure single-step xarm_dream synthetic data.
+
+    Raw keys: image, state.{joints, gripper, kp2d, kp3d_world, kp3d_camera},
+              camera.{intr.{fx,fy,cx,cy,K}, extr.{c2w,w2c}}, info.*
+    """
+    state = step["state"]
+    cam = step["camera"]["intr"]
+    info = step.get("info", {})
+
+    # kp2d: zero invisible, scale to [0,1] by image dims (640x480)
+    kp2d = np.array(state["kp2d"], dtype=np.float32)  # (10, 2) copy for mutation
+    kp_vis = np.asarray(info.get("kp_visible", np.ones(10, dtype=bool)))  # (10,)
+    kp2d[~kp_vis] = 0.0
+    kp2d[:, 0] /= 640.0  # u
+    kp2d[:, 1] /= 480.0  # v
+    kp2d = kp2d.reshape(-1)  # (20,)
+
+    # cam_intr: min-max scale fx/fy to [0,1] with [450, 900] range
+    FX_MIN, FX_MAX = 450.0, 900.0
+    fx = np.clip((cam["fx"] - FX_MIN) / (FX_MAX - FX_MIN), 0.0, 1.0)
+    fy = np.clip((cam["fy"] - FX_MIN) / (FX_MAX - FX_MIN), 0.0, 1.0)
+    cx = cam["cx"] / 640.0  # scale by image width
+    cy = cam["cy"] / 480.0  # scale by image height
+    cam_intr = np.array([fx, fy, cx, cy], dtype=np.float32)
+
+    # horizon=1: action == proprio (model predicts current state)
+    action = {
+        "joints": np.asarray(state["joints"]),
+        "gripper": np.asarray(state["gripper"], dtype=np.float32).reshape(1),
+        "kp2d": kp2d,
+        "cam_intr": cam_intr,
+    }
+    proprio = action  # same values, (D,)
+    action = jax.tree.map(lambda x: x[None], action)  # (1, D) for horizon
+
+    sid = np.array(info.get("id", {}).get("step", 0)).reshape(-1)
+    eid = np.array(info.get("id", {}).get("episode", 0)).reshape(-1)
+    info["id"] = {"step": sid, "episode": eid}
+
+    lang = step.get("language", {})
+
+    return {
+        "observation": {
+            "image": {"primary": step["image"]},
+            "proprio": proprio,
+            "timestep": sid,
+        },
+        "task": {},
+        "action": action,
+        "dataset_name": str2jax(name),
+        "language.embedding": lang.get("embedding", np.zeros((512,), dtype=np.float32)),
+        "info": info | {"dataset_name": str2jax(name)},
+        "aux": {
+            "kp3d_world": np.asarray(state.get("kp3d_world", [])),
+            "kp3d_camera": np.asarray(state.get("kp3d_camera", [])),
+            "kp_visible": np.asarray(info.get("kp_visible", [])),
+            "cam_extr": np.asarray(step.get("camera", {}).get("extr", {}).get("w2c", [])),
+        },
+    }
