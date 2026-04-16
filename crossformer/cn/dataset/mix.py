@@ -14,6 +14,7 @@ from crossformer.cn.dataset.types import Head
 from crossformer.data.arec.arec import ArrayRecordBuilder
 from crossformer.data.oxe.oxe_dataset_mixes import DATASET_TO_HEAD
 from crossformer.embody import Embodiment, HUMAN_SINGLE, SINGLE, SINGLE_GRIP_CAL
+from crossformer.utils.spec import ModuleSpec
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ class Arec(DataSource):
 
     chunk: int = 20
     goal: bool = False
+    restructure: ModuleSpec | None = None
 
     builder: ArrayRecordBuilder = field(init=False)
     _cache: Path = field(init=False, default=Path("~/.cache/arrayrecords").expanduser().resolve())
@@ -101,7 +103,16 @@ class Arec(DataSource):
         chunk = getattr(config, "chunk", 50)
         head = DATASET_TO_HEAD.get(name)
         embodiment = getattr(config, "embodiment")
-        return Arec(name=name, version=version, head=head, embodiment=embodiment, branch=branch, chunk=chunk)
+        restructure = getattr(config, "restructure", None)
+        return Arec(
+            name=name,
+            version=version,
+            head=head,
+            embodiment=embodiment,
+            branch=branch,
+            chunk=chunk,
+            restructure=restructure,
+        )
 
     def create(self):
         pass
@@ -170,7 +181,15 @@ XGYM = [
 NEW = [
     Arec(name="xgym_sweep_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.5", branch="main"),
     Arec(name="sweep_mano", head=Head.MANO, embodiment=HUMAN_SINGLE, version="0.0.2", branch="to_step"),
-    Arec(name="xarm_dream_100k", head=Head.SINGLE, embodiment=SINGLE_GRIP_CAL, version="0.0.2", branch="main", chunk=1),
+    Arec(
+        name="xarm_dream_100k",
+        head=Head.SINGLE,
+        embodiment=SINGLE_GRIP_CAL,
+        version="0.0.2",
+        branch="main",
+        chunk=1,
+        restructure=ModuleSpec.create("crossformer.data.grain.restructure:restructure_xarm_dream"),
+    ),
 ]
 
 # multi source
