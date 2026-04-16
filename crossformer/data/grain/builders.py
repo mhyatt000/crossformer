@@ -80,6 +80,7 @@ class GrainDatasetConfig:
     force_recompute_dataset_statistics: bool = False
     action_normalization_mask: Sequence[bool] | None = None
     filter_fns: Sequence[ModuleSpec | Callable[[dict], bool]] = ()
+    restructure_fn: ModuleSpec | Callable | None = None
     skip_norm: bool = False
     skip_norm_keys: Sequence[str] = ()
     seed: int = 0
@@ -136,9 +137,16 @@ def build_trajectory_dataset(
 
     standardize = _resolve_callable(config.standardize_fn)
 
-    r = _restructure_step_mano if "k3ds" in ds[0]["action"] else _restructure_trajectory
-    restructure = ModuleSpec.create(r, name=config.name, lang_key=config.keys.lang)
-    ds = ds.map(ModuleSpec.instantiate(restructure))
+    if config.restructure_fn is not None:
+        pass  # early restructure already applied in make_source_by_mix
+    elif "action" in ds[0] and "k3ds" in ds[0]["action"]:
+        r = _restructure_step_mano
+        restructure = ModuleSpec.create(r, name=config.name, lang_key=config.keys.lang)
+        ds = ds.map(ModuleSpec.instantiate(restructure))
+    else:
+        r = _restructure_trajectory
+        restructure = ModuleSpec.create(r, name=config.name, lang_key=config.keys.lang)
+        ds = ds.map(ModuleSpec.instantiate(restructure))
     ds = ds.map(partial(note_bodypart, embodiment=embodiment))
 
     stats = _load_dataset_statistics(config, ds)
