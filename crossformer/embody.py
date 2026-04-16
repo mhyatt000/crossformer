@@ -55,9 +55,9 @@ DOF: dict[str, int] = {
     **{f"ftip_{i}": 155 + i for i in range(15)},
     # Hand finger joint 3D keypoints (3 non-tip joints per finger x 5 fingers x xyz)
     **{f"fjoint_{i}": 170 + i for i in range(45)},
-    # Robot 2D keypoints in pixel space (10 landmarks x [u, v])
+    # Robot 2D keypoints in pixel space (10 landmarks x [u, v, vis])
     **{
-        f"kp2d_{loc}_{ax}": 215 + i * 2 + j
+        f"kp2d_{loc}_{ax}": 215 + i * 3 + j
         for i, loc in enumerate(
             [
                 "base",
@@ -72,13 +72,13 @@ DOF: dict[str, int] = {
                 "tcp",
             ]
         )
-        for j, ax in enumerate(["u", "v"])
+        for j, ax in enumerate(["u", "v", "vis"])
     },
     # Camera intrinsics
-    "cam_fx": 235,
-    "cam_fy": 236,
-    "cam_cx": 237,
-    "cam_cy": 238,
+    "cam_fx": 245,
+    "cam_fy": 246,
+    "cam_cx": 247,
+    "cam_cy": 248,
 }
 
 VOCAB_SIZE = 512
@@ -275,10 +275,10 @@ KP2D_NAMES: tuple[str, ...] = (
 )
 KP2D_ARM10DOF = BodyPart(
     "kp2d_arm10dof",
-    tuple(f"kp2d_{n}_{ax}" for n in KP2D_NAMES for ax in ("u", "v")),
+    tuple(f"kp2d_{n}_{ax}" for n in KP2D_NAMES for ax in ("u", "v", "vis")),
     Frame.ABSOLUTE,
     PartKind.SPATIAL2D,
-    norm_mask=(False,) * 20,  # manually scaled in restructure
+    norm_mask=(False,) * 30,  # manually scaled in restructure; vis is 0/1
 )
 
 # Camera intrinsics (fx, fy, cx, cy)
