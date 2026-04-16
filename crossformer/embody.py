@@ -273,15 +273,22 @@ KP2D_NAMES: tuple[str, ...] = (
     "eef",
     "tcp",
 )
-KP2D_ARM_7DOF_WITH_BASE = BodyPart(
-    "kp2d_arm_7dof_with_base",
+KP2D_ARM10DOF = BodyPart(
+    "kp2d_arm10dof",
     tuple(f"kp2d_{n}_{ax}" for n in KP2D_NAMES for ax in ("u", "v")),
     Frame.ABSOLUTE,
     PartKind.SPATIAL2D,
+    norm_mask=(False,) * 20,  # manually scaled in restructure
 )
 
 # Camera intrinsics (fx, fy, cx, cy)
-CAM_INTR = BodyPart("cam_intr", ("cam_fx", "cam_fy", "cam_cx", "cam_cy"), Frame.ABSOLUTE, PartKind.INNATE)
+CAM_INTR = BodyPart(
+    "cam_intr",
+    ("cam_fx", "cam_fy", "cam_cx", "cam_cy"),
+    Frame.ABSOLUTE,
+    PartKind.INNATE,
+    norm_mask=(False, False, False, False),  # manually scaled in restructure
+)
 
 # Mobile base
 BASE_2D = BodyPart("base_2d", ("base_vx", "base_vy", "base_wz"), Frame.RELATIVE, PartKind.SPATIAL2D)
@@ -378,7 +385,9 @@ HUMAN_SINGLE = Embodiment("human_single", (CART_POS,))  #  HUMAN_TCP, KP_FINGERT
 NAV = Embodiment("nav", (BASE_2D,))
 XARM_RUKA = Embodiment("xarm_ruka", (ARM_7DOF, HAND_11))
 POSE_RUKA = Embodiment("pose_ruka", (CART_POSE, HAND_11))
-SINGLE_GRIP_CAL = Embodiment("single_grip_cal", (ARM_7DOF, GRIPPER, KP2D_ARM_7DOF_WITH_BASE, CAM_INTR))
+# horizon=1: model predicts current state, not future trajectory.
+# action == proprio by definition, so all body parts appear in both.
+SINGLE_GRIP_CAL = Embodiment("single_grip_cal", (ARM_7DOF, GRIPPER, KP2D_ARM10DOF, CAM_INTR))
 
 
 # ---------------------------------------------------------------------------
