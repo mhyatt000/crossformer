@@ -36,6 +36,7 @@ from crossformer.run.train_step import lookup_guide, make_train_step
 from crossformer.run.xflow_eval import extract_bundled_actions, flatten_obs, XFlowEvalCallbacks, XFlowEvalLoop
 from crossformer.utils.callbacks.rast import RastConfig
 from crossformer.utils.callbacks.save import SaveCallback
+from crossformer.utils.callbacks.synth_viz import SynthVizCallback
 from crossformer.utils.callbacks.val_mse import ValMSEConfig
 from crossformer.utils.callbacks.viz import (
     ChunkVizCallback,
@@ -94,6 +95,7 @@ class Config:
     mp: int = 8  # grain multiproc (for data loading)
     eval_frames: int = 64  # eval examples to poll for rast videos
     hist_every: int = 0  # histogram log interval
+    synth_viz_every: int = 0  # synth kp2d viz interval (0 = disabled)
     quit_after_model: bool = False  # stop after model creation for debugging
     viz: VizConfig = default(VizConfig())
     val_mse: ValMSEConfig = default(ValMSEConfig())
@@ -313,6 +315,7 @@ def main(cfg: Config):
     viz_cb = cfg.viz.create()
     rast_cb = cfg.rast.create()
     val_mse_cb = cfg.val_mse.create(stats=dataset.dataset_statistics, guide_keys=cfg.guide_keys)
+    synth_viz_cb = SynthVizCallback(stats=dataset.dataset_statistics) if cfg.synth_viz_every > 0 else None
     eval_loop = XFlowEvalLoop(
         loader=eval_dataset.dataset,
         obs_keys=obs_keys,
@@ -323,9 +326,11 @@ def main(cfg: Config):
             viz_cb=viz_cb,
             rast_cb=rast_cb,
             val_mse_cb=val_mse_cb,
+            synth_viz_cb=synth_viz_cb,
             wandb_log=cfg.wandb.log,
             hist_every=cfg.hist_every,
             viz_every=cfg.viz.every,
+            synth_viz_every=cfg.synth_viz_every,
             val_every=cfg.val_mse.every,
             eval_frames=cfg.eval_frames,
             use_guidance=cfg.use_guidance,

@@ -75,13 +75,15 @@ def restructure_xarm_dream(step: dict, *, name: str, lang_key: str | None = None
     cam = step["camera"]["intr"]
     info = step.get("info", {})
 
-    # kp2d: zero invisible, scale to [0,1] by image dims (640x480)
+    # kp2d: scale uv to [0,1] by image dims (640x480); append vis channel.
+    # OOF joints get a neutral sentinel uv (0.5, 0.5) — loss is masked via vis.
     kp2d = np.array(state["kp2d"], dtype=np.float32)  # (10, 2) copy for mutation
     kp_vis = np.asarray(info.get("kp_visible", np.ones(10, dtype=bool)))  # (10,)
-    kp2d[~kp_vis] = 0.0
     kp2d[:, 0] /= 640.0  # u
     kp2d[:, 1] /= 480.0  # v
-    kp2d = kp2d.reshape(-1)  # (20,)
+    kp2d[~kp_vis] = 0.5
+    vis = kp_vis.astype(np.float32)[:, None]  # (10, 1)
+    kp2d = np.concatenate([kp2d, vis], axis=1).reshape(-1)  # (30,) = u,v,vis per joint
 
     # cam_intr: min-max scale fx/fy to [0,1] with [450, 900] range
     FX_MIN, FX_MAX = 450.0, 900.0
@@ -101,6 +103,18 @@ def restructure_xarm_dream(step: dict, *, name: str, lang_key: str | None = None
     proprio = action  # same values, (D,)
     action = jax.tree.map(lambda x: x[None], action)  # (1, D) for horizon
 
+    # Per-DOF validity masks per body part. For kp2d, gate u/v by per-joint
+    # visibility; the vis DOF itself is always supervised.
+    kp2d_valid = np.stack([kp_vis, kp_vis, np.ones(10, dtype=bool)], axis=1).reshape(
+        -1
+    )  # (30,) matches u,v,vis DOF order
+    act_mask = {
+        "joints": np.ones(7, dtype=bool),
+        "gripper": np.ones(1, dtype=bool),
+        "kp2d": kp2d_valid,
+        "cam_intr": np.ones(4, dtype=bool),
+    }
+
     sid = np.array(info.get("id", {}).get("step", 0)).reshape(-1)
     eid = np.array(info.get("id", {}).get("episode", 0)).reshape(-1)
     info["id"] = {"step": sid, "episode": eid}
@@ -109,12 +123,13 @@ def restructure_xarm_dream(step: dict, *, name: str, lang_key: str | None = None
 
     return {
         "observation": {
-            "image": {"primary": step["image"]},
+            "image": {"low": step["image"]},
             "proprio": proprio,
             "timestep": sid,
         },
         "task": {},
         "action": action,
+        "mask": {"act": act_mask},
         "dataset_name": str2jax(name),
         "language.embedding": lang.get("embedding", np.zeros((512,), dtype=np.float32)),
         "info": info | {"dataset_name": str2jax(name)},
