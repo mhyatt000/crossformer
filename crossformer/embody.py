@@ -45,6 +45,7 @@ DOF: dict[str, int] = {
     **{f"mano_{i}": 34 + i for i in range(7)},
     **{f"k3d_{i}": 41 + i for i in range(84)},
     # Robot kinematic chain 3D keypoints (Cartesian position at each joint)
+    # WARN. we dont have j0 on our robot
     **{
         f"kp_{loc}_{ax}": 125 + i * 3 + j
         for i, loc in enumerate(["base", "j0", "j1", "j2", "j3", "j4", "j5", "j6", "grip_l", "grip_r"])
@@ -54,9 +55,33 @@ DOF: dict[str, int] = {
     **{f"ftip_{i}": 155 + i for i in range(15)},
     # Hand finger joint 3D keypoints (3 non-tip joints per finger x 5 fingers x xyz)
     **{f"fjoint_{i}": 170 + i for i in range(45)},
+    # Robot 2D keypoints in pixel space (10 landmarks x [u, v])
+    **{
+        f"kp2d_{loc}_{ax}": 215 + i * 2 + j
+        for i, loc in enumerate(
+            [
+                "base",
+                "joint1",
+                "joint2",
+                "joint3",
+                "joint4",
+                "joint5",
+                "joint6",
+                "joint7",
+                "eef",
+                "tcp",
+            ]
+        )
+        for j, ax in enumerate(["u", "v"])
+    },
+    # Camera intrinsics
+    "cam_fx": 235,
+    "cam_fy": 236,
+    "cam_cx": 237,
+    "cam_cy": 238,
 }
 
-VOCAB_SIZE = 256
+VOCAB_SIZE = 512
 
 
 def ids(*names: str) -> tuple[int, ...]:
@@ -235,6 +260,29 @@ KP_FINGER_JOINTS = BodyPart(
     "kp_finger_joints", tuple(f"fjoint_{i}" for i in range(45)), Frame.ABSOLUTE, PartKind.SPATIAL3D
 )
 
+# Robot 2D keypoints (10 landmarks x [u, v] = 20 DOFs)
+KP2D_NAMES: tuple[str, ...] = (
+    "base",
+    "joint1",
+    "joint2",
+    "joint3",
+    "joint4",
+    "joint5",
+    "joint6",
+    "joint7",
+    "eef",
+    "tcp",
+)
+KP2D_ARM_7DOF_WITH_BASE = BodyPart(
+    "kp2d_arm_7dof_with_base",
+    tuple(f"kp2d_{n}_{ax}" for n in KP2D_NAMES for ax in ("u", "v")),
+    Frame.ABSOLUTE,
+    PartKind.SPATIAL2D,
+)
+
+# Camera intrinsics (fx, fy, cx, cy)
+CAM_INTR = BodyPart("cam_intr", ("cam_fx", "cam_fy", "cam_cx", "cam_cy"), Frame.ABSOLUTE, PartKind.INNATE)
+
 # Mobile base
 BASE_2D = BodyPart("base_2d", ("base_vx", "base_vy", "base_wz"), Frame.RELATIVE, PartKind.SPATIAL2D)
 
@@ -330,6 +378,7 @@ HUMAN_SINGLE = Embodiment("human_single", (CART_POS,))  #  HUMAN_TCP, KP_FINGERT
 NAV = Embodiment("nav", (BASE_2D,))
 XARM_RUKA = Embodiment("xarm_ruka", (ARM_7DOF, HAND_11))
 POSE_RUKA = Embodiment("pose_ruka", (CART_POSE, HAND_11))
+SINGLE_GRIP_CAL = Embodiment("single_grip_cal", (ARM_7DOF, GRIPPER, KP2D_ARM_7DOF_WITH_BASE, CAM_INTR))
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +407,7 @@ class Dataset:
     images: ImageObs = field(default_factory=ImageObs)
     proprio: ProprioObs | None = None
     state_keys: tuple[str, ...] = ()
+    aux_keys: tuple[str, ...] = ()  # loaded but not fed to model (supervision, viz)
 
     weight: float = 1.0
     version: str | None = None
@@ -454,6 +504,9 @@ class DataMix:
 _XGYM_IMG = ImageObs(primary="worm", side="side", left_wrist="wrist")
 _XGYM_PROPRIO = ProprioObs(key="proprio", dim=8)
 
+_XARM_DREAM_IMG = ImageObs(primary="image")
+_XARM_DREAM_PROPRIO = ProprioObs(key="proprio", dim=8)  # joints(7) + gripper(1)
+
 xgym_lift = Dataset("xgym_lift_single", SINGLE, SourceType.TFDS, images=_XGYM_IMG, proprio=_XGYM_PROPRIO)
 xgym_duck = Dataset("xgym_duck_single", SINGLE, SourceType.TFDS, images=_XGYM_IMG, proprio=_XGYM_PROPRIO)
 xgym_stack = Dataset("xgym_stack_single", SINGLE, SourceType.TFDS, images=_XGYM_IMG, proprio=_XGYM_PROPRIO)
@@ -480,6 +533,21 @@ sweep_mano = Dataset(
     state_keys=_MANO_STATE,
     version="0.0.2",
     branch="to_step",
+)
+
+_XARM_DREAM_STATE = ("cam_extr",)
+_XARM_DREAM_AUX = ("kp3d", "kp_vis")
+
+xarm_dream = Dataset(
+    "xarm_dream_100k",
+    SINGLE_GRIP_CAL,
+    SourceType.AREC,
+    images=_XARM_DREAM_IMG,
+    proprio=_XARM_DREAM_PROPRIO,
+    state_keys=_XARM_DREAM_STATE,
+    aux_keys=_XARM_DREAM_AUX,
+    version="0.0.1",
+    branch="main",
 )
 
 # ---------------------------------------------------------------------------
