@@ -54,6 +54,7 @@ def build_action_block(
     modes: list[int],
     order: list[int],
     max_a: int,
+    valid_masks: list[np.ndarray | None] | None = None,
 ) -> dict[str, np.ndarray]:
     """Build act.base, act.id, mask.act from body parts in random order.
 
@@ -63,6 +64,8 @@ def build_action_block(
         modes: per-part INCLUDE/MASK from sample_modes.
         order: permutation indices for body part ordering.
         max_a: max action dim. pad width
+        valid_masks: optional per-part per-DOF validity, each (D_i,) bool or None.
+            ANDed into mask.act for INCLUDEd parts. None entry = all valid.
 
     Returns:
         dict with act.base (H, max_a) float32,
@@ -70,10 +73,14 @@ def build_action_block(
                   mask.act (max_a,)  bool.
     """
     assert len(parts) == len(actions) == len(modes) == len(order)
+    if valid_masks is None:
+        valid_masks = [None] * len(parts)
+    assert len(valid_masks) == len(parts)
     H = actions[0].shape[0]
 
     act_chunks: list[np.ndarray] = []
     id_chunks: list[np.ndarray] = []
+    valid_chunks: list[np.ndarray] = []
 
     for idx in order:
         part, act, mode = parts[idx], actions[idx], modes[idx]
@@ -83,21 +90,31 @@ def build_action_block(
         if mode == MASK:
             act_chunks.append(np.zeros((H, D), dtype=np.float32))
             id_chunks.append(np.full(D, MASK_DOF, dtype=np.int32))
+            valid_chunks.append(np.zeros(D, dtype=bool))
         else:  # INCLUDE
             act_chunks.append(act.astype(np.float32))
             id_chunks.append(np.array(part.dof_ids, dtype=np.int32))
+            vm = valid_masks[idx]
+            if vm is None:
+                valid_chunks.append(np.ones(D, dtype=bool))
+            else:
+                vm = np.asarray(vm, dtype=bool)
+                assert vm.shape == (D,), f"{part.name}: valid_mask {vm.shape} != ({D},)"
+                valid_chunks.append(vm)
 
     used = sum(p.action_dim for p in parts)
     pad_d = max_a - used
 
     act_base = np.concatenate(act_chunks, axis=-1)  # (H, used)
     act_id = np.concatenate(id_chunks)  # (used,)
+    valid = np.concatenate(valid_chunks)  # (used,)
 
     if pad_d > 0:
         act_base = np.pad(act_base, ((0, 0), (0, pad_d)))
         act_id = np.pad(act_id, (0, pad_d), constant_values=MASK_DOF)
+        valid = np.pad(valid, (0, pad_d))
 
-    mask_act = act_id != MASK_DOF
+    mask_act = (act_id != MASK_DOF) & valid
 
     return {
         "act.base": act_base,
@@ -191,6 +208,7 @@ def build_embodiment_action(
     mask_prob: float = 0.10,
     shuffle_slot: bool = True,
     key_map: dict[str, str] | None = None,
+    valid_mask_dict: dict[str, np.ndarray] | None = None,
 ) -> dict[str, np.ndarray]:
     """End-to-end: extract actions, sample modes, shuffle order, build block.
 
@@ -203,6 +221,9 @@ def build_embodiment_action(
         mask_prob: probability of masking each body part (default 0.25).
         shuffle_slot: whether to randomly permute body-part slot order.
         key_map: optional override for body-part-name → action-dict-key.
+        valid_mask_dict: optional per-action-key per-DOF validity masks, shape
+            (D_part,) bool. Keys align with action_dict keys. Missing keys =
+            fully valid.
 
     Returns:
         {"act.base": (H, max_a), "act.id": (max_a,), "mask.act": (max_a,)}.
@@ -211,7 +232,11 @@ def build_embodiment_action(
     actions = extract_part_actions(action_dict, embodiment, key_map)
     modes = sample_modes(len(parts), rng, mask_prob)
     order = rng.permutation(len(parts)).tolist() if shuffle_slot else list(range(len(parts)))
-    return build_action_block(parts, actions, modes, order, max_a)
+    valid_masks: list[np.ndarray | None] | None = None
+    if valid_mask_dict is not None:
+        km = key_map or PART_TO_ACTION_KEY
+        valid_masks = [valid_mask_dict.get(km.get(p.name, ""), None) for p in parts]
+    return build_action_block(parts, actions, modes, order, max_a, valid_masks)
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +276,9 @@ def embody_transform(
     """Grain .map() transform: adds act.base, act.id, act.embody, mask.act."""
     rng = np.random.default_rng()
     sample = note_bodypart(sample, embodiment=embodiment)
+    # Consume per-part validity masks from restructure, if present.
+    # Pop to avoid flatten/unflat collision with the top-level "mask.act" key.
+    valid_mask_dict = sample.get("mask", {}).pop("act", None)
     block = build_embodiment_action(
         sample["action"],
         embodiment,
@@ -258,6 +286,7 @@ def embody_transform(
         rng,
         mask_prob,
         shuffle_slot=shuffle_slot,
+        valid_mask_dict=valid_mask_dict,
     )
     block["act.embody"] = _encode_name(embodiment.name)
     sample.update(block)
