@@ -12,9 +12,8 @@ import tyro
 from crossformer.cn.base import CN
 from crossformer.cn.dataset.types import Head
 from crossformer.data.arec.arec import ArrayRecordBuilder
-from crossformer.data.oxe.oxe_dataset_configs import OXE_DATASET_CONFIGS
-from crossformer.data.oxe.oxe_dataset_mixes import DATASET_TO_HEAD, HEAD_TO_DATASET
-from crossformer.embody import Embodiment, HUMAN_SINGLE, SINGLE
+from crossformer.data.oxe.oxe_dataset_mixes import DATASET_TO_HEAD
+from crossformer.embody import Embodiment, HUMAN_SINGLE, SINGLE, SINGLE_GRIP_CAL
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +21,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class DataSource(CN):
     REGISTRY: ClassVar[dict[str, DataSource]] = {}
+    EMBODIMENT_TO_DS: ClassVar[dict[str, list[str]]] = {}
 
     name: str = tyro.MISSING
     head: Head = tyro.MISSING  # which head to associate with this dataset. soon to be deprecated
@@ -29,13 +29,11 @@ class DataSource(CN):
 
     def _register(self):
         self.REGISTRY[self.name] = self
+        if isinstance(self.embodiment, Embodiment):
+            self.EMBODIMENT_TO_DS.setdefault(self.embodiment.name, []).append(self.name)
 
     def __post_init__(self):
         self._register()
-        members = {dataset for datasets in HEAD_TO_DATASET.values() for dataset in datasets}
-        assert self.name in members, f"{self.name} missing from HEAD_TO_DATASET"
-        assert self.name in OXE_DATASET_CONFIGS, f"{self.name} missing OXE config"
-        # assert ( self.name in OXE_STANDARDIZATION_TRANSFORMS), f"{self.name} missing OXE standardization"
 
     def flatten(self):
         return [(self.name, 1.0)]
@@ -172,6 +170,7 @@ XGYM = [
 NEW = [
     Arec(name="xgym_sweep_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.5", branch="main"),
     Arec(name="sweep_mano", head=Head.MANO, embodiment=HUMAN_SINGLE, version="0.0.2", branch="to_step"),
+    Arec(name="xarm_dream_100k", head=Head.SINGLE, embodiment=SINGLE_GRIP_CAL, version="0.0.2", branch="main", chunk=1),
 ]
 
 # multi source

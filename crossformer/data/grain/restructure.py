@@ -43,6 +43,8 @@ def _restructure_trajectory(
 
 
 def _restructure_step_mano(x: dict, *, name: str, lang_key: str) -> dict:
+    # PATCH from <0.5.5
+    lang_key = "language"
     task = {}
     task[lang_key] = x.pop(lang_key)  # simple
     x["task"] = task
