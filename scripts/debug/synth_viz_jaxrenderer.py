@@ -1,7 +1,8 @@
-"""Standalone synth viz using jaxrenderer (differentiable JAX rasterizer).
+"""Standalone synth viz using softras (pure-JAX silhouette rasterizer).
 
-Mirrors scripts/debug/test_synth_viz.py but swaps nvdiffrast for
-https://github.com/JoeyTeng/jaxrenderer. Saves outputs to /tmp/synth_viz_jax/.
+Renders a URDF robot silhouette with a SoftRas-style pure-JAX rasterizer.
+Fully differentiable; a final block sanity-checks grad flow from the mask
+back to clip-space vertices using `jax.grad`.
 
 Usage:
     uv run scripts/debug/synth_viz_jaxrenderer.py
@@ -29,17 +30,10 @@ import json
 from pathlib import Path
 
 import cv2
+import jax
 import jax.numpy as jnp
 import numpy as np
 from PIL import Image
-from renderer import (
-    Camera,
-    LightParameters,
-    merge_objects,
-    Model,
-    Renderer,
-    Scene,
-)
 from rich import print
 import tyro
 
@@ -50,6 +44,7 @@ from crossformer.utils.callbacks.synth_viz import (
     fk_keypoints,
     solve_pnp,
 )
+from crossformer.utils.softras import silhouette
 
 DATA_DIR = Path("robot_vga_100k")
 OUT_DIR = Path("/tmp/synth_viz_jax")
@@ -67,10 +62,14 @@ class Config:
     view: int = 1000
     noise: float = 0.0
     out: Path = OUT_DIR
+    sigma: float | None = None  # None -> 1 pixel in NDC (2 / width)
+    chunk: int = 32
+    height: int = 480  # render / display height; intrinsics are rescaled to match
+    width: int = 640  # render / display width
 
 
 def _projection_from_intrinsics(K: np.ndarray, W: int, H: int, znear: float = 0.01, zfar: float = 10.0) -> np.ndarray:
-    """OpenGL projection matrix built from OpenCV intrinsics."""
+    """OpenGL projection built from OpenCV intrinsics. y=+1 is the top row."""
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
     P = np.zeros((4, 4), dtype=np.float32)
     P[0, 0] = 2.0 * fx / W
@@ -83,16 +82,14 @@ def _projection_from_intrinsics(K: np.ndarray, W: int, H: int, znear: float = 0.
     return P
 
 
-def _viewport_matrix(W: int, H: int, depth: float = 1.0) -> np.ndarray:
-    """Map clip-space [-1, 1]^3 onto screen [0, W] x [0, H] x [0, depth]."""
-    V = np.eye(4, dtype=np.float32)
-    V[0, 0] = W / 2
-    V[1, 1] = H / 2
-    V[2, 2] = depth / 2
-    V[0, 3] = W / 2
-    V[1, 3] = H / 2
-    V[2, 3] = depth / 2
-    return V
+def _world_to_clip(verts_world: np.ndarray, w2c: np.ndarray, K: np.ndarray, W: int, H: int) -> np.ndarray:
+    """(V, 3) world -> (V, 4) OpenGL clip. diag(1,-1,-1,1) converts OpenCV camera."""
+    flip = np.diag([1.0, -1.0, -1.0, 1.0]).astype(np.float32)
+    view = flip @ w2c.astype(np.float32)
+    P = _projection_from_intrinsics(K, W, H)
+    mvp = (P @ view).astype(np.float32)
+    v_h = np.concatenate([verts_world, np.ones((len(verts_world), 1), dtype=np.float32)], axis=1)
+    return (v_h @ mvp.T).astype(np.float32)
 
 
 def _posed_verts_cartesian(robot: _RobotMesh, joints_rad: np.ndarray) -> np.ndarray:
@@ -102,63 +99,22 @@ def _posed_verts_cartesian(robot: _RobotMesh, joints_rad: np.ndarray) -> np.ndar
     return np.asarray(verts_h[0, :, :3], dtype=np.float32)
 
 
-def rasterize_robot_jr(
+def rasterize_robot_softras(
     robot: _RobotMesh,
     joints_rad: np.ndarray,
     w2c: np.ndarray,
     K: np.ndarray,
     W: int,
     H: int,
-) -> np.ndarray:
-    """Render robot silhouette with jaxrenderer. Returns (H, W) float mask in [0, 1]."""
-    verts = _posed_verts_cartesian(robot, joints_rad)
-    faces = robot.faces.astype(np.int32)
-
-    norms = np.zeros_like(verts)
-    norms[:, 2] = 1.0
-    uvs = np.zeros((verts.shape[0], 2), dtype=np.float32)
-    diffuse = np.full((2, 2, 3), ROBOT_COLOR, dtype=np.float32)
-
-    model = Model.create(
-        verts=jnp.asarray(verts, dtype=jnp.float32),
-        norms=jnp.asarray(norms, dtype=jnp.float32),
-        uvs=jnp.asarray(uvs, dtype=jnp.float32),
-        faces=jnp.asarray(faces, dtype=jnp.int32),
-        diffuse_map=jnp.asarray(diffuse, dtype=jnp.float32),
-    )
-
-    flip = np.diag([1.0, -1.0, -1.0, 1.0]).astype(np.float32)
-    view = (flip @ w2c).astype(np.float32)
-    P = _projection_from_intrinsics(K, W, H)
-    VP = _viewport_matrix(W, H, 1.0)
-
-    camera = Camera.create(
-        view=jnp.asarray(view),
-        projection=jnp.asarray(P),
-        viewport=jnp.asarray(VP),
-    )
-
-    scene = Scene()
-    scene, mid = scene.add_model(model)
-    scene, oid = scene.add_object_instance(mid)
-    merged = merge_objects([scene.objects[oid]])
-
-    buffers = Renderer.create_buffers(
-        W,
-        H,
-        colour_default=jnp.array([0.0, 0.0, 0.0], dtype=jnp.float32),
-        zbuffer_default=jnp.array(1.0, dtype=jnp.float32),
-    )
-    out = Renderer.render(
-        model=merged,
-        light=LightParameters(),
-        camera=camera,
-        buffers=buffers,
-    )
-
-    zbuf = np.asarray(out.zbuffer)  # (W, H), origin at bottom-left
-    mask = (zbuf < 1.0 - 1e-6).astype(np.float32)
-    return mask.T[::-1, :]
+    sigma: float,
+    chunk: int,
+) -> tuple[np.ndarray, jax.Array, jax.Array]:
+    """Returns (mask_np, clip_jax, tris_jax). clip is kept around for grad check."""
+    verts3 = _posed_verts_cartesian(robot, joints_rad)
+    tris = jnp.asarray(robot.faces.astype(np.int32))
+    clip = jnp.asarray(_world_to_clip(verts3, w2c, K, W, H))
+    mask = silhouette(clip, tris, H, W, sigma=sigma, chunk=chunk)
+    return np.asarray(mask), clip, tris
 
 
 def composite_robot(img: np.ndarray, mask: np.ndarray, alpha: float = ROBOT_ALPHA) -> np.ndarray:
@@ -200,8 +156,20 @@ def _draw_kp2d(
     return img
 
 
+def _scale_intrinsics(K: np.ndarray, src_w: int, src_h: int, dst_w: int, dst_h: int) -> np.ndarray:
+    sx, sy = dst_w / src_w, dst_h / src_h
+    K2 = K.astype(np.float64, copy=True)
+    K2[0, 0] *= sx  # fx
+    K2[0, 2] *= sx  # cx
+    K2[1, 1] *= sy  # fy
+    K2[1, 2] *= sy  # cy
+    return K2
+
+
 def main(cfg: Config):
     cfg.out.mkdir(parents=True, exist_ok=True)
+    SRC_W, SRC_H = IMG_W, IMG_H  # source image + intrinsics resolution
+    DST_W, DST_H = cfg.width, cfg.height  # target render / display resolution
 
     json_path = DATA_DIR / f"view_{cfg.view}.json"
     img_path = DATA_DIR / f"view_{cfg.view}.png"
@@ -211,13 +179,14 @@ def main(cfg: Config):
     with open(json_path) as f:
         meta = json.load(f)
     img = np.array(Image.open(img_path))
-    print(f"[bold]image:[/] {img_path} shape={img.shape}")
+    print(f"[bold]image:[/] {img_path} shape={img.shape}  target=({DST_H}, {DST_W})")
 
+    # Keypoints stored in normalized [0, 1] so they survive resize.
     kp2d_gt = np.zeros((10, 2), dtype=np.float32)
     for i, kp in enumerate(meta["keypoints"][:10]):
         if kp["visible"]:
-            kp2d_gt[i, 0] = kp["pixel_xy"][0] / 640.0
-            kp2d_gt[i, 1] = kp["pixel_xy"][1] / 480.0
+            kp2d_gt[i, 0] = kp["pixel_xy"][0] / SRC_W
+            kp2d_gt[i, 1] = kp["pixel_xy"][1] / SRC_H
 
     joints_deg = np.array([meta["joints"][f"joint{i}"] for i in range(1, 8)], dtype=np.float32)
     cam = meta["camera"]["intrinsics"]
@@ -229,10 +198,11 @@ def main(cfg: Config):
 
     robot = _RobotMesh(Path("xarm7_standalone.urdf"), Path("assets"))
 
+    # PnP in source-resolution pixel coords with source K.
     pts_3d = fk_keypoints(joints_rad, robot)
     pts_2d_px = kp2d_gt.copy()
-    pts_2d_px[:, 0] *= IMG_W
-    pts_2d_px[:, 1] *= IMG_H
+    pts_2d_px[:, 0] *= SRC_W
+    pts_2d_px[:, 1] *= SRC_H
     w2c = solve_pnp(pts_3d, pts_2d_px, K)
     assert w2c is not None, "PnP failed"
 
@@ -242,25 +212,43 @@ def main(cfg: Config):
     rng = np.random.default_rng(42)
     pred_kp2d = kp2d_gt + rng.normal(0, cfg.noise, kp2d_gt.shape).astype(np.float32) if cfg.noise > 0 else kp2d_gt
 
-    print("[bold]rasterizing with jaxrenderer...[/]")
-    mask = rasterize_robot_jr(robot, joints_rad, w2c, K, IMG_W, IMG_H)
-    print(f"[bold]mask:[/] shape={mask.shape} nonzero={np.count_nonzero(mask)}")
+    # Rescale intrinsics so the projection matches the target resolution.
+    K_render = _scale_intrinsics(K, SRC_W, SRC_H, DST_W, DST_H)
 
-    Image.fromarray((mask * 255).astype(np.uint8)).save(cfg.out / "mask.png")
+    sigma = cfg.sigma if cfg.sigma is not None else 2.0 / DST_W
+    print(
+        f"[bold]rasterizing with softras[/] ({DST_H}x{DST_W}, sigma={sigma:.3e} = {sigma * DST_W / 2:.2f}px, chunk={cfg.chunk})..."
+    )
+    mask, clip, tris = rasterize_robot_softras(robot, joints_rad, w2c, K_render, DST_W, DST_H, sigma, cfg.chunk)
+    print(f"[bold]mask:[/] shape={mask.shape} nonzero(>0.01)={int((mask > 0.01).sum())} max={float(mask.max()):.3f}")
+
+    Image.fromarray((np.clip(mask, 0, 1) * 255).astype(np.uint8)).save(cfg.out / "mask.png")
     print(f"  saved {cfg.out / 'mask.png'}")
 
     img_rgb = img[..., :3] if img.shape[-1] == 4 else img
-    img_resized = np.array(Image.fromarray(img_rgb).resize((IMG_W, IMG_H)))
+    img_resized = np.array(Image.fromarray(img_rgb).resize((DST_W, DST_H)))
 
     comp = composite_robot(img_resized, mask)
     Image.fromarray(comp).save(cfg.out / "composite.png")
     print(f"  saved {cfg.out / 'composite.png'}")
 
-    full = _draw_kp2d(comp.copy(), kp2d_gt, IMG_W, IMG_H, GT_COLOR, 4, 2, label=True, skeleton=True)
+    full = _draw_kp2d(comp.copy(), kp2d_gt, DST_W, DST_H, GT_COLOR, 4, 2, label=True, skeleton=True)
     if cfg.noise > 0:
-        full = _draw_kp2d(full, pred_kp2d, IMG_W, IMG_H, PRED_COLOR, 5, 1, label=False, skeleton=True)
+        full = _draw_kp2d(full, pred_kp2d, DST_W, DST_H, PRED_COLOR, 5, 1, label=False, skeleton=True)
     Image.fromarray(full).save(cfg.out / "full.png")
     print(f"  saved {cfg.out / 'full.png'}")
+
+    # ---- JAX-native gradient sanity check ----
+    print("[bold]grad check:[/] d(mask.sum()) / d(clip_verts)")
+
+    def loss(vc: jax.Array) -> jax.Array:
+        return silhouette(vc, tris, DST_H, DST_W, sigma=sigma, chunk=cfg.chunk).sum()
+
+    g = jax.grad(loss)(clip)
+    finite = bool(jnp.isfinite(g).all())
+    gnorm = float(jnp.linalg.norm(g))
+    nz = int((jnp.abs(g) > 1e-6).sum())
+    print(f"  shape={g.shape} finite={finite} norm={gnorm:.3e} nonzero={nz}/{g.size}")
 
     print(f"\n[bold green]done![/] outputs in {cfg.out}")
 

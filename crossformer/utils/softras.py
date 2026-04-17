@@ -16,35 +16,45 @@ import jax.numpy as jnp
 _EPS = 1e-8
 
 
-def _edge_sdist(p0: jax.Array, p1: jax.Array, px: jax.Array) -> jax.Array:
-    """Signed dist from each pixel px(H,W,2) to oriented line p0->p1.
-
-    Safe against zero-length edges (rsqrt with eps inside).
-    """
-    d = p1 - p0
-    inv_len = jax.lax.rsqrt((d * d).sum() + _EPS)
-    n = jnp.stack([-d[1], d[0]]) * inv_len
-    return jnp.einsum("hwi,i->hw", px - p0, n)
+def _point_to_segment_sq(px: jax.Array, a: jax.Array, b: jax.Array) -> jax.Array:
+    """Squared distance from pixels px(H,W,2) to segment a->b (unsigned)."""
+    ab = b - a
+    ab_sq = (ab * ab).sum() + _EPS
+    t = jnp.einsum("hwi,i->hw", px - a, ab) / ab_sq
+    t = jnp.clip(t, 0.0, 1.0)
+    closest = a + t[..., None] * ab
+    diff = px - closest
+    return (diff * diff).sum(axis=-1)
 
 
 def _tri_log_outside(tri: jax.Array, px: jax.Array, sigma: float) -> jax.Array:
     """log(1 - occupancy) per pixel for one triangle (3,2). Winding-agnostic.
 
-    Edge-on triangles (projected area ~= 0) are gated out so they contribute
-    no occupancy -- otherwise a zero-area tri would drop the mask to 0.5.
+    Occupancy = sigmoid(signed_dist / sigma) where signed_dist is positive
+    inside the triangle, negative outside. Distance is to the triangle as a
+    2D region (closest edge *segment*, not infinite line), so occupancy
+    decays with actual Euclidean distance from the mesh instead of leaking
+    along edge extensions.
     """
     a, b, c = tri[0], tri[1], tri[2]
     area2 = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
-    d1 = _edge_sdist(a, b, px)
-    d2 = _edge_sdist(b, c, px)
-    d3 = _edge_sdist(c, a, px)
-    dmin = jnp.minimum(jnp.minimum(d1, d2), d3)  # >0 inside a CCW tri
-    dmax = jnp.maximum(jnp.maximum(d1, d2), d3)
-    inside = jnp.maximum(dmin, -dmax)  # >0 inside either winding
-    # Area gate: saturates to 1 when |area| >> sigma^2, 0 when edge-on.
+
+    # Inside test via cross-product signs (no normalization; signs only).
+    c1 = (b[0] - a[0]) * (px[..., 1] - a[1]) - (b[1] - a[1]) * (px[..., 0] - a[0])
+    c2 = (c[0] - b[0]) * (px[..., 1] - b[1]) - (c[1] - b[1]) * (px[..., 0] - b[0])
+    c3 = (a[0] - c[0]) * (px[..., 1] - c[1]) - (a[1] - c[1]) * (px[..., 0] - c[0])
+    inside = ((c1 >= 0) & (c2 >= 0) & (c3 >= 0)) | ((c1 <= 0) & (c2 <= 0) & (c3 <= 0))
+
+    # Unsigned distance to triangle boundary via closest edge segment.
+    d_sq = jnp.minimum(
+        jnp.minimum(_point_to_segment_sq(px, a, b), _point_to_segment_sq(px, b, c)),
+        _point_to_segment_sq(px, c, a),
+    )
+    d = jnp.sqrt(d_sq + _EPS)
+    signed = jnp.where(inside, d, -d)
+
     gate = jnp.tanh(jnp.abs(area2) / (sigma * sigma + _EPS))
-    # log(1 - sigmoid(x)) = -softplus(x). Gate scales the log-outside.
-    return -jax.nn.softplus(inside / sigma) * gate
+    return -jax.nn.softplus(signed / sigma) * gate
 
 
 def silhouette(
@@ -82,6 +92,9 @@ def silhouette(
 
     per_tri = jax.vmap(_tri_log_outside, in_axes=(0, None, None))
 
+    # jax.checkpoint: backward rematerializes per-step activations instead of
+    # saving them for every step of the scan (O(steps) memory -> O(1)).
+    @jax.checkpoint
     def body(log_out, c):
         return log_out + jnp.sum(per_tri(c, px, sigma), axis=0), None
 
