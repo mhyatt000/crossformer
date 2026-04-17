@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
 import logging
+import os
 import resource
 from typing import Any
 
@@ -372,6 +373,10 @@ class GrainDataFactory:
 
         ds = ds.batch(cfg.data.loader.batch_size, drop_remainder=True)  # , batch_fn=batch_fn)
         if self.mp > 0:
+            # Workers spawn via multiprocessing and re-import JAX. Without these,
+            # each worker claims a CUDA context on GPU:0 and OOMs the parent's model.
+            os.environ["JAX_PLATFORMS"] = "cpu"
+            os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
             ds = ds.mp_prefetch(grain.MultiprocessingOptions(num_workers=self.mp, per_worker_buffer_size=8))
 
         batch = next(iter(ds))
