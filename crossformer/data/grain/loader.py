@@ -9,7 +9,6 @@ import logging
 import resource
 from typing import Any
 
-import cv2
 import grain
 from grain.experimental import ThreadPrefetchIterDataset
 import jax
@@ -39,7 +38,7 @@ from crossformer.data.grain.util.remap import _remap_lang, rekey
 from crossformer.utils.jax_utils import cpu
 from crossformer.utils.spec import diff, ModuleSpec, spec
 from crossformer.utils.tree import drop, flat, unflat
-from crossformer.utils.type_checking import Image, jtyped, ShapeError, Windowed
+from crossformer.utils.type_checking import jtyped
 
 log = logging.getLogger(__name__)
 
@@ -56,28 +55,8 @@ def center_crop(img, h, w):
     return img[y0 : y0 + h, x0 : x0 + w]
 
 
-def mix_precompatibility(x):
-    """ensure mixed datasets have same keys"""
-
-    # """
-    # GENERAL SHAPE and TYPE compatibility
-    def shape_check(item: Image | Windowed[Image]):
-        if item.ndim == 3:
-            return item
-        if len(item) == 1 and item.ndim == 4:
-            return item[0]
-        raise ShapeError(f"Expected image with shape {item.shape} to have 3 dims (H,W,C) or 4 dims (1,H,W,C)")
-
-    x["observation"]["image"] = jax.tree.map(shape_check, x["observation"]["image"])
-    # print(spec(x['observation']['image']))
-    # quit()
-
-    crop = partial(center_crop, h=480, w=480)
-    x["observation"]["image"] = jax.tree.map(crop, x["observation"]["image"])
-    x["observation"]["image"] = jax.tree.map(
-        lambda img: np.array(cv2.resize(np.asarray(img), (224, 224))), x["observation"]["image"]
-    )
-    # """
+def mix_precompatibility(x, *, resize: int | tuple[int, int] | None = (224, 224)):
+    """ensure mixed datasets have same keys."""
 
     def _reshape_int(y):
         """reshape int arrays to (-1,)"""
@@ -215,6 +194,7 @@ def make_single_dataset(
     shuffle_buffer_size: int | None = None,
     drop_remainder: bool = True,
     seed: int = 0,
+    resize: int | tuple[int, int] | None = (224, 224),
 ) -> GrainDataLoader:
     """Builds a dataset of frames for a single dataset configuration."""
 
@@ -250,7 +230,7 @@ def make_single_dataset(
 
         ds = apply_trajectory_transforms(ds, seed=seed, config=config)  # , **asdict(tfconfig))
         ds = ds.map(drop_str)
-        ds = ds.map(mix_precompatibility)
+        ds = ds.map(partial(mix_precompatibility, resize=resize))
 
         def unsqueeze_img_horizon(x):
             # unsqueeze proprio horizon dim to 1
@@ -279,7 +259,11 @@ class GrainDataFactory:
     shuffle: bool = True
     mask_slot: bool = True  # mask body-part slots in embody_transform; disable for eval/debug
     shuffle_slot: bool = True  # shuffle body-part slot order in embody_transform; disable for eval/debug
-    imaug: bool = True  # apply augmax image augmentations (channel shuffle, random aspect, rotate)
+    imaug: bool = True  # apply augmax image augmentations (channel shuffle)
+    rotate: bool = True  # apply augmax.Rotate((-15, 15), p=0.3); independent of imaug
+    # final image size; controls both mix_precompatibility cv2.resize and augmax.Resize.
+    # None disables both stages (image stays at native size, no center_crop).
+    resize: int | tuple[int, int] | None = (64, 64)
 
     def source2ds(self, dconfig, cfg: cn.Train, dataset: Arec, max_a: int = 0) -> GrainDataLoader:
         ds, stats = make_single_dataset(
@@ -287,6 +271,7 @@ class GrainDataFactory:
             train=True,
             shuffle_buffer_size=1,
             seed=cfg.seed,
+            resize=self.resize,
         )
         if max_a > 0:
             embody_fn = partial(
@@ -354,6 +339,7 @@ class GrainDataFactory:
         log.debug("arec sources: %s", mix)
 
         tfconfig = make_tfconfig(cfg)
+        tfconfig.resize_frames_to = self.resize
         sources = [make_source_by_mix(m, cfg) for m in mix]
 
         # compute max action dim across all embodiments in the mix
@@ -406,7 +392,7 @@ class GrainDataFactory:
         # quick hack with keys
         dconfig = sources[0][1]
         dconfig.keys.image = list(batch["observation"]["image"].keys())
-        ds = do_frame_transforms(dconfig, tfconfig, ds, imaug=self.imaug)
+        ds = do_frame_transforms(dconfig, tfconfig, ds, imaug=self.imaug, rotate=self.rotate)
         ds = ds.map(compatibility)
 
         log.info("returning final dataset")

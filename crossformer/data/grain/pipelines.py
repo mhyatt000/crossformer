@@ -165,13 +165,13 @@ def apply_frame_transforms(
     return ds
 
 
-def do_frame_transforms(config, tfconfig, ds, *, imaug: bool = True):
+def do_frame_transforms(config, tfconfig, ds, *, imaug: bool = True, rotate: bool = True):
     # 3. do frame level transforms
     # 3.1. x decoding is already done
     # 3.2. resize frames if needed
     # 3.3. augmentations and dropout
     jd = partial(jax.jit, donate_argnums=0)
-    frame_transform_aug = jax.jit(get_frame_transform(config, tfconfig, imaug=imaug))
+    frame_transform_aug = jax.jit(get_frame_transform(config, tfconfig, imaug=imaug, rotate=rotate))
 
     def squeeze(x, dim):
         return jax.tree.map(lambda y: jnp.squeeze(y, axis=dim), x)
@@ -535,32 +535,35 @@ def get_frame_transform(
     tfconfig: TransformConfig,
     *,
     imaug: bool = True,
+    rotate: bool = True,
 ) -> Callable:
     re = tfconfig.resize_frames_to
-    re_wh: int = re[0] if isinstance(re, tuple) else re
 
+    chain_ops: list = []
+    if re is not None:
+        if isinstance(re, tuple):
+            h, w = re
+            chain_ops.append(augmax.Resize(width=w, height=h))
+        else:
+            chain_ops.append(augmax.Resize(re))
     if imaug:
-        chain = augmax.Chain(
-            augmax.Resize(re_wh),
-            augmax.ChannelShuffle(p=0.5),
-            # RandomAspect(x_range=(0.9, 1.1), y_range=(0.9, 1.1), p=0.5),
-            # augmax.RandomGrayscale(p= 0.5),
-            augmax.Rotate((-15, 15), p=0.3),
-            # augmax.ByteToFloat(),
-            # augmax.ChannelDrop(),
-            # augmax.Warp(strength= 5, coarseness= 32),
-            # augmax.Normalize(),
-            # augmax.Blur(),
-            # augmax.ChannelShuffle(),
-            # augmax.RandomBrightness((-1.0, 1.0), p= 0.5),
-            # augmax.RandomContrast(),
-            # augmax.RandomGamma(),
-            # augmax.RandomChannelGamma(),
-            # augmax.ColorJitter(),
-            # augmax.Solarization(),
-        )
-    else:
-        chain = augmax.Chain(augmax.Resize(re_wh))
+        chain_ops.append(augmax.ChannelShuffle(p=0.5))
+        # RandomAspect(x_range=(0.9, 1.1), y_range=(0.9, 1.1), p=0.5),
+        # augmax.RandomGrayscale(p= 0.5),
+        # augmax.ByteToFloat(),
+        # augmax.ChannelDrop(),
+        # augmax.Warp(strength= 5, coarseness= 32),
+        # augmax.Normalize(),
+        # augmax.Blur(),
+        # augmax.RandomBrightness((-1.0, 1.0), p= 0.5),
+        # augmax.RandomContrast(),
+        # augmax.RandomGamma(),
+        # augmax.RandomChannelGamma(),
+        # augmax.ColorJitter(),
+        # augmax.Solarization(),
+    if rotate:
+        chain_ops.append(augmax.Rotate((-15, 15), p=0.3))
+    chain = augmax.Chain(*chain_ops)
 
     v = jax.vmap
     # slots = [(c, k) for c in ("observation", "task") for k in config.keys.image]
