@@ -54,7 +54,7 @@ class Vision(CN):
 @dataclass
 class XFlow(CN):
     readout_name: str = "action"
-    readout_tokens: int = 4
+    readout_tokens: int = 4  # usually this is related to horizon size, but doesnt have to be
     max_dofs: int = 8
     max_horizon: int = 20
     head_channels: int = 256

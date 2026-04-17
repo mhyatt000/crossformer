@@ -129,7 +129,11 @@ class XFlowHead(nn.Module, ActionHead):
     base_std: float = 1.0
 
     # Pooling strategy for transformer outputs
-    pool_strategy: str = "mean"
+    pool_strategy: str = "pass"
+
+    # If True, cross-attend only to transformer_outputs[readout_key].
+    # If False, concat all transformer_outputs groups along the token axis.
+    readout_only: bool = False
 
     # Guidance
     use_guidance: bool = False
@@ -189,18 +193,28 @@ class XFlowHead(nn.Module, ActionHead):
     # ------------------------------------------------------------------
 
     def _embed(self, transformer_outputs: dict[str, TokenGroup], train: bool) -> Array:
-        """Pool transformer output tokens to (B, W, E)."""
-        token_group = transformer_outputs[self.readout_key]
+        """Return context embeddings as (B, W, E) pooled or (B, W, N, E) unpooled.
+
+        Selection:
+          readout_only=True  -> transformer_outputs[readout_key] only
+          readout_only=False -> concat all groups along the token axis
+
+        Pooling:
+          "pass"    -> (B, W, N, E) unpooled (K=N cross-attn tokens)
+          "mean"    -> (B, W, E) mean-reduced (K=1)
+          "use_map" -> (B, W, E) MAP-pooled (K=1)
+        """
+        if self.readout_only:
+            token_group = transformer_outputs[self.readout_key]
+        else:
+            token_group = TokenGroup.concatenate(list(transformer_outputs.values()))
         assert token_group.tokens.ndim == 4
         if self.pool_strategy == "use_map":
             return self.map_head(token_group, train=train)[:, :, 0]
         if self.pool_strategy == "mean":
             return token_group.tokens.mean(axis=-2)
         if self.pool_strategy == "pass":
-            # NOTE: broken — merges (W, N) so __call__ misinterprets dim 1 as W,
-            # causing shape mismatches with time_bw and the final rearrange.
-            t = token_group.tokens
-            return rearrange(t, "b w n e -> b (w n) e")
+            return token_group.tokens
         raise ValueError(f"{self.pool_strategy} not implemented!")
 
     def _build_queries(
@@ -277,7 +291,8 @@ class XFlowHead(nn.Module, ActionHead):
         # During init provide zero dummies
         if self.is_initializing():
             B = embeddings.shape[0]
-            W = embeddings.shape[1] if embeddings.ndim == 3 else 1
+            # embeddings is (B, W, E) for pooled or (B, W, N, E) for "pass".
+            W = embeddings.shape[1] if embeddings.ndim >= 3 else 1
             dof_ids = jnp.zeros((B, max_A), dtype=jnp.int32)
             chunk_steps = jnp.zeros((B, max_H), dtype=jnp.float32)
             slot_pos = jnp.zeros((B, max_A), dtype=jnp.float32)
