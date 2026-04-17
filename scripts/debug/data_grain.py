@@ -41,6 +41,8 @@ class Config:
 
 
 def main(cfg: Config) -> None:
+    if cfg.recompute:
+        cfg.data.recompute = True
     # create a 1D mesh with a single axis named "batch"
     mesh = Mesh(jax.devices(), axis_names="batch")
     # Our batches will be data-parallel sharded -- each device will get a slice of the batch

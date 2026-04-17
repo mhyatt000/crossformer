@@ -122,7 +122,9 @@ def main(cfg: Config) -> None:
             # assertions
             masked = ids == MASK_ID
             assert np.all(act_base[b, :, masked] == 0), f"batch {i} sample {b}: masked slots non-zero"
-            assert np.array_equal(mask_act[b], ids != MASK_ID), f"batch {i} sample {b}: mask.act mismatch"
+            # mask.act is a subset of non-pad slots: per-DOF validity (e.g. kp2d
+            # visibility) may gate off additional slots beyond pure padding.
+            assert np.all(mask_act[b] <= (ids != MASK_ID)), f"batch {i} sample {b}: mask.act mismatch"
 
         print(f"[green]batch {i}: all assertions passed[/green]")
 
