@@ -15,8 +15,9 @@ override-dependencies = [
     # "typeguard>=4.0.0", # compatibility with tensorflow-addons
     # "numpy", # compatibility with tf
     # "jax[cuda12]>=0.4.0", # compatibility with tf
-    "jaxlib>=0.5.3",
-    "jax[cuda12]>=0.5.3",
+    "jaxlib>=0.8,<0.9",
+    "jax[cuda12]>=0.8,<0.9",
+    "jax-dataclasses>=1.6.3",  # 1.6.2 uses removed jit kwarg `abstracted_axes`
     "jaxtyping>=0.3.4",
     "numpy>=2.0",
     "protobuf>=5.28.3",  # diffren pins <4 (stale workaround); jax path doesn't import protobuf
@@ -33,7 +34,7 @@ dependencies = [
     "chex>=0.1.85",
     "distrax==0.1.5",
     "einops>=0.6.1",
-    "flax>=0.7.5",
+    "flax>=0.12",
     "gym>=0.26",
     "imageio>=2.31.1",
     "ml_collections>=0.1.0",
@@ -43,7 +44,7 @@ dependencies = [
     "numpy>=1.26",
     "optax>=0.1.5",
     "orbax>=0.1.9",
-    "orbax-checkpoint==0.11.20",
+    "orbax-checkpoint>=0.11.30",
     "omegaconf>=2.3.0",
     "plotly>=5.16.1",
     "scipy>=1.12.0",
@@ -77,8 +78,8 @@ dependencies = [
     "pyright>=1.1.408",
     "beartype>=0.22.9",
     "structlog>=25.5.0",
-    "jax[cuda12]>=0.5.3",
-    "jaxlib>=0.5.3",
+    "jax[cuda12]>=0.8,<0.9",
+    "jaxlib>=0.8,<0.9",
     "dm-pix>=0.4.4",
     "pcax>=0.1.0",
     # "nvdiffrast",
