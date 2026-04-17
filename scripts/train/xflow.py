@@ -93,6 +93,10 @@ class Config:
 
     train_loader: Loader = default(Loader(use_grain=True))
     mp: int = 8  # grain multiproc (for data loading)
+    rotate: bool = True  # apply augmax.Rotate((-15, 15), p=0.3) in grain pipeline
+    resize: tuple[int, int] | None = (64, 64)  # final image size; None disables all resize stages
+    no_resize: bool = False  # override resize to None from CLI (tyro-friendly)
+    recompute: bool = False  # force recompute of cached dataset statistics
     eval_frames: int = 64  # eval examples to poll for rast videos
     hist_every: int = 0  # histogram log interval
     synth_viz_every: int = 0  # synth kp2d viz interval (0 = disabled)
@@ -133,12 +137,13 @@ def shard_batch(batch, mesh):
     return multihost_utils.host_local_array_to_global_array(batch, mesh, PartitionSpec("batch"))
 
 
-def make_data_cfg(mix: str, batch_size: int, loader: Loader) -> cn.Train:
+def make_data_cfg(mix: str, batch_size: int, loader: Loader, recompute: bool = False) -> cn.Train:
     """Build a Train config for a specific loader."""
     return cn.Train(
         data=cn.Dataset(
             mix=DataSourceE[mix],
             loader=replace(loader, global_batch_size=batch_size),
+            recompute=recompute,
         ),
         seed=42,
         verbosity=0,
@@ -174,7 +179,8 @@ def main(cfg: Config):
     from crossformer.data.grain.loader import _apply_fd_limit, GrainDataFactory
 
     _apply_fd_limit(512**2)
-    train_cfg = make_data_cfg(cfg.mix, cfg.batch_size, cfg.train_loader)
+    effective_resize = None if cfg.no_resize else cfg.resize
+    train_cfg = make_data_cfg(cfg.mix, cfg.batch_size, cfg.train_loader, recompute=cfg.recompute)
     eval_cfg = make_data_cfg(
         cfg.mix,
         cfg.batch_size,
@@ -186,8 +192,11 @@ def main(cfg: Config):
             threads_frame_transform=16,
             prefetch=8,
         ),
+        recompute=cfg.recompute,
     )
-    dataset = GrainDataFactory(mp=cfg.mp).make(train_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=True)
+    dataset = GrainDataFactory(mp=cfg.mp, rotate=cfg.rotate, resize=effective_resize).make(
+        train_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=True
+    )
     dsit = iter(dataset.dataset)
     example_batch = next(dsit)
     eval_dataset = GrainDataFactory(
@@ -196,6 +205,8 @@ def main(cfg: Config):
         mask_slot=False,
         shuffle_slot=False,
         imaug=False,
+        rotate=cfg.rotate,
+        resize=effective_resize,
     ).make(eval_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=False)
     print(spec(example_batch))
     inferred_image_keys, inferred_proprio_keys = infer_model_keys(example_batch["observation"])
@@ -315,7 +326,10 @@ def main(cfg: Config):
     viz_cb = cfg.viz.create()
     rast_cb = cfg.rast.create()
     val_mse_cb = cfg.val_mse.create(stats=dataset.dataset_statistics, guide_keys=cfg.guide_keys)
-    synth_viz_cb = SynthVizCallback(stats=dataset.dataset_statistics) if cfg.synth_viz_every > 0 else None
+    # SynthVizCallback needs the raw DatasetStatistics (has .unnormalize);
+    # the dataset_statistics property returns a JSON-serialized form used by
+    # other callbacks.
+    synth_viz_cb = SynthVizCallback(stats=dataset.statistics) if cfg.synth_viz_every > 0 else None
     eval_loop = XFlowEvalLoop(
         loader=eval_dataset.dataset,
         obs_keys=obs_keys,
