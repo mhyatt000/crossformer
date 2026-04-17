@@ -143,6 +143,7 @@ PART_TO_ACTION_KEY: dict[str, str] = {
     "base_2d": "base",
     "kp2d_arm10dof": "kp2d",
     "cam_intr": "cam_intr",
+    "cam_extr": "cam_extr",
 }
 
 

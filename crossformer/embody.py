@@ -79,6 +79,11 @@ DOF: dict[str, int] = {
     "cam_fy": 246,
     "cam_cx": 247,
     "cam_cy": 248,
+    # Camera extrinsics: translation + Zhou 6D rotation (first two columns of R)
+    "t_x": 249,
+    "t_y": 250,
+    "t_z": 251,
+    **{f"r6d_{i}": 252 + i for i in range(6)},
 }
 
 VOCAB_SIZE = 512
@@ -290,6 +295,17 @@ CAM_INTR = BodyPart(
     norm_mask=(False, False, False, False),  # manually scaled in restructure
 )
 
+# Camera extrinsics: world-to-camera translation + Zhou 6D rotation (first two
+# columns of the rotation matrix). Translation is normalized; 6D rotation is
+# not (it lives on a manifold — mean/std scaling would break orthogonality).
+CAM_EXTR = BodyPart(
+    "cam_extr",
+    ("t_x", "t_y", "t_z", *(f"r6d_{i}" for i in range(6))),
+    Frame.ABSOLUTE,
+    PartKind.SPATIAL3D,
+    norm_mask=(True, True, True, *((False,) * 6)),
+)
+
 # Mobile base
 BASE_2D = BodyPart("base_2d", ("base_vx", "base_vy", "base_wz"), Frame.RELATIVE, PartKind.SPATIAL2D)
 
@@ -387,7 +403,7 @@ XARM_RUKA = Embodiment("xarm_ruka", (ARM_7DOF, HAND_11))
 POSE_RUKA = Embodiment("pose_ruka", (CART_POSE, HAND_11))
 # horizon=1: model predicts current state, not future trajectory.
 # action == proprio by definition, so all body parts appear in both.
-SINGLE_GRIP_CAL = Embodiment("single_grip_cal", (ARM_7DOF, GRIPPER, KP2D_ARM10DOF, CAM_INTR))
+SINGLE_GRIP_CAL = Embodiment("single_grip_cal", (ARM_7DOF, GRIPPER, KP2D_ARM10DOF, CAM_INTR, CAM_EXTR))
 
 
 # ---------------------------------------------------------------------------

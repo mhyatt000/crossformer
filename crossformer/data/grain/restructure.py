@@ -93,12 +93,24 @@ def restructure_xarm_dream(step: dict, *, name: str, lang_key: str | None = None
     cy = cam["cy"] / 480.0  # scale by image height
     cam_intr = np.array([fx, fy, cx, cy], dtype=np.float32)
 
+    # cam_extr: (tx,ty,tz) + Zhou 6D rotation. Pipeline normalizes translation;
+    # 6D kept raw (lies on a manifold — mean/std would break orthogonality).
+    w2c = np.asarray(step["camera"]["extr"]["w2c"], dtype=np.float32)  # (4, 4)
+    t_xyz = w2c[:3, 3]  # (3,)
+    # Zhou et al. 2019 ("On the Continuity of Rotation Representations in Neural
+    # Networks") define the 6D rep as literally the first two columns of R.
+    # The third column is recoverable at inference via Gram-Schmidt.
+    R = w2c[:3, :3]
+    r6d = np.concatenate([R[:, 0], R[:, 1]], axis=0)  # (6,)
+    cam_extr = np.concatenate([t_xyz, r6d], axis=0).astype(np.float32)  # (9,)
+
     # horizon=1: action == proprio (model predicts current state)
     action = {
         "joints": np.asarray(state["joints"]),
         "gripper": np.asarray(state["gripper"], dtype=np.float32).reshape(1),
         "kp2d": kp2d,
         "cam_intr": cam_intr,
+        "cam_extr": cam_extr,
     }
     proprio = action  # same values, (D,)
     action = jax.tree.map(lambda x: x[None], action)  # (1, D) for horizon
@@ -113,6 +125,7 @@ def restructure_xarm_dream(step: dict, *, name: str, lang_key: str | None = None
         "gripper": np.ones(1, dtype=bool),
         "kp2d": kp2d_valid,
         "cam_intr": np.ones(4, dtype=bool),
+        "cam_extr": np.ones(9, dtype=bool),
     }
 
     sid = np.array(info.get("id", {}).get("step", 0)).reshape(-1)
