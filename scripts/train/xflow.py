@@ -208,8 +208,8 @@ def main(cfg: Config):
         rotate=cfg.rotate,
         resize=effective_resize,
         patch_prob=cfg.patch_prob,
-        patch_min_frac=cfg.patch_min_prob,
-        patch_max_prob=cfg.patch_max_prob,
+        patch_min_frac=cfg.patch_min_frac,
+        patch_max_frac=cfg.patch_max_frac,
     ).make(train_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=True)
     dsit = iter(dataset.dataset)
     example_batch = next(dsit)
