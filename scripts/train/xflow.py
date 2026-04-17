@@ -101,6 +101,9 @@ class Config:
     hist_every: int = 0  # histogram log interval
     synth_viz_every: int = 0  # synth kp2d viz interval (0 = disabled)
     quit_after_model: bool = False  # stop after model creation for debugging
+    patch_prob: float = 0.0  # Probability of occluding each (sample, time, view)
+    patch_min_frac: float = 0.05
+    patch_max_frac: float = 0.5
     viz: VizConfig = default(VizConfig())
     val_mse: ValMSEConfig = default(ValMSEConfig())
     rast: RastConfig = default(RastConfig())
@@ -200,9 +203,14 @@ def main(cfg: Config):
         ),
         recompute=cfg.recompute,
     )
-    dataset = GrainDataFactory(mp=cfg.mp, rotate=cfg.rotate, resize=effective_resize).make(
-        train_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=True
-    )
+    dataset = GrainDataFactory(
+        mp=cfg.mp,
+        rotate=cfg.rotate,
+        resize=effective_resize,
+        patch_prob=cfg.patch_prob,
+        patch_min_frac=cfg.patch_min_prob,
+        patch_max_prob=cfg.patch_max_prob,
+    ).make(train_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=True)
     dsit = iter(dataset.dataset)
     example_batch = next(dsit)
     eval_dataset = GrainDataFactory(
@@ -213,6 +221,9 @@ def main(cfg: Config):
         imaug=False,
         rotate=cfg.rotate,
         resize=effective_resize,
+        patch_prob=cfg.patch_prob,
+        patch_min_frac=cfg.patch_min_frac,
+        patch_max_frac=cfg.patch_max_frac,
     ).make(eval_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=False)
     print(spec(example_batch))
     inferred_image_keys, inferred_proprio_keys = infer_model_keys(example_batch["observation"])
