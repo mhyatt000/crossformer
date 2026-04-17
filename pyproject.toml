@@ -19,6 +19,7 @@ override-dependencies = [
     "jax[cuda12]>=0.5.3",
     "jaxtyping>=0.3.4",
     "numpy>=2.0",
+    "protobuf>=5.28.3",  # diffren pins <4 (stale workaround); jax path doesn't import protobuf
 ]
 # reinstall-package = ["crossformer"] # ensure package is reinstalled in editable mode
 
@@ -80,10 +81,10 @@ dependencies = [
     "jaxlib>=0.5.3",
     "dm-pix>=0.4.4",
     "pcax>=0.1.0",
-    "jaxrenderer",
     # "nvdiffrast",
     "nvdiffrast>=0.4.0",
     "zarr>=3.1.6",
+    "jax-bonsai",
 ]
 
 [dependency-groups]
@@ -101,8 +102,8 @@ webpolicy = { git = "https://github.com/mhyatt000/webpolicy" }
 pyroki = { git = "https://github.com/chungmin99/pyroki", rev = "2272d0ab8bf74026a2c8530b6b6174f3b19dcb97" }
 xclients = { git = "https://github.com/mhyatt000/xclients" , rev = '638c1db'}
 jaxtyping = { git = "https://github.com/patrick-kidger/jaxtyping" }
-jaxrenderer = { git = "https://github.com/JoeyTeng/jaxrenderer" }
 nvdiffrast = { git = "https://github.com/NVlabs/nvdiffrast.git" }
+jax-bonsai = { git = "https://github.com/jax-ml/bonsai" }
 
 [tool.pyright]
 typeCheckingMode = "basic"

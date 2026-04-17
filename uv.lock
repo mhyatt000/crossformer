@@ -22,6 +22,7 @@ overrides = [
     { name = "jaxlib", specifier = ">=0.5.3" },
     { name = "jaxtyping", git = "https://github.com/patrick-kidger/jaxtyping" },
     { name = "numpy", specifier = ">=2.0" },
+    { name = "protobuf", specifier = ">=5.28.3" },
 ]
 
 [[package]]
@@ -517,9 +518,9 @@ dependencies = [
     { name = "gym" },
     { name = "imageio" },
     { name = "jax", extra = ["cuda12"] },
+    { name = "jax-bonsai" },
     { name = "jaxlib" },
     { name = "jaxlie" },
-    { name = "jaxrenderer" },
     { name = "jaxtyping" },
     { name = "matplotlib" },
     { name = "ml-collections" },
@@ -580,9 +581,9 @@ requires-dist = [
     { name = "gym", specifier = ">=0.26" },
     { name = "imageio", specifier = ">=2.31.1" },
     { name = "jax", extras = ["cuda12"], specifier = ">=0.5.3" },
+    { name = "jax-bonsai", git = "https://github.com/jax-ml/bonsai" },
     { name = "jaxlib", specifier = ">=0.5.3" },
     { name = "jaxlie", specifier = ">=1.5.0" },
-    { name = "jaxrenderer", git = "https://github.com/JoeyTeng/jaxrenderer" },
     { name = "jaxtyping", git = "https://github.com/patrick-kidger/jaxtyping" },
     { name = "matplotlib" },
     { name = "ml-collections", specifier = ">=0.1.0" },
@@ -801,8 +802,8 @@ wheels = [
 
 [[package]]
 name = "flax"
-version = "0.10.6"
-source = { registry = "https://pypi.org/simple" }
+version = "0.12.6"
+source = { git = "https://github.com/google/flax.git#901efc34b5d34a9c379c08dcbc3330fb1d7a042c" }
 dependencies = [
     { name = "jax", extra = ["cuda12"] },
     { name = "msgpack" },
@@ -814,10 +815,6 @@ dependencies = [
     { name = "tensorstore" },
     { name = "treescope" },
     { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/6d/e6/2eee448a8b64ddde6fca53b067e6dbfe974bb198f6b21dc13f52aaeab7e3/flax-0.10.6.tar.gz", hash = "sha256:8f3d1eb7de9bbaa18e08d0423dce890aef88a8b9dc6daa23baa631e8dfb09618", size = 5215148, upload-time = "2025-04-23T20:27:07.383Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/fb/f8/aaf70a427f7e17afc1877d69c610b6b0c5093dba5addb63fb6990944e989/flax-0.10.6-py3-none-any.whl", hash = "sha256:86a5f0ba0f1603c687714999b58a4e362e784a6d2dc5a510b18a8e7a6c729e18", size = 447094, upload-time = "2025-04-23T20:27:05.036Z" },
 ]
 
 [[package]]
@@ -1176,18 +1173,6 @@ wheels = [
 ]
 
 [[package]]
-name = "importlib-metadata"
-version = "6.11.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "zipp" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/ee/eb/58c2ab27ee628ad801f56d4017fe62afab0293116f6d0b08f1d5bd46e06f/importlib_metadata-6.11.0.tar.gz", hash = "sha256:1231cf92d825c9e03cfc4da076a16de6422c863558229ea0b22b675657463443", size = 54593, upload-time = "2023-12-03T17:33:10.693Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/59/9b/ecce94952ab5ea74c31dcf9ccf78ccd484eebebef06019bf8cb579ab4519/importlib_metadata-6.11.0-py3-none-any.whl", hash = "sha256:f0afba6205ad8f8947c7d338b5342d5db2afbfd82f9cbef7879a9539cc12eb9b", size = 23427, upload-time = "2023-12-03T17:33:08.965Z" },
-]
-
-[[package]]
 name = "importlib-resources"
 version = "6.5.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1225,6 +1210,20 @@ wheels = [
 cuda12 = [
     { name = "jax-cuda12-plugin", extra = ["with-cuda"] },
     { name = "jaxlib" },
+]
+
+[[package]]
+name = "jax-bonsai"
+version = "0.0.0"
+source = { git = "https://github.com/jax-ml/bonsai#36284254cf738d99c1c5d1e3a292d27656a0a365" }
+dependencies = [
+    { name = "flax" },
+    { name = "huggingface-hub" },
+    { name = "jax", extra = ["cuda12"] },
+    { name = "jaxlib" },
+    { name = "jaxtyping" },
+    { name = "jinja2" },
+    { name = "transformers" },
 ]
 
 [[package]]
@@ -1336,19 +1335,6 @@ dependencies = [
     { name = "rich" },
     { name = "termcolor" },
     { name = "tqdm" },
-]
-
-[[package]]
-name = "jaxrenderer"
-version = "0.3.2"
-source = { git = "https://github.com/JoeyTeng/jaxrenderer#55999f65b6246e0ade71b37086f5b79662f1f8e6" }
-dependencies = [
-    { name = "importlib-metadata" },
-    { name = "jax", extra = ["cuda12"] },
-    { name = "jaxlib" },
-    { name = "jaxtyping" },
-    { name = "numpy" },
-    { name = "typing-extensions" },
 ]
 
 [[package]]
