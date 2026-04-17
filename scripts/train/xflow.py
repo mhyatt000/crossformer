@@ -171,6 +171,12 @@ def main(cfg: Config):
     if cfg.batch_size % len(devices) != 0:
         raise ValueError(f"batch_size={cfg.batch_size} must be divisible by devices={len(devices)}")
 
+    if cfg.model.vision.use_dino:
+        from crossformer.model.components.dino_encoder import shard_dino
+
+        shard_dino(replicated_sharding, model_id=cfg.model.vision.dino_model_id)
+        print("  dino: state replicated across devices")
+
     max_h = cfg.horizon
     run = cfg.wandb.initialize(cfg)
 

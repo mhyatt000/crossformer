@@ -9,6 +9,7 @@ from rich import print
 
 from crossformer.cn.base import CN
 from crossformer.cn.heads import _SINGLE, HeadFactory
+from crossformer.model.components.dino_encoder import DinoV3Encoder, MODEL_ID_DEFAULT
 from crossformer.model.components.heads.xflow import XFlowHead
 from crossformer.model.components.vit_encoders import vit_encoder_configs
 from crossformer.model.config import ImageTokenizerCfg, LowdimTokenizerCfg, ModelCfg, TransformerCfg
@@ -44,6 +45,10 @@ class Size(Enum):
 class Vision(CN):
     use_film: bool = True
     encoder: Literal[*vit_encoder_configs] = "resnetv2-26-film"
+    use_dino: bool = False
+    dino_model_id: str = MODEL_ID_DEFAULT
+    dino_target_size: tuple[int, int] = (240, 320)
+    dino_patch_only: bool = False
 
 
 @dataclass
@@ -156,6 +161,15 @@ class ModelFactory(CN):
         return LowdimTokenizerCfg(name=key, obs_keys=(f"proprio_{key}",), dropout_rate=0.2)
 
     def make_obs_im(self, key: str, *, encoder: ModuleSpec) -> ImageTokenizerCfg:
+        # DINOv3 takes 3-channel inputs only — disable channel-stacked goal images + FiLM.
+        if self.vision.use_dino:
+            return ImageTokenizerCfg(
+                name=key,
+                obs_stack_keys=(f"image_{key}",),
+                task_stack_keys=(),
+                task_film_keys=(),
+                encoder=encoder,
+            )
         return ImageTokenizerCfg(
             name=key,
             obs_stack_keys=(f"image_{key}",),
@@ -165,6 +179,13 @@ class ModelFactory(CN):
         )
 
     def make_obs_im_encoder(self):
+        if self.vision.use_dino:
+            return ModuleSpec.create(
+                DinoV3Encoder,
+                model_id=self.vision.dino_model_id,
+                target_size=self.vision.dino_target_size,
+                patch_only=self.vision.dino_patch_only,
+            )
         assert self.vision.encoder in vit_encoder_configs, f"Unknown vision encoder: {self.vision.encoder}"
         return ModuleSpec.create(vit_encoder_configs[self.vision.encoder], use_film=self.vision.use_film)
 
