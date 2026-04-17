@@ -23,11 +23,16 @@ from .losses import continuous_loss, sample_tau
 
 
 class PerceiverDecoder(nn.Module):
-    """Perceiver IO decoder block: cross-attend queries against context, then self-attend.
+    """Perceiver IO decoder: interleaved [cross-attn, self-attn x k] blocks.
+
+    num_blocks=1 matches the legacy single-cross design (one cross-attn, then
+    num_self_attend_layers self-attn). Larger num_blocks re-reads the context
+    after self-refinement so later layers aren't blind to vision.
 
     Args:
         num_heads: heads for both cross- and self-attention.
-        num_self_attend_layers: self-attention depth after the cross-attention.
+        num_blocks: number of [cross, self x k] blocks.
+        num_self_attend_layers: self-attn layers per block (k).
         widening_factor: MLP expansion ratio inside attention blocks.
         dropout_prob: dropout rate for attention and MLP.
         qk_channels: override QK projection dim (default: inferred from inputs).
@@ -35,7 +40,8 @@ class PerceiverDecoder(nn.Module):
     """
 
     num_heads: int = 8
-    num_self_attend_layers: int = 2
+    num_blocks: int = 4
+    num_self_attend_layers: int = 1
     widening_factor: int = 4
     dropout_prob: float = 0.0
     qk_channels: int | None = None
@@ -43,7 +49,7 @@ class PerceiverDecoder(nn.Module):
 
     @nn.compact
     def __call__(self, queries, context, *, deterministic=True, attention_mask=None):
-        """Cross-attend queries against context, then refine with self-attention.
+        """Interleave cross-attn and self-attn blocks.
 
         Args:
             queries: (batch, seq_q, d_q)
@@ -53,26 +59,30 @@ class PerceiverDecoder(nn.Module):
         Returns:
             (batch, seq_q, d_q)
         """
-        x = CrossAttention(
-            num_heads=self.num_heads,
-            widening_factor=self.widening_factor,
-            dropout_prob=self.dropout_prob,
-            qk_channels=self.qk_channels,
-            v_channels=self.v_channels,
-            use_query_residual=True,
-            shape_for_attn="kv",
-            name="cross_attend",
-        )(queries, context, attention_mask=attention_mask, deterministic=deterministic)
-
-        for i in range(self.num_self_attend_layers):
-            x = SelfAttention(
+        # Preserve legacy param names at num_blocks=1 so old checkpoints load.
+        legacy = self.num_blocks == 1
+        x = queries
+        for b in range(self.num_blocks):
+            x = CrossAttention(
                 num_heads=self.num_heads,
                 widening_factor=self.widening_factor,
                 dropout_prob=self.dropout_prob,
                 qk_channels=self.qk_channels,
                 v_channels=self.v_channels,
-                name=f"self_attend_{i}",
-            )(x, deterministic=deterministic)
+                use_query_residual=True,
+                shape_for_attn="kv",
+                name="cross_attend" if legacy else f"cross_attend_{b}",
+            )(x, context, attention_mask=attention_mask, deterministic=deterministic)
+
+            for i in range(self.num_self_attend_layers):
+                x = SelfAttention(
+                    num_heads=self.num_heads,
+                    widening_factor=self.widening_factor,
+                    dropout_prob=self.dropout_prob,
+                    qk_channels=self.qk_channels,
+                    v_channels=self.v_channels,
+                    name=f"self_attend_{i}" if legacy else f"self_attend_{b}_{i}",
+                )(x, deterministic=deterministic)
 
         return x
 
@@ -108,13 +118,14 @@ class XFlowHead(nn.Module, ActionHead):
     # Perceiver decoder
     num_query_channels: int = 256
     num_heads: int = 8
-    num_self_attend_layers: int = 2
+    num_blocks: int = 4
+    num_self_attend_layers: int = 1
     widening_factor: int = 4
     dropout_prob: float = 0.1
 
     # Flow matching
     time_dim: int = 32
-    flow_steps: int = 10
+    flow_steps: int = 25
     base_std: float = 1.0
 
     # Pooling strategy for transformer outputs
@@ -154,6 +165,7 @@ class XFlowHead(nn.Module, ActionHead):
         # Decoder and scalar output projection (one value per query)
         self.decoder = PerceiverDecoder(
             num_heads=self.num_heads,
+            num_blocks=self.num_blocks,
             num_self_attend_layers=self.num_self_attend_layers,
             widening_factor=self.widening_factor,
             dropout_prob=self.dropout_prob,

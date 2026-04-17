@@ -60,6 +60,7 @@ class XFlow(CN):
     head_channels: int = 256
     head_depth: int = 2
     head_heads: int = 8
+    head_blocks: int = 1
     flow_steps: int = 50
     use_guidance: bool = False
     guidance_input_dim: int | None = None
@@ -74,6 +75,7 @@ class XFlow(CN):
             max_horizon=self.max_horizon,
             num_query_channels=self.head_channels,
             num_heads=self.head_heads,
+            num_blocks=self.head_blocks,
             num_self_attend_layers=self.head_depth,
             flow_steps=self.flow_steps,
             use_guidance=self.use_guidance,
