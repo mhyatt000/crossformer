@@ -134,7 +134,7 @@ def batched_apply(fn, batch_size):
         return np.pad(arr, ((0, size - len(arr)), *[(0, 0)] * (arr.ndim - 1)))
 
     def get_batch_size(tree):
-        return next(iter(jax.tree_util.tree_leaves(tree))).shape[0]
+        return next(iter(jax.tree.leaves(tree))).shape[0]
 
     def wrapped_fn(*args, **kwargs):
         input_batch_size = get_batch_size((args, kwargs))
@@ -263,9 +263,9 @@ def freeze_weights(
         lambda path, opt_status: (logging.debug(".".join(path)) if opt_status == "frozen" else None),
         param_partitions,
     )
-    total_params = sum(jax.tree_util.tree_leaves(jax.tree.map(lambda x: x.size, params_or_params_shape)))
+    total_params = sum(jax.tree.leaves(jax.tree.map(lambda x: x.size, params_or_params_shape)))
     trainable_params = sum(
-        jax.tree_util.tree_leaves(
+        jax.tree.leaves(
             jax.tree.map(
                 lambda x, y: x.size if y == "trainable" else 0,
                 params_or_params_shape,
@@ -419,7 +419,9 @@ def _open_binary(path: str):
     try:
         import tensorflow as tf
     except ImportError as e:
-        raise ImportError(f"Reading non-local path {path!r} requires tensorflow or another remote filesystem client.") from e
+        raise ImportError(
+            f"Reading non-local path {path!r} requires tensorflow or another remote filesystem client."
+        ) from e
     return tf.io.gfile.GFile(path, "rb")
 
 

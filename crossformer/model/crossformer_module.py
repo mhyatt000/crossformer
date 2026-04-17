@@ -124,7 +124,7 @@ class CrossFormerTransformer(nn.Module):
 
         assert set(readouts).issubset(set(self.readouts.keys())), "readouts must be specified in the model config"
 
-        batch_size, horizon = jax.tree_util.tree_leaves(observations)[0].shape[:2]
+        batch_size, horizon = jax.tree.leaves(observations)[0].shape[:2]
         assert horizon <= self.max_horizon, f"horizon must be <= max_horizon - {horizon} <= {self.max_horizon}"
 
         is_ok = jax.tree.map(lambda x: x.shape[1] == horizon, observations)
