@@ -108,7 +108,7 @@ def _load_dataset_statistics(
     log.info("Computing dataset statistics from scratch...")
     hash_dependencies = [
         config.name,  # str(asdict(config))
-        "bodypart_norm_mask_v1",
+        "bodypart_norm_mask_v2",
         str(len(ds)),
         str(sorted(config.keys.image)),
         str(sorted(config.keys.depth)),
