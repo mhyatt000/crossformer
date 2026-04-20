@@ -278,12 +278,12 @@ def image_view_drop(step: dict, rng, prob: float) -> dict:
     Randomly drop entire image views for some batch samples.
 
     For each sample with probability `prob`, one randomly chosen
-    camera viwe is zeroed across all timesteps. pad_mask_dict is
+    camera view  is zeroed across all timesteps. pad_mask_dict is
     updated so downstreams treat the dropped view as padding.
     """
     print("keys at this stage")
     print(list(step["observation"].keys()), flush=True)
-    print(list(step["observation"]["pad_mask_dict"]["image"].keys()), flush=True)
+    print(list(step["observation"]["pad_mask_dict"]["image"]["low"].shape, flush=True))
     raise RuntimeError("check keys for image_view_drop")
 
     images = step["observation"]["image"]
