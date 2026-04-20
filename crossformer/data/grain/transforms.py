@@ -273,6 +273,44 @@ def patch_occlude(step: dict, rng, prob: float, min_frac: float = 0.05, max_frac
     return {**step, "observation": {**step["observation"], "image": new_images}}
 
 
+def image_view_drop(step: dict, rng, prob: float) -> dict:
+    """
+    Randomly drop entire image views for some batch samples.
+
+    For each sample with probability `prob`, one randomly chosen
+    camera viwe is zeroed across all timesteps. pad_mask_dict is
+    updated so downstreams treat the dropped view as padding.
+    """
+    print("keys at this stage")
+    print(list(step["observation"].keys()), flush=True)
+    raise RuntimeError("check keys for image_view_drop")
+
+    images = step["observation"]["image"]
+    views = list(images.keys())
+    batch_size = images[views[0]].shape[0]
+
+    drop = {v: rng.random(batch_size) < prob for v in views}
+
+    # potentially check if all views dropped unless desired
+    def zero_view(img, d):
+        return np.where(d.respape((b,) + (1,) * (img.ndim - 1)), 0, img)
+
+    new_images = {v: zero_view(images[v], drop[v]) for v in views}
+
+    pmd = step["observation"].get("pad_mask_dict", {})
+
+    def new_mask(v):
+        existing = np.asarray(pmd.get(v, np.ones(images[v].shape[:2], dtype=bool)), dtype=bool)
+        return existing & ~drop[v][:, None]
+
+    new_pmd = {**pmd, **{v: new_mask(v) for v in views}}
+
+    return {
+        **step,
+        "observation": {**step["observation"], "image": new_images, "pad_mask_dict": new_pmd},
+    }
+
+
 def _normalize_resize_size(size: int | tuple[int, int]) -> tuple[int, int]:
     if isinstance(size, int):
         if size <= 0:

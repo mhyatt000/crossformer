@@ -268,6 +268,7 @@ class GrainDataFactory:
     patch_prob: float = 0.0
     patch_min_frac: float = 0.05
     patch_max_frac: float = 0.5
+    view_drop_prob: float = 0.0
 
     def source2ds(self, dconfig, cfg: cn.Train, dataset: Arec, max_a: int = 0) -> GrainDataLoader:
         ds, stats = make_single_dataset(
@@ -401,6 +402,16 @@ class GrainDataFactory:
                     prob=self.patch_prob,
                     min_frac=self.patch_min_frac,
                     max_frac=self.patch_max_frac,
+                ),
+                seed=cfg.seed,
+            )
+
+        if train and self.view_drop_prob > 0:
+            ds = ds.random_map(
+                lambda x, rng: transforms.image_view_drop(
+                    x,
+                    rng,
+                    prob=self.view_drop_prob,
                 ),
                 seed=cfg.seed,
             )

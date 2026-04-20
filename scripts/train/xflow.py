@@ -104,6 +104,7 @@ class Config:
     patch_prob: float = 0.0  # Probability of occluding each (sample, time, view)
     patch_min_frac: float = 0.05
     patch_max_frac: float = 0.5
+    view_drop_prob: float = 0.0
     viz: VizConfig = default(VizConfig())
     val_mse: ValMSEConfig = default(ValMSEConfig())
     rast: RastConfig = default(RastConfig())
@@ -210,6 +211,7 @@ def main(cfg: Config):
         patch_prob=cfg.patch_prob,
         patch_min_frac=cfg.patch_min_frac,
         patch_max_frac=cfg.patch_max_frac,
+        view_drop_prob=cfg.view_drop_prob,
     ).make(train_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=True)
     dsit = iter(dataset.dataset)
     example_batch = next(dsit)
@@ -224,6 +226,7 @@ def main(cfg: Config):
         patch_prob=cfg.patch_prob,
         patch_min_frac=cfg.patch_min_frac,
         patch_max_frac=cfg.patch_max_frac,
+        view_drop_brob=cfg.view_drop_prob,
     ).make(eval_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=False)
     print(spec(example_batch))
     inferred_image_keys, inferred_proprio_keys = infer_model_keys(example_batch["observation"])
