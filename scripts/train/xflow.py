@@ -106,6 +106,7 @@ class Config:
     patch_max_frac: float = 0.5
     view_drop_prob: float = 0.0
     image_shuffle_prob: float = 0.0
+    proprio_drop_prob: float = 0.0
     viz: VizConfig = default(VizConfig())
     val_mse: ValMSEConfig = default(ValMSEConfig())
     rast: RastConfig = default(RastConfig())
@@ -214,6 +215,7 @@ def main(cfg: Config):
         patch_max_frac=cfg.patch_max_frac,
         view_drop_prob=cfg.view_drop_prob,
         image_shuffle_prob=cfg.image_shuffle_prob,
+        proprio_drop_prob=cfg.proprio_drop_prob,
     ).make(train_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=True)
     dsit = iter(dataset.dataset)
     example_batch = next(dsit)
@@ -230,6 +232,7 @@ def main(cfg: Config):
         patch_max_frac=cfg.patch_max_frac,
         view_drop_prob=cfg.view_drop_prob,
         image_shuffle_prob=cfg.image_shuffle_prob,
+        proprio_drop_prob=cfg.proprio_drop_prob,
     ).make(eval_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=False)
     print(spec(example_batch))
 

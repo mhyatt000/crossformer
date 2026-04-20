@@ -350,6 +350,45 @@ def image_key_shuffle(step: dict, rng, prob: float) -> dict:
     }
 
 
+def proprio_sample_drop(step: dict, rng, prob: float) -> dict:
+    """
+    Randomly zero all proprio for some samples (mimics total proprio sensor loss).
+
+    One Bernoulli hit per sample with probability 'prob'. On hit, every
+    proprio subkey is zeroed and every proprio pmd entry is flipped to False
+    across all timesteps. Subkeys move together - per-subkey independence
+    is handled later by proprio_token_drop.
+    """
+    proprio = step["observation"]["proprio"]
+    pmd = step["observation"]["pad_mask_dict"]
+    pmd_p = pmd["proprio"]
+    keys = list(proprio.keys())
+    b = proprio[keys[0]].shape[0]
+
+    drop = rng.random(b) < prob
+
+    def zero(x):
+        return np.where(drop.reshape((b,) + (1,) * (x.ndim - 1)), 0, x)
+
+    new_proprio = {k: zero(proprio[k]) for k in keys}
+
+    def new_mask(k):
+        existing = np.asarray(pmd_p[k], dtype=bool)
+        d = drop.reshape((b,) + (1,) * (existing.ndim - 1))
+        return existing & ~d
+
+    new_pmd_p = {k: new_mask(k) for k in keys}
+
+    return {
+        **step,
+        "observation": {
+            **step["observation"],
+            "proprio": new_proprio,
+            "pad_mask_dict": {**pmd, "proprio": new_pmd_p},
+        },
+    }
+
+
 def _normalize_resize_size(size: int | tuple[int, int]) -> tuple[int, int]:
     if isinstance(size, int):
         if size <= 0:
