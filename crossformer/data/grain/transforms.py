@@ -314,6 +314,42 @@ def image_view_drop(step: dict, rng, prob: float) -> dict:
     }
 
 
+def image_key_shuffle(step: dict, rng, prob: float) -> dict:
+    """
+    Randomly shuffle camera views across camera slots for some samples.
+
+    For each sample, with probability 'prob', permutes which camera appears
+    in each image_* slot. pad_mask_dict travels with their view.
+    """
+    images = step["observation"]["image"]
+    pmd = step["observation"]["pad_mask_dict"]["image"]
+    views = list(images.keys())
+    b, K = images[views[0]].shape[0], len(views)
+
+    shuffled = rng.random(b) < prob
+    random_perm = np.argsort(rng.random((b, K)), axis=1)  # indirect sorting
+    perm = np.where(shuffled[:, None], random_perm, np.arange(K))
+
+    imgs = np.stack([images[v] for v in views], axis=1)
+    masks = np.stack([np.asarray(pmd[v]) for v in views], axis=1)
+
+    bi = np.arange(b)[:, None]  # batch indices
+    new_imgs = imgs[bi, perm]
+    new_masks = masks[bi, perm]
+
+    new_images = {v: new_imgs[:, i] for i, v in enumerate(views)}
+    new_pmd = {v: new_masks[:, i] for i, v in enumerate(views)}
+
+    return {
+        **step,
+        "observation": {
+            **step["observation"],
+            "image": new_images,
+            "pad_mask_dict": {**step["observation"]["pad_mask_dict"], "image": new_pmd},
+        },
+    }
+
+
 def _normalize_resize_size(size: int | tuple[int, int]) -> tuple[int, int]:
     if isinstance(size, int):
         if size <= 0:
