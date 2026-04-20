@@ -283,6 +283,7 @@ def image_view_drop(step: dict, rng, prob: float) -> dict:
     """
     print("keys at this stage")
     print(list(step["observation"].keys()), flush=True)
+    print(list(step["observation"]["pad_mask_dict"].keys()), flush=True)
     raise RuntimeError("check keys for image_view_drop")
 
     images = step["observation"]["image"]
