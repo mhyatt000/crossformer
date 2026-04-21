@@ -427,7 +427,8 @@ def main(cfg: Config):
                 },
                 step=step,
             )
-        eval_loop(model, state.model.params, step, is_last=step == cfg.steps - 1)
+        if False:
+            eval_loop(model, state.model.params, step, is_last=step == cfg.steps - 1)
 
         if (step + 1) % cfg.save_interval == 0 and save_dir is not None:
             with timer("ckpt"):

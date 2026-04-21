@@ -190,3 +190,5 @@ datasets/debug_dataset/bridge_dataset/1.0.0/action_*
 # pixi environments
 .pixi/*
 !.pixi/config.toml
+0403_super-night-806/
+checkpoints/
