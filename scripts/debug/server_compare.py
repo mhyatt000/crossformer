@@ -356,8 +356,9 @@ def main(cfg: Config) -> None:
 
 
 
-    policy.inner.start()
-
+    policy.inner.inner.start()
+    import time; time.sleep(0.5)
+    print("thread alive after start:", policy.inner.inner._thread.is_alive())
 
     # --- optional server ---
     if cfg.port is not None:
@@ -370,7 +371,7 @@ def main(cfg: Config) -> None:
         server = Server(policy, host=cfg.host, port=cfg.port)
         server.serve()
 
-    policy.inner.stop()
+    # policy.inner.inner.stop()
 
 
 
@@ -396,6 +397,10 @@ def main(cfg: Config) -> None:
     print_action_mse("grain_raw", policy, iter(make_raw_ds(drop_actions=False)), cfg.mse_batches)
     print_action_mse_by_dof_id("grain_raw", policy, iter(make_raw_ds(drop_actions=False)), cfg.mse_batches)
     print_action_mse_by_chunk_step("grain_raw", policy, iter(make_raw_ds(drop_actions=False)), cfg.mse_batches)
+
+    policy.inner.inner.stop()
+
+
 
     quit()
 

@@ -253,33 +253,45 @@ class RTC:
             idx = min(self._t - 1, self._H - 1)
             return np.array(self._A_cur[idx]) # line 8
 
+
+
+
+
+
+
     def _inference_loop(self):
         """INFERENCELOOP -- Algorithm 1, lines 9-22."""
-        with self._cond:
-            while self._running:
-                # line 13: wait on C until t >= s_min
-                self._cond.wait_for(
-                    lambda: self._t >= self._s_min or not self._running
-                )
-                if not self._running:
-                    break
+        import traceback
+        try:
+            with self._cond:
+                while self._running:
+                    self._cond.wait_for(
+                        lambda: self._t >= self._s_min or not self._running
+                    )
+                    if not self._running:
+                        break
 
-                s   = self._t                 # line 14: s = t
-                A_prev = self._A_cur[s:].copy() # line 15: A_prev = A_cur[s..H-1]
-                o = self._o_cur             # line 16: o = o_cur
-                d   = max(self._Q)            # line 17: d = max(Q)
+                    s      = self._t
+                    A_prev = self._A_cur[s:].copy()
+                    o      = self._o_cur
+                    d      = max(self._Q)
 
-                # line 18: with M released do
-                self._cond.release()
-                try:
-                    # line 19: A_new = GUIDEDINFERENCE(pi, o, A_prev, d, s)
-                    A_new = self._run_guided_inference(o, A_prev, d, s)
-                finally:
-                    self._cond.acquire()
+                    self._cond.release()
+                    try:
+                        A_new = self._run_guided_inference(o, A_prev, d, s)
+                    finally:
+                        self._cond.acquire()
 
-                self._A_cur = np.array(A_new, dtype=np.float32)  # line 20
-                self._t = self._t - s                             # line 21
-                self._Q.append(self._t)                           # line 22
+                    self._A_cur = np.array(A_new, dtype=np.float32)
+                    self._t     = self._t - s
+                    self._Q.append(self._t)
+        except Exception:
+            traceback.print_exc()
+
+
+
+
+
 
     def _run_guided_inference(self, o, A_prev, d, s):
         """Calls guided_inference(pi, o, A_prev, d, s) -- line 19."""
