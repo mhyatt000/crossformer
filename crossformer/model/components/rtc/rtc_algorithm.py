@@ -71,19 +71,22 @@ def guided_inference(
     s: int,                      # execution horizon
     flow_steps: int = 5,         # Euler integration steps (n in paper)
     beta: float = 5.0,           # guidance weight clipping (beta in paper)
+    use_guidance: bool = True,   # if False, plain Euler (no vjp, no 2nd fwd pass)
 ) -> jax.Array:
     """GUIDEDINFERENCE (Algorithm 1, lines 23-29).
 
     Args:
-        pi:        XFlowHead bound with params.
-        obs:       current observation dict (o in paper). Must contain:
-                     transformer_outputs, dof_ids, chunk_steps, rng, B, W,
-                     and optionally slot_pos, guide_input, guidance_mask, train.
-        A_prev:    (H_prev, max_A) remaining actions from prev chunk.
-        d:         inference delay (controller steps).
-        s:         execution horizon.
-        flow_steps: Euler integration steps (n in paper).
-        beta:      guidance weight clipping.
+        pi:           XFlowHead bound with params.
+        obs:          current observation dict (o in paper). Must contain:
+                        transformer_outputs, dof_ids, chunk_steps, rng, B, W,
+                        and optionally slot_pos, guide_input, guidance_mask, train.
+        A_prev:       (H_prev, max_A) remaining actions from prev chunk.
+        d:            inference delay (controller steps).
+        s:            execution horizon.
+        flow_steps:   Euler integration steps (n in paper).
+        beta:         guidance weight clipping.
+        use_guidance: if True, run full guided Euler (Eq. 2) with vjp.
+                      if False, run plain Euler (Eq. 1) -- no vjp, half the memory.
 
     Returns:
         A_new: (B, W, H, max_A) denoised action chunk.
@@ -150,21 +153,26 @@ def guided_inference(
     for step in range(flow_steps):
         tau = (step + 0.5) * dt   # midpoint, matches XFlowHead.predict_action
 
-        # line 26: f_{A_c1}: A' -> A' + (1 - tau) * v_pi(A', o, tau)
-        def f_denoise(A_prime):
-            v = velocity_fn(A_prime, tau)
-            return A_prime + (1.0 - tau) * v
+        if use_guidance:
+            # line 26: f_{A_c1}: A' -> A' + (1 - tau) * v_pi(A', o, tau)
+            def f_denoise(A_prime):
+                v = velocity_fn(A_prime, tau)
+                return A_prime + (1.0 - tau) * v
 
-        # lines 27-28: weighted error + vjp
-        A_c1, vjp_fn = jax.vjp(f_denoise, A_tau)
-        e = (Y - A_c1) * W_flat                       # (B, W, H*max_A)
-        (g,) = vjp_fn(e)                              # (B, W, H*max_A)
+            # lines 27-28: weighted error + vjp
+            A_c1, vjp_fn = jax.vjp(f_denoise, A_tau)
+            e = (Y - A_c1) * W_flat                       # (B, W, H*max_A)
+            (g,) = vjp_fn(e)                              # (B, W, H*max_A)
 
-        # line 29: integration step (Eq. 1) with guidance (Eq. 2)
-        r2 = _r2(tau)
-        guidance_scale = jnp.minimum(beta, (1.0 - tau) / (tau * r2 + 1e-8))
-        v_pi = velocity_fn(A_tau, tau)
-        A_tau = A_tau + dt * (v_pi + guidance_scale * g)
+            # line 29: integration step (Eq. 1) with guidance (Eq. 2)
+            r2 = _r2(tau)
+            guidance_scale = jnp.minimum(beta, (1.0 - tau) / (tau * r2 + 1e-8))
+            v_pi = velocity_fn(A_tau, tau)
+            A_tau = A_tau + dt * (v_pi + guidance_scale * g)
+        else:
+            # plain Euler -- no vjp, no second forward pass (Eq. 1 only)
+            v_pi = velocity_fn(A_tau, tau)
+            A_tau = A_tau + dt * v_pi
 
     return A_tau.reshape(B, W, H, max_A)
 
@@ -180,15 +188,16 @@ class RTC:
     passed explicitly, matching GUIDEDINFERENCE(pi, o, A_prev, d, s).
 
     Args:
-        pi:          XFlowHead (bound with params).
-        H:           prediction horizon.
-        max_A:       action dimension (padded DOFs).
-        s_min:       minimum execution horizon (s_min in paper).
-        b:           delay buffer size.
-        d_init:      initial delay estimate (controller steps).
-        A_init:      (H, max_A) initial action chunk A_init.
-        flow_steps:  denoising steps n.
-        beta:        guidance weight clipping beta.
+        pi:           XFlowHead (bound with params).
+        H:            prediction horizon.
+        max_A:        action dimension (padded DOFs).
+        s_min:        minimum execution horizon (s_min in paper).
+        b:            delay buffer size.
+        d_init:       initial delay estimate (controller steps).
+        A_init:       (H, max_A) initial action chunk A_init.
+        flow_steps:   denoising steps n.
+        beta:         guidance weight clipping beta.
+        use_guidance: if False, plain Euler (no vjp).
     """
 
     def __init__(
@@ -202,6 +211,7 @@ class RTC:
         A_init: np.ndarray | None = None,
         flow_steps: int = 5,
         beta: float = 5.0,
+        use_guidance: bool = True,
     ):
         self._pi = pi              # flow policy pi
         self._H = H
@@ -209,6 +219,7 @@ class RTC:
         self._s_min = s_min
         self._flow_steps = flow_steps
         self._beta = beta
+        self._use_guidance = use_guidance
 
         # mutex M + condition variable C
         self._cond = threading.Condition()
@@ -251,47 +262,35 @@ class RTC:
             self._o_cur = obs                          # line 6
             self._cond.notify_all()                    # line 7
             idx = min(self._t - 1, self._H - 1)
-            return np.array(self._A_cur[idx]) # line 8
-
-
-
-
-
-
+            return np.array(self._A_cur[idx])          # line 8
 
     def _inference_loop(self):
         """INFERENCELOOP -- Algorithm 1, lines 9-22."""
-        import traceback
-        try:
-            with self._cond:
-                while self._running:
-                    self._cond.wait_for(
-                        lambda: self._t >= self._s_min or not self._running
-                    )
-                    if not self._running:
-                        break
+        with self._cond:
+            while self._running:
+                # line 13: wait on C until t >= s_min
+                self._cond.wait_for(
+                    lambda: self._t >= self._s_min or not self._running
+                )
+                if not self._running:
+                    break
 
-                    s      = self._t
-                    A_prev = self._A_cur[s:].copy()
-                    o      = self._o_cur
-                    d      = max(self._Q)
+                s      = self._t                        # line 14: s = t
+                A_prev = self._A_cur[s:].copy()         # line 15: A_prev = A_cur[s..H-1]
+                o      = self._o_cur                    # line 16: o = o_cur
+                d      = max(self._Q)                   # line 17: d = max(Q)
 
-                    self._cond.release()
-                    try:
-                        A_new = self._run_guided_inference(o, A_prev, d, s)
-                    finally:
-                        self._cond.acquire()
+                # line 18: with M released do
+                self._cond.release()
+                try:
+                    # line 19: A_new = GUIDEDINFERENCE(pi, o, A_prev, d, s)
+                    A_new = self._run_guided_inference(o, A_prev, d, s)
+                finally:
+                    self._cond.acquire()
 
-                    self._A_cur = np.array(A_new, dtype=np.float32)
-                    self._t     = self._t - s
-                    self._Q.append(self._t)
-        except Exception:
-            traceback.print_exc()
-
-
-
-
-
+                self._A_cur = np.array(A_new, dtype=np.float32)  # line 20
+                self._t = self._t - s                             # line 21
+                self._Q.append(self._t)                           # line 22
 
     def _run_guided_inference(self, o, A_prev, d, s):
         """Calls guided_inference(pi, o, A_prev, d, s) -- line 19."""
@@ -303,6 +302,7 @@ class RTC:
             s=s,
             flow_steps=self._flow_steps,
             beta=self._beta,
+            use_guidance=self._use_guidance,
         )
 
 

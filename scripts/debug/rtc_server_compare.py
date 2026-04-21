@@ -38,6 +38,9 @@ from crossformer.run.xflow_eval import adapt_rast_batch
 from crossformer.utils.callbacks.rast import RastConfig
 from crossformer.utils.spec import ezdiff, ezvaldiff, spec
 from crossformer.utils.tree import flat
+
+from crossformer.run.rtc_policy import RTCPolicy
+
 import wandb
 
 log = logging.getLogger(__name__)
@@ -285,6 +288,8 @@ def main(cfg: Config) -> None:
     max_a = max(arec.embodiment.action_dim for m in mix_items)
 
     print(Rule("building wrapper + policy"))
+
+    """
     policy = ModelPolicy(
         str(cfg.path),
         step=cfg.step,
@@ -294,6 +299,21 @@ def main(cfg: Config) -> None:
         flow_steps=cfg.flow_steps,
     )
     policy = ActionDenormWrapper(policy, loader_full.statistics[arec.name], embodiment=arec.embodiment)
+    """
+    # --- rtc  -------------
+    model_policy = ModelPolicy(
+            str(cfg.path),
+            step=cfg.step,
+            head_name=cfg.head_name,
+            guide_keys=cfg.guide_keys,
+            use_guidance=cfg.use_guidance,
+            flow_steps=cfg.flow_steps,
+    )
+    policy = RTCPolicy(model_policy, d=1, s=3)
+    policy = ActionDenormWrapper(policy, loader_full.statistics[arec.name], embodiment=arec.embodiment)
+    # --- rtc------------------
+
+
     policy = GrainlikeWrapper(
         policy,
         dataset_name=arec.name,
@@ -334,6 +354,13 @@ def main(cfg: Config) -> None:
             cfg.data.loader.batch_size, drop_remainder=True
         )
 
+
+    # --- rtc ----------------
+    policy.inner.inner.start()
+    # import time; time.sleep(0.5)
+    # print("thread alive after start:", policy.inner.inner._thread.is_alive())
+    # --- rtc ---------------
+
     # --- optional server ---
     if cfg.port is not None:
         # policy = ReplayObsWrapper(policy,
@@ -344,6 +371,8 @@ def main(cfg: Config) -> None:
         print(Rule(f"serving on {cfg.host}:{cfg.port}"))
         server = Server(policy, host=cfg.host, port=cfg.port)
         server.serve()
+
+
 
     # --- diff ---
     print(Rule("comparing first batch"))
@@ -364,6 +393,11 @@ def main(cfg: Config) -> None:
     print_action_mse("grain_raw", policy, iter(make_raw_ds(drop_actions=False)), cfg.mse_batches)
     print_action_mse_by_dof_id("grain_raw", policy, iter(make_raw_ds(drop_actions=False)), cfg.mse_batches)
     print_action_mse_by_chunk_step("grain_raw", policy, iter(make_raw_ds(drop_actions=False)), cfg.mse_batches)
+   
+    # --- rtc -------------
+    policy.inner.inner.stop()
+    # --- rtc -------------
+
 
     quit()
 

@@ -9,7 +9,7 @@ Drop-in replacement for ModelPolicy in server_compare.py:
 
     # after:
     model_policy = ModelPolicy(str(cfg.path), ...)
-    policy = RTCPolicy(model_policy, d=d, s=s)
+    policy = RTCPolicy(model_policy, d=d, s=s, use_guidance=False)
     policy = ActionDenormWrapper(policy, ...)
     policy = GrainlikeWrapper(policy, ...)
 
@@ -38,13 +38,14 @@ class RTCPolicy(PolicyWrapper):
     Ana thread her Delta_t'de step() cagirir, A_cur'dan action okur.
 
     Args:
-        inner:       ModelPolicy with loaded checkpoint.
-        d:           inference delay in controller steps.
-        s:           execution horizon (d <= s <= H - d).
-        H:           prediction horizon. Defaults to inner head's max_horizon.
-        flow_steps:  denoising steps. Defaults to inner head's flow_steps.
-        beta:        guidance weight clipping. Default 5.0.
-        b:           delay buffer size. Default 10.
+        inner:        ModelPolicy with loaded checkpoint.
+        d:            inference delay in controller steps.
+        s:            execution horizon (d <= s <= H - d).
+        H:            prediction horizon. Defaults to inner head's max_horizon.
+        flow_steps:   denoising steps. Defaults to inner head's flow_steps.
+        beta:         guidance weight clipping. Default 5.0.
+        b:            delay buffer size. Default 10.
+        use_guidance: if False, plain Euler (no vjp, half the memory). Default False.
     """
 
     def __init__(
@@ -56,6 +57,7 @@ class RTCPolicy(PolicyWrapper):
         flow_steps: int | None = None,
         beta: float = 5.0,
         b: int = 10,
+        use_guidance: bool = False,
     ):
         self.inner = inner
         module = inner.model.module
@@ -75,8 +77,9 @@ class RTCPolicy(PolicyWrapper):
         self._pi = bound_head
         self._flow_steps = flow_steps
         self._beta = beta
+        self._use_guidance = use_guidance
 
-        # transformer JIT — background thread'de calisir
+        # transformer JIT -- background thread'de calisir
         @jax.jit
         def _jit_transformer(obs, task, timestep_pad_mask):
             bound = module.bind({"params": params})
@@ -123,7 +126,7 @@ class RTCPolicy(PolicyWrapper):
         return self.step(self.inner.model.example_batch)
 
     # ------------------------------------------------------------------
-    # step — ana thread, her Delta_t'de cagrilir
+    # step -- ana thread, her Delta_t'de cagrilir
     # ------------------------------------------------------------------
 
     def step(self, payload: dict, **kwargs) -> dict:
@@ -168,7 +171,7 @@ class RTCPolicy(PolicyWrapper):
     # ------------------------------------------------------------------
 
     def _inference_loop(self):
-        """Transformer + guided_inference — background thread."""
+        """Transformer + guided_inference -- background thread."""
         import traceback
         try:
             with self._cond:
@@ -192,12 +195,13 @@ class RTCPolicy(PolicyWrapper):
 
                     self._A_cur = np.array(A_new, dtype=np.float32)
                     self._t = self._t - s
-                    self._Q.append(self._t)
+                    # self._Q.append(self._t)
+                    self._Q.append(min(self._t, self._s))
         except Exception:
             traceback.print_exc()
 
     def _run_inference(self, o_raw: dict, A_prev: np.ndarray, d: int, s: int) -> np.ndarray:
-        """Transformer + guided_inference — kilitsiz calisir."""
+        """Transformer + guided_inference -- kilitsiz calisir."""
         payload = o_raw["payload"]
         dof_ids = o_raw["dof_ids"]
         chunk_steps = o_raw["chunk_steps"]
@@ -231,6 +235,7 @@ class RTCPolicy(PolicyWrapper):
             s=s,
             flow_steps=self._flow_steps,
             beta=self._beta,
+            use_guidance=self._use_guidance,
         )
         # (B, W, H, max_A) -> (H, max_A)
         return np.array(A_new[0, 0])
