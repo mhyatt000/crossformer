@@ -10,7 +10,6 @@ import jax
 import numpy as np
 
 from crossformer.data.grain.utils import traj_len
-from crossformer.utils.jax_utils import cpu, with_device
 
 T = TypeVar("T")  # flat element type after transform
 S = TypeVar("S")  # parent element type
@@ -97,12 +96,10 @@ class UnpackFlatMap(ge.FlatMapTransform):
     key: str = "info.id.step_id"  # key to use to determine trajectory length
     use_np: bool = False
 
-    @with_device(cpu)
     def flat_map(self, element) -> Sequence[Any]:
         """splits a single element."""
         n = int(traj_len(element, self.key))
-        # why do we have to materialize on cpu? jax makes copy
-        element = jax.tree.map(lambda x: jax.device_put(x, cpu), element)
+        element = jax.tree.map(np.asarray, element)
         # iscpu = jax.tree.map(lambda x: x.platform() == 'cpu' , element)
         # iscpu_all = jax.tree.reduce(lambda x, y: x and y, iscpu)
         # pprint(iscpu)
@@ -110,8 +107,7 @@ class UnpackFlatMap(ge.FlatMapTransform):
             _e = jax.tree.map(np.array, element)
             return [jax.tree.map(lambda x: np.array(x[i]), _e) for i in range(n)]
 
-        with jax.default_device(cpu):
-            return [jax.tree.map(lambda x: jax.device_put(x[i], cpu), element) for i in range(n)]
+        return [jax.tree.map(lambda x: np.asarray(x[i]), element) for i in range(n)]
 
 
 @dataclass
