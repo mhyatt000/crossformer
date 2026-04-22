@@ -8,16 +8,13 @@ from functools import partial
 import logging
 import os
 import resource
-from typing import Any
+from typing import Any, Protocol
 
 import grain
 from grain.experimental import ThreadPrefetchIterDataset
-import jax
-import jax.numpy as jnp
 import numpy as np
 from rich import print
 
-from crossformer import cn
 from crossformer.cn.dataset.mix import Arec, MultiDataSource
 from crossformer.data.grain import builders
 from crossformer.data.grain.datasets import (
@@ -36,7 +33,13 @@ from crossformer.data.grain.pipelines import (
     TransformConfig,
 )
 from crossformer.data.grain.util.remap import _remap_lang, rekey
-from crossformer.utils.jax_utils import cpu
+from crossformer.utils.peace_and_quiet import (
+    _set_worker_jax_cpu_env,
+    import_jax_cpu_safe,
+    install_absl_filter,
+    patch_arec_source,
+    quiet_jax_xla_bridge,
+)
 from crossformer.utils.spec import diff, ModuleSpec, spec
 from crossformer.utils.tree import drop, flat, unflat
 from crossformer.utils.type_checking import jtyped
@@ -44,8 +47,43 @@ from crossformer.utils.type_checking import jtyped
 log = logging.getLogger(__name__)
 
 
+class TrainLike(Protocol):
+    seed: int
+    window_size: int
+    data: Any
+
+
+_cpu_device = None
+
+
+def _grain_cpu_device():
+    global _cpu_device
+    if _cpu_device is None:
+        jax = import_jax_cpu_safe()
+        _cpu_device = jax.devices("cpu")[0]
+    return _cpu_device
+
+
+def _grain_mp_worker_init(worker_index: int, worker_count: int) -> None:
+    del worker_index, worker_count
+    os.environ["JAX_PLATFORMS"] = "cpu"
+    os.environ["JAX_PLATFORM_NAME"] = "cpu"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "platform")
+    install_absl_filter()
+    _set_worker_jax_cpu_env()
+    import jax
+
+    with quiet_jax_xla_bridge():
+        _ = jax.devices("cpu")
+
+
 def np2jax(x):
-    return jax.tree.map(lambda y: jnp.array(y, device=cpu), x)
+    jax = import_jax_cpu_safe()
+    jnp = jax.numpy
+    dev = _grain_cpu_device()
+    return jax.tree.map(lambda y: jnp.array(y, device=dev), x)
 
 
 @jtyped
@@ -58,6 +96,8 @@ def center_crop(img, h, w):
 
 def mix_precompatibility(x, *, resize: int | tuple[int, int] | None = (224, 224)):
     """ensure mixed datasets have same keys."""
+    _set_worker_jax_cpu_env()
+    import jax
 
     def _reshape_int(y):
         """reshape int arrays to (-1,)"""
@@ -93,7 +133,7 @@ def mix_compatibility(x, diff: dict):
     return x
 
 
-def make_tfconfig(cfg: cn.Train) -> TransformConfig:
+def make_tfconfig(cfg: TrainLike) -> TransformConfig:
     traj_kwargs = cfg.data.traj.create(with_head_to_dataset=False)
     traj_kwargs["window_size"] = cfg.window_size or traj_kwargs.get("window_size", 1)
     log.warning("TODO move cfg.window_size to cfg.data")
@@ -109,8 +149,9 @@ def make_tfconfig(cfg: cn.Train) -> TransformConfig:
 
 def make_source_by_mix(
     mix: Arec | MultiDataSource,
-    cfg: cn.Train,
+    cfg: TrainLike,
 ) -> tuple[grain.Dataset, builders.GrainDatasetConfig]:
+    jax = import_jax_cpu_safe()
     # TODO reduce config scope by only passing cfg.data ?
 
     grain.config.update("py_debug_mode", log.isEnabledFor(logging.DEBUG))
@@ -198,6 +239,7 @@ def make_single_dataset(
     resize: int | tuple[int, int] | None = (224, 224),
 ) -> GrainDataLoader:
     """Builds a dataset of frames for a single dataset configuration."""
+    jax = import_jax_cpu_safe()
 
     log.warning("TODO see update notes")
     # pack steps by episode_id
@@ -212,37 +254,47 @@ def make_single_dataset(
     # use windowshuffle after
     # fix augmax to do image augmentations
 
-    with jax.default_device(cpu):
-        # 1. Build the trajectory dataset
-        # 1.1. restructure keys
-        # 1.2. compute / load statistics
-        # 1.3. normalize with statistics and norm mask
+    # 1. Build the trajectory dataset
+    # 1.1. restructure keys
+    # 1.2. compute / load statistics
+    # 1.3. normalize with statistics and norm mask
 
-        ds, stats = builders.build_trajectory_dataset(config)
+    ds, stats = builders.build_trajectory_dataset(config)
 
-        # 2. Apply trajectory transforms
-        # 2.1. filter no lang
-        # 2.2. maybe filter max action
-        # 2.3. add pad mask and head masks
-        # 2.4. seed
-        # 2.5. goal relabel
-        # 2.6. chunking and windowing
-        # 2.7. maybe other transforms
+    # 2. Apply trajectory transforms
+    # 2.1. filter no lang
+    # 2.2. maybe filter max action
+    # 2.3. add pad mask and head masks
+    # 2.4. seed
+    # 2.5. goal relabel
+    # 2.6. chunking and windowing
+    # 2.7. maybe other transforms
 
-        ds = apply_trajectory_transforms(ds, seed=seed, config=config)  # , **asdict(tfconfig))
-        ds = ds.map(drop_str)
-        ds = ds.map(partial(mix_precompatibility, resize=resize))
+    ds = apply_trajectory_transforms(ds, seed=seed, config=config)  # , **asdict(tfconfig))
+    ds = ds.map(drop_str)
+    ds = ds.map(partial(mix_precompatibility, resize=resize))
 
-        def unsqueeze_img_horizon(x):
-            # unsqueeze proprio horizon dim to 1
-            # in the current state of data transforms, we dont use many horizon steps
-            # code still expects horizon dim
-            x["observation"]["proprio"] = jax.tree.map(lambda y: y[None], x["observation"]["proprio"])
-            return x
+    def unsqueeze_img_horizon(x):
+        # unsqueeze proprio horizon dim to 1
+        # in the current state of data transforms, we dont use many horizon steps
+        # code still expects horizon dim
+        x["observation"]["proprio"] = jax.tree.map(lambda y: y[None], x["observation"]["proprio"])
+        return x
 
-        ds = ds.map(unsqueeze_img_horizon)
+    ds = ds.map(unsqueeze_img_horizon)
 
-        return ds, stats
+    return ds, stats
+
+
+def kind(x):
+    jax = import_jax_cpu_safe()
+    if isinstance(x, np.ndarray):
+        return True
+        return ("np", x.shape, x.dtype)
+    if isinstance(x, jax.Array):
+        return False
+        return ("jax", x.shape, x.dtype)
+    return (type(x).__name__, None, None)
 
 
 def _apply_fd_limit(limit: int) -> tuple[int, int]:
@@ -266,7 +318,7 @@ class GrainDataFactory:
     # None disables both stages (image stays at native size, no center_crop).
     resize: int | tuple[int, int] | None = (64, 64)
 
-    def source2ds(self, dconfig, cfg: cn.Train, dataset: Arec, max_a: int = 0) -> GrainDataLoader:
+    def source2ds(self, dconfig, cfg: TrainLike, dataset: Arec, max_a: int = 0) -> GrainDataLoader:
         ds, stats = make_single_dataset(
             dconfig,
             train=True,
@@ -325,10 +377,14 @@ class GrainDataFactory:
 
     def make(
         self,
-        cfg: cn.Train,
+        cfg: TrainLike,
         shard_fn: Callable | None = None,
         train: bool = True,
     ) -> GrainDataLoader:
+        jax = import_jax_cpu_safe()
+        install_absl_filter()
+        patch_arec_source()
+
         lim = _apply_fd_limit(512**2)
 
         log.info("applied fd limit: %s", lim)
@@ -376,8 +432,12 @@ class GrainDataFactory:
             # Workers spawn via multiprocessing and re-import JAX. Without these,
             # each worker claims a CUDA context on GPU:0 and OOMs the parent's model.
             os.environ["JAX_PLATFORMS"] = "cpu"
+            os.environ["JAX_PLATFORM_NAME"] = "cpu"
             os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-            ds = ds.mp_prefetch(grain.MultiprocessingOptions(num_workers=self.mp, per_worker_buffer_size=8))
+            ds = ds.mp_prefetch(
+                grain.MultiprocessingOptions(num_workers=self.mp, per_worker_buffer_size=8),
+                worker_init_fn=_grain_mp_worker_init,
+            )
 
         batch = next(iter(ds))
         log.debug("batch spec: %s", spec(batch))
@@ -385,10 +445,15 @@ class GrainDataFactory:
         # then frame lvl transforms in jax
 
         ds.dataset_statistics = self.stats  # type: ignore[attr-defined]
+
         #
         # blocks mp prefetch so that final jax ops can be main proc
         #
         ds = ThreadPrefetchIterDataset(ds, prefetch_buffer_size=2)
+        # print(jax.tree.map(kind, self.stats))
+        # print(jax.tree.map(kind, batch))
+        # quit()
+        # return GrainDataLoader(dataset=ds, statistics=self.stats, config=sources[0][1])
 
         ds = ds.map(np2jax)  # dont use jax+grain yet... buggy
         if shard_fn is not None:
