@@ -35,12 +35,19 @@ from crossformer.data.grain.datasets import (
 from crossformer.data.grain.transforms import batch_fn
 from crossformer.data.grain.util.remap import _remap_lang, rekey
 from crossformer.utils.deco import deprecate
-from crossformer.utils.jax_utils import cpu, with_device_context
 from crossformer.utils.spec import ModuleSpec, spec
 from crossformer.utils.tree import flat, unflat
 from crossformer.utils.tree.core import drop_fn
 
 log = logging.getLogger(__name__)
+_cpu_device = None
+
+
+def _grain_cpu_device():
+    global _cpu_device
+    if _cpu_device is None:
+        _cpu_device = jax.devices("cpu")[0]
+    return _cpu_device
 
 
 def _resolve_callable(spec_or_fn: ModuleSpec | Callable | None) -> Callable | None:
@@ -72,12 +79,11 @@ def _proprio_within_bounds(traj: dict, max_proprio: float) -> bool:
     return True
 
 
-@with_device_context(device=cpu)
 def to_jax_key(r):
     if isinstance(r, np.random.Generator):
-        return jax.device_put(jax.random.key(r.integers(2**32 - 1, dtype=np.uint32)), device=cpu)
+        return jax.random.key(r.integers(2**32 - 1, dtype=np.uint32))
     if isinstance(r, int | np.integer):
-        return jax.device_put(jax.random.key(np.uint32(r)), device=cpu)
+        return jax.random.key(np.uint32(r))
     return r  # already a JAX key (uint32[2])
 
 
@@ -690,7 +696,7 @@ def make_single_dataset(
     # use windowshuffle after
     # fix augmax to do image augmentations
 
-    with jax.default_device(cpu):
+    with jax.default_device(_grain_cpu_device()):
         # 1. Build the trajectory dataset
         # 1.1. restructure keys
         # 1.2. compute / load statistics
@@ -740,7 +746,8 @@ def make_single_dataset(
         # lastly, do frame aug on gpu en-batch for speed
 
         def np2jax(x):
-            return jax.tree.map(lambda y: jnp.array(y, device=cpu), x)
+            dev = _grain_cpu_device()
+            return jax.tree.map(lambda y: jnp.array(y, device=dev), x)
 
         ds.dataset_statistics = stats  # type: ignore[attr-defined]
         #

@@ -15,7 +15,6 @@ import numpy as np
 from tqdm import tqdm
 
 from crossformer.utils import databrief
-from crossformer.utils.jax_utils import cpu
 from crossformer.utils.mytyping import Data
 
 log = logging.getLogger(__name__)
@@ -280,7 +279,7 @@ def normalize_action_and_proprio(
     proprio_keys: Sequence[str],
     action_mask: Sequence[bool] | Mapping[str, Sequence[bool]] | None = None,
     skip_norm_keys: Sequence[str] = (),
-    device: jax.Device | None = cpu,
+    device: jax.Device | None = None,
 ) -> dict:
     """Normalizes actions and proprioceptive observations."""
 
@@ -329,7 +328,7 @@ def normalize_proprio(
     proprio_keys: Sequence[str],
     action_mask: Sequence[bool] | Mapping[str, Sequence[bool]] | None = None,
     skip_norm_keys: Sequence[str] = (),
-    device: jax.Device | None = cpu,
+    device: jax.Device | None = None,
 ) -> dict:
     """Normalizes proprioceptive observations but not actions."""
 

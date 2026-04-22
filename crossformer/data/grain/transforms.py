@@ -21,12 +21,10 @@ import logging
 from typing import Any
 
 import jax
-from jax import numpy as jnp
 import numpy as np
 from scipy import ndimage
 
 from crossformer.data.oxe import HEAD_TO_DATASET
-from crossformer.utils.jax_utils import cpu, with_device
 from crossformer.utils.mytyping import PRNGKey
 from crossformer.utils.tree import merge
 
@@ -40,7 +38,6 @@ Trajectory = dict[str, Step]
 _INTERPOLATION_TO_ORDER = {"nearest": 0, "bilinear": 1}
 
 
-@with_device(cpu)
 def _mask(fn, *args, **kwargs):
     return fn(*args, **kwargs)
 
@@ -120,8 +117,8 @@ log.debug("TODO chunk actions by jax.tree.map")
 
 
 def batch_fn(xs: list[dict[Any]]):
-    xs = jax.tree.map(lambda x: jax.device_put(x, cpu), xs)
-    stack = lambda *a: jnp.asarray(a, device=cpu)
+    xs = jax.tree.map(np.asarray, xs)
+    stack = lambda *a: np.stack(a)
     tree = jax.tree.map(stack, *xs)
     # iscpu = jax.tree.map(lambda x: x.platform() == 'cpu' , tree)
     # iscpu_all = jax.tree.reduce(lambda x, y: x and y, iscpu)
@@ -139,11 +136,9 @@ def chunk_action_and_observation(
 
     actions = traj["action"]
     n = actions.shape[0]
-    device = actions.device
-    # pprint(spec({'action': actions}))
 
     def arange(*args, **kwargs):
-        return jnp.asarray(np.arange(*args, **kwargs), device=cpu)
+        return np.arange(*args, **kwargs)
 
     # history_indices = jnp.arange(n)[:, None] + jnp.arange(-window_size + 1, 1)[None, :]
     # now, in numpy
@@ -152,8 +147,8 @@ def chunk_action_and_observation(
     timestep_pad_mask = history_indices >= 0
     if override_window_size is not None:
         valid_history = arange(window_size) >= window_size - override_window_size
-        timestep_pad_mask = jnp.logical_and(timestep_pad_mask, valid_history)
-    history_indices = jnp.maximum(history_indices, 0)
+        timestep_pad_mask = np.logical_and(timestep_pad_mask, valid_history)
+    history_indices = np.maximum(history_indices, 0)
     # pprint(spec({'history_indices': history_indices}))
 
     chunked_obs = jax.tree.map(lambda x: x[history_indices], traj["observation"])
@@ -162,7 +157,7 @@ def chunk_action_and_observation(
 
     if actions.ndim == 2:
         action_indices = arange(n)[:, None] + arange(action_horizon)[None, :]
-        action_indices = jnp.minimum(action_indices, n - 1)
+        action_indices = np.minimum(action_indices, n - 1)
         actions = actions[action_indices]
     else:
         if actions.shape[1] < action_horizon:
@@ -179,17 +174,17 @@ def chunk_action_and_observation(
         traj["task"] = task = traj.pop("task", {})
     task = traj["task"]
     goal_timestep = task.get("timestep")
-    goal_timestep = jnp.full((n,), n - 1, dtype=jnp.int32, device=cpu) if goal_timestep is None else goal_timestep
+    goal_timestep = np.full((n,), n - 1, dtype=np.int32) if goal_timestep is None else np.asarray(goal_timestep)
     # ezdiff(_t,traj['task'])
 
-    t, w, h = jnp.meshgrid(arange(n), arange(window_size), arange(action_horizon), indexing="ij")
+    t, w, h = np.meshgrid(arange(n), arange(window_size), arange(action_horizon), indexing="ij")
     relative_goal = goal_timestep[:, None, None] - (t - (window_size + 1) + w + h)
     traj["observation"]["task_completed"] = relative_goal <= 0
 
     action_pad_mask = traj.get("action_pad_mask")
     # pprint(spec({'action_pad_mask': action_pad_mask}))
     if action_pad_mask is None:
-        action_pad_mask = jnp.ones((*actions.shape[:-1], actions.shape[-1]), dtype=bool)
+        action_pad_mask = np.ones((*actions.shape[:-1], actions.shape[-1]), dtype=bool)
     else:
         action_pad_mask = action_pad_mask
         if action_pad_mask.ndim == 2:
@@ -197,7 +192,7 @@ def chunk_action_and_observation(
         elif action_pad_mask.ndim == 3:
             action_pad_mask = action_pad_mask[:, None, :, :]
 
-    traj["action_pad_mask"] = jnp.logical_and(
+    traj["action_pad_mask"] = np.logical_and(
         action_pad_mask,
         ~traj["observation"]["task_completed"][:, :, :, None],
     )
@@ -342,11 +337,14 @@ def drop_empty_language(traj: Trajectory) -> Trajectory:
 def uniform_goal_relabel(traj: Trajectory, *, rng: PRNGKey) -> Trajectory:
     obs = traj["observation"]
     n = obs["timestep"].shape[0]
-    rand = jax.random.uniform(rng, shape=(n,))
-    low = jnp.asarray(np.arange(int(n)), device=cpu)
-    high = jnp.full(n, n, device=cpu)
+    if isinstance(rng, np.random.Generator):
+        rand = rng.random(n, dtype=np.float32)
+    else:
+        rand = np.asarray(jax.random.uniform(rng, shape=(n,)))
+    low = np.arange(int(n))
+    high = np.full(n, n)
     goal_indices = (rand * (high - low) + low).astype(int)
-    goal_indices = jnp.clip(goal_indices, 0, n - 1)
+    goal_indices = np.clip(goal_indices, 0, n - 1)
     goal = jax.tree.map(lambda x: x[goal_indices], obs)
     _t = traj["task"]
     traj["task"] = merge(traj["task"], goal)

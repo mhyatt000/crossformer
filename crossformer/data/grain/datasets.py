@@ -23,9 +23,17 @@ from rich.pretty import pprint
 
 from crossformer.data.arec.arec import unpack_record
 from crossformer.data.grain.util.deco import logbar
-from crossformer.utils.jax_utils import cpu, npstr2jax, str2jax
+from crossformer.utils.jax_utils import npstr2jax, str2jax
 
 log = logging.getLogger(__name__)
+_cpu_device = None
+
+
+def _grain_cpu_device():
+    global _cpu_device
+    if _cpu_device is None:
+        _cpu_device = jax.devices("cpu")[0]
+    return _cpu_device
 
 
 class _DecodedArrayRecord:
@@ -124,22 +132,22 @@ class MultiArrayRecordSource:
         return [self[i] for i in indices]
 
 
-def _postprocess_episode(items: Sequence[dict[str, Any]], device=cpu, steps=True) -> Sequence[dict[str, jnp.Array]]:
+def _postprocess_episode(items: Sequence[dict[str, Any]], device=None, steps=True) -> Sequence[dict[str, jnp.Array]]:
     """postprocess msgpack-decoded episode data into jax arrays.
     unfortunately cannot jit this"""
 
     def maybe_str2jax(x: Any) -> Any:
         if isinstance(x, str):
-            return str2jax(x, device=cpu)
+            return str2jax(x, device=device)
         if isinstance(x, np.ndarray) and x.dtype.kind == "U":
-            return npstr2jax(x, device=cpu)
+            return npstr2jax(x, device=device)
         return x
 
     def stack_items(*xs):
         return jnp.stack(xs)
 
     items = jax.tree.map(maybe_str2jax, items)
-    items = jax.tree.map(partial(jnp.array, device=cpu), items)
+    items = jax.tree.map(partial(jnp.array, device=device or _grain_cpu_device()), items)
     # we dont stack if it is stepwise
     return items if not steps else jax.tree.map(stack_items, *_items)
 

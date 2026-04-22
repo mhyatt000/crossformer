@@ -7,7 +7,7 @@ from __future__ import annotations
 import jax
 import numpy as np
 
-from crossformer.utils.jax_utils import str2jax
+from crossformer.utils.jax_utils import str2np
 
 
 def _restructure_trajectory(
@@ -33,9 +33,9 @@ def _restructure_trajectory(
         "observation": step["observation"],
         "task": task,
         "action": step["action"],  #  action,
-        "dataset_name": str2jax(name),
+        "dataset_name": str2np(name, length=32),
         "info": {
-            "dataset_name": str2jax(name),
+            "dataset_name": str2np(name, length=32),
             "id": {k.replace("_id", ""): np.array([v]).reshape(-1) for k, v in step.items() if "_id" in k},
         }
         | step.get("info", {}),
@@ -95,12 +95,19 @@ def restructure_xarm_dream(step: dict, *, name: str, lang_key: str | None = None
 
     # cam_extr: (tx,ty,tz) + Zhou 6D rotation. Pipeline normalizes translation;
     # 6D kept raw (lies on a manifold — mean/std would break orthogonality).
-    w2c = np.asarray(step["camera"]["extr"]["w2c"], dtype=np.float32)  # (4, 4)
-    t_xyz = w2c[:3, 3]  # (3,)
+    # Convert row-vector Blender convention (p_cam = p_world @ w2c_raw, with
+    # translation in the last ROW) to standard column-vector SE(3) form
+    # ([[R | t]; [0 0 0 1]], translation in the last column) via transpose.
+    w2c = np.asarray(step["camera"]["extr"]["w2c"], dtype=np.float32).T  # (4, 4)
+    # Blender camera is y-up / z-back; convert to OpenCV (y-down / z-forward)
+    # by flipping the y and z axes in camera frame. This matches what PnP /
+    # the rasterizer expect, so the stored cam_extr is directly usable.
+    FLIP = np.diag([1.0, -1.0, -1.0]).astype(np.float32)
+    R = FLIP @ w2c[:3, :3]
+    t_xyz = FLIP @ w2c[:3, 3]
     # Zhou et al. 2019 ("On the Continuity of Rotation Representations in Neural
     # Networks") define the 6D rep as literally the first two columns of R.
     # The third column is recoverable at inference via Gram-Schmidt.
-    R = w2c[:3, :3]
     r6d = np.concatenate([R[:, 0], R[:, 1]], axis=0)  # (6,)
     cam_extr = np.concatenate([t_xyz, r6d], axis=0).astype(np.float32)  # (9,)
 
@@ -143,9 +150,9 @@ def restructure_xarm_dream(step: dict, *, name: str, lang_key: str | None = None
         "task": {},
         "action": action,
         "mask": {"act": act_mask},
-        "dataset_name": str2jax(name),
+        "dataset_name": str2np(name, length=32),
         "language.embedding": lang.get("embedding", np.zeros((512,), dtype=np.float32)),
-        "info": info | {"dataset_name": str2jax(name)},
+        "info": info | {"dataset_name": str2np(name, length=32)},
         "aux": {
             "kp3d_world": np.asarray(state.get("kp3d_world", [])),
             "kp3d_camera": np.asarray(state.get("kp3d_camera", [])),
