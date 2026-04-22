@@ -47,6 +47,7 @@ class LowdimTokenizerCfg:
     low: float = 0.0
     high: float = 1.0
     dropout_rate: float = 0.0
+    p_token_drop: float = 0.0
 
     def create(self) -> ModuleSpec:
         return ModuleSpec.create(
@@ -58,6 +59,7 @@ class LowdimTokenizerCfg:
             low=self.low,
             high=self.high,
             dropout_rate=self.dropout_rate,
+            p_token_drop=self.p_token_drop,
         )
 
 

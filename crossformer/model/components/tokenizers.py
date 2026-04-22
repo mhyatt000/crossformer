@@ -287,6 +287,7 @@ class LowdimObsTokenizer(BinTokenizer):
     discretize: bool = False
     use_obs_mask: bool = True
     dropout_rate: float = 0.0
+    p_token_drop: float = 0.0
 
     def setup(self):
         super().setup()
@@ -316,5 +317,10 @@ class LowdimObsTokenizer(BinTokenizer):
             tokens = jax.nn.one_hot(tokenized_inputs, self.n_bins)
         else:
             tokens = tokenizer_inputs[..., None]
-        mask = jnp.ones(tokens.shape[:-1])
+        mask = jnp.ones(tokens.shape[:-1], dtype=bool)
+        if train and self.p_token_drop > 0:
+            rng = self.make_rng("dropout")
+            keep = jax.random.bernoulli(rng, 1 - self.p_token_drop, mask.shape)
+            mask = mask & keep
+        jax.debug.print("[{name}] mask.mean={m} shape={s}", name=self.name, m=mask.mean(), s=mask.shape)
         return TokenGroup(tokens, mask)
