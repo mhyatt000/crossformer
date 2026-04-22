@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from functools import wraps
 import logging
 import os
 from typing import Any, Sequence
@@ -14,7 +13,9 @@ import numpy as np
 
 from crossformer.utils.mytyping import PyTree
 
-cpu = jax.devices("cpu")[0]
+
+def _resolve_device(device):
+    return device() if callable(device) else device
 
 
 def compose(*fns: Callable[[PyTree], PyTree]) -> Callable[[PyTree], PyTree]:
@@ -28,57 +29,37 @@ def compose(*fns: Callable[[PyTree], PyTree]) -> Callable[[PyTree], PyTree]:
     return run
 
 
-class JaxCPUProxy:
-    """A proxy for jax.numpy that forces all operations to run on CPU.
-    it is up to the user to know when to use
-    """
-
-    def __getattr__(self, name):
-        fn = getattr(jnp, name)
-        if callable(fn):
-
-            @wraps(fn)
-            def wrapper(*args, **kwargs):
-                out = fn(*args, **kwargs, device=cpu)
-                return out
-
-            return wrapper
-        return fn
-
-
-def with_device_context(device):
-    def deco(fn):
-        @wraps(fn)
-        def wrapped(*args, **kwargs):
-            with jax.default_device(device):
-                return fn(*args, **kwargs)
-
-        return wrapped
-
-    return deco
-
-
-with_device = with_device_context
-
-
 def viz(tree: PyTree):
     jax.debug.visualize_array_sharding(tree)
 
 
-def str2jax(s: str, device=cpu) -> jax.Array:
-    """Convert a string to a JAX array by encoding each character as its Unicode code point."""
-    return jnp.array(np.frombuffer(s.encode("utf-8"), dtype=np.uint8), device=device)
+def str2np(s: str, length: int | None = None) -> np.ndarray:
+    """Encode a string as uint8 bytes, optionally zero-padded to a fixed length."""
+    raw = np.frombuffer(s.encode("utf-8"), dtype=np.uint8)
+    if length is not None:
+        if len(raw) > length:
+            raise ValueError(f"encoded string length {len(raw)} exceeds fixed length {length}")
+        padded = np.zeros(length, dtype=np.uint8)
+        padded[: len(raw)] = raw
+        raw = padded
+    return raw
 
 
-def npstr2jax(arr: np.ndarray, device=cpu) -> jax.Array:
+def npstr2np(arr: np.ndarray) -> np.ndarray:
     if arr.dtype.kind != "U":
         raise TypeError("expected Unicode array")
-    # Encode each string to UTF-8 bytes, then pack
     encoded = [s.encode("utf-8") for s in arr]
-    # Pad to same length if needed
     maxlen = max(len(e) for e in encoded)
-    padded = np.array([np.frombuffer(e.ljust(maxlen, b"\0"), dtype=np.uint8) for e in encoded])
-    return jnp.array(padded, device=device)
+    return np.array([np.frombuffer(e.ljust(maxlen, b"\0"), dtype=np.uint8) for e in encoded])
+
+
+def str2jax(s: str, device=None, length: int | None = None) -> jax.Array:
+    """Encode a string as uint8 bytes, optionally zero-padded to a fixed length."""
+    return jnp.array(str2np(s, length=length), device=_resolve_device(device) or cpu())
+
+
+def npstr2jax(arr: np.ndarray, device=None) -> jax.Array:
+    return jnp.array(npstr2np(arr), device=_resolve_device(device) or cpu())
 
 
 def jax2str(x: jax.Array) -> str:
