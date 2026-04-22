@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from functools import partial
 import multiprocessing
 import os
 import time
-from types import SimpleNamespace
 from typing import Any
 
 from absl import flags
@@ -26,8 +25,6 @@ from rich.rule import Rule
 from rich.table import Table
 import tyro
 
-from crossformer.cn.dataset.mix import Arec, DataSource
-from crossformer.cn.dataset.transform.traj import TrajectoryTransform
 from crossformer.utils.peace_and_quiet import (
     install_absl_filter,
     patch_arec_source,
@@ -36,60 +33,19 @@ from crossformer.utils.peace_and_quiet import (
 
 
 @dataclass
-class GrainTransformCfg:
-    traj: TrajectoryTransform = field(default_factory=lambda: TrajectoryTransform(name=""))
-    skip_norm_keys: tuple[str, ...] = ("proprio_bimanual", "proprio_mano")
-
-
-@dataclass
-class GrainDataCfg:
-    mix: Any
-    loader: Any
-    transform: GrainTransformCfg = field(default_factory=GrainTransformCfg)
-    recompute: bool = False
-
-    @property
-    def traj(self):
-        return self.transform.traj
-
-
-@dataclass
-class GrainTrainLike:
+class Config:
     mix: str = "xgym_sweep"
     batch_size: int = 4096
-    seed: int = 42
-    recompute: bool = False
-    window_size: int = 1
-    loader: Any = None
-    transform: GrainTransformCfg = field(default_factory=GrainTransformCfg)
-    data: GrainDataCfg = field(init=False)
-
-    def __post_init__(self):
-        loader = self.loader or _make_default_loader()
-        mix = SimpleNamespace(value=DataSource.REGISTRY[self.mix])
-        loader = replace(loader, global_batch_size=self.batch_size)
-        transform = replace(
-            self.transform,
-            traj=replace(self.transform.traj, window_size=self.window_size),
-        )
-        self.data = GrainDataCfg(
-            mix=mix,
-            loader=loader,
-            transform=transform,
-            recompute=self.recompute,
-        )
-
-
-@dataclass
-class Config(GrainTrainLike):
-    lightweight_cfg: bool = False
     batches: int = 10
     mp: int = 0
+    seed: int = 42
+    recompute: bool = False
     shuffle: bool = True
     resize: tuple[int, int] = (64, 64)
     mp_prefetch: int = 1
     read_threads: int = 48
     read_prefetch: int = 64
+    loader: Any = None
 
 
 def _spec(x, *, simple: bool = False):
@@ -104,14 +60,7 @@ def _make_default_loader():
     return Loader(use_grain=True)
 
 
-def _make_train_cfg_old(
-    mix: str,
-    batch_size: int,
-    loader: Any,
-    recompute: bool,
-    seed: int,
-    window_size: int,
-):
+def make_train_cfg(mix: str, batch_size: int, loader: Any, recompute: bool):
     import crossformer.cn as cn
     from crossformer.cn.dataset import DataSourceE
 
@@ -121,8 +70,7 @@ def _make_train_cfg_old(
             loader=replace(loader, global_batch_size=batch_size),
             recompute=recompute,
         ),
-        seed=seed,
-        window_size=window_size,
+        seed=42,
         verbosity=0,
     )
 
@@ -170,30 +118,20 @@ def _worker_cpu_only_init(worker_index: int, worker_count: int) -> None:
 
 
 def build_dataset(cfg: Config):
+    import crossformer.cn as cn
     from crossformer.data.grain.loader import _apply_fd_limit, GrainDataFactory, make_source_by_mix
 
     patch_arec_source()
 
     loader = cfg.loader or _make_default_loader()
-    train_cfg = (
-        cfg
-        if cfg.lightweight_cfg
-        else _make_train_cfg_old(
-            mix=cfg.mix,
-            batch_size=cfg.batch_size,
-            loader=loader,
-            recompute=cfg.recompute,
-            seed=cfg.seed,
-            window_size=cfg.window_size,
-        )
-    )
+    train_cfg = make_train_cfg(cfg.mix, cfg.batch_size, loader, recompute=cfg.recompute)
     factory = GrainDataFactory(mp=cfg.mp, shuffle=cfg.shuffle, resize=cfg.resize)
 
     # return iter(factory.make(train_cfg).dataset)
     _apply_fd_limit(512**2)
 
     mix = train_cfg.data.mix.value.flatten()
-    mix = [Arec.from_name(name) for name, _weight in mix]
+    mix = [cn.dataset.mix.Arec.from_name(name) for name, _weight in mix]
     sources = [make_source_by_mix(m, train_cfg) for m in mix]
     max_a = max(m.embodiment.action_dim for m in mix)
 
@@ -241,7 +179,6 @@ def main(cfg: Config) -> None:
         {
             "mix": cfg.mix,
             "batch_size": cfg.batch_size,
-            "lightweight_cfg": cfg.lightweight_cfg,
             "mp": cfg.mp,
             "mp_prefetch": cfg.mp_prefetch,
             "read_threads": cfg.read_threads,
