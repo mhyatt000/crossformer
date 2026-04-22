@@ -322,5 +322,4 @@ class LowdimObsTokenizer(BinTokenizer):
             rng = self.make_rng("dropout")
             keep = jax.random.bernoulli(rng, 1 - self.p_token_drop, mask.shape)
             mask = mask & keep
-        jax.debug.print("[{name}] mask.mean={m} shape={s}", name=self.name, m=mask.mean(), s=mask.shape)
         return TokenGroup(tokens, mask)
