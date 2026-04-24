@@ -60,6 +60,7 @@ class Config:
     lr: float = 1e-3  # learning rate
     log_every: int = 100  # log interval
     batch_size: int = 256  # global batch size
+    eval_batch_size: int = 64  # eval loader batch size; keep modest so large train batches still boot
     mix: str = "xgym_sweep"  # dataset mix name
     horizon: int = 20  # action horizon from data pipeline
     verbose: bool = False  # print model tabulation during init
@@ -72,6 +73,7 @@ class Config:
             vision=Vision(use_film=False, encoder="resnetv2-50-film"),
         )
     )
+    debug: bool = False  # debug mode with smaller model and dataset; overrides some other settings
 
     # Optimizer
     weight_decay: float = 1e-4  # adamw weight decay
@@ -116,6 +118,40 @@ def infer_model_keys(obs):
     image_keys = tuple(k.removeprefix("image_") for k in sorted(obs) if k.startswith("image_"))
     proprio_keys = tuple(k.removeprefix("proprio_") for k in sorted(obs) if k.startswith("proprio_"))
     return image_keys, proprio_keys
+
+
+def _num_tokens(tok_cfg: dict) -> int:
+    return int(tok_cfg.get("kwargs", {}).get("num_tokens", 0))
+
+
+def _leaf_dtypes(tree) -> list[str]:
+    return sorted({str(x.dtype) for x in jax.tree.leaves(tree) if hasattr(x, "dtype")})
+
+
+def _build_optimizer_cfg(cfg: Config) -> dict:
+    learning_rate = (
+        {
+            "name": cfg.lr_schedule,
+            "init_value": 0.0,
+            "peak_value": cfg.lr,
+            "warmup_steps": cfg.warmup_steps,
+            **({"decay_steps": cfg.steps} if cfg.lr_schedule == "cosine" else {}),
+        }
+        if cfg.warmup_steps > 0
+        else cfg.lr
+    )
+    return {
+        "learning_rate": learning_rate,
+        "weight_decay": cfg.weight_decay,
+        "clip_gradient": cfg.clip_gradient,
+        "frozen_keys": list(cfg.frozen_keys) if cfg.frozen_keys else None,
+    }
+
+
+def _align_batch_size(batch_size: int, device_count: int) -> int:
+    if batch_size < device_count:
+        return device_count
+    return (batch_size // device_count) * device_count
 
 
 def per_embodiment_metrics(batch, update_info):
@@ -189,7 +225,7 @@ def main(cfg: Config):
     train_cfg = make_data_cfg(cfg.mix, cfg.batch_size, cfg.train_loader, recompute=cfg.recompute)
     eval_cfg = make_data_cfg(
         cfg.mix,
-        cfg.batch_size,
+        _align_batch_size(min(cfg.batch_size, cfg.eval_batch_size), len(devices)),
         Loader(
             use_grain=True,
             shuffle_buffer=1,
@@ -217,7 +253,14 @@ def main(cfg: Config):
     print(spec(example_batch))
     inferred_image_keys, inferred_proprio_keys = infer_model_keys(example_batch["observation"])
     obs_keys: tuple[str, ...] = ()
+    per_device_batch = cfg.batch_size // len(devices)
+    image_shapes = {k: tuple(v.shape) for k, v in example_batch["observation"].items() if k.startswith("image_")}
+    image_dtypes = {k: str(v.dtype) for k, v in example_batch["observation"].items() if k.startswith("image_")}
+    print(f"  per_device_batch: {per_device_batch}")
+    print(f"  eval_batch_size: {eval_cfg.data.loader.global_batch_size}")
     print(f"  image_keys: {inferred_image_keys}")
+    print(f"  input image shapes: {image_shapes}")
+    print(f"  input image dtypes: {image_dtypes}")
     print(f"  proprio_keys (available): {inferred_proprio_keys}")
 
     guide_example = None
@@ -235,6 +278,8 @@ def main(cfg: Config):
     max_w = example_batch["observation"]["timestep_pad_mask"].shape[1]
     cfg.model.window = max_w
     cfg.model.image_keys = inferred_image_keys
+    print("inferred image_keys: ")
+    print(f"{cfg.model.image_keys}")
     cfg.model.proprio_keys = ()
     cfg.model.xflow.max_dofs = max_a
     cfg.model.xflow.max_horizon = max_h
@@ -253,12 +298,30 @@ def main(cfg: Config):
         "observation": init_obs,
         "task": example_batch.get("task", {"pad_mask_dict": {}}),
     }
+    model_cfg = cfg.model.create()
+    model_cfg["optimizer"] = _build_optimizer_cfg(cfg)
+    model_spec = model_cfg["model"]
+    obs_tok_cfg = model_spec["observation_tokenizers"]
+    task_tok_cfg = model_spec["task_tokenizers"]
+    readouts = model_spec["readouts"]
+    obs_tokens = sum(_num_tokens(tok) for tok in obs_tok_cfg.values())
+    task_tokens = sum(_num_tokens(tok) for tok in task_tok_cfg.values())
+    readout_tokens = sum(int(v) for v in readouts.values())
+    attn_tokens = obs_tokens + task_tokens + readout_tokens
+    xflow_head = model_spec["heads"]["action"]["kwargs"]
+    print(Rule("model diagnostics"))
+    print(f"  attention tokens: {attn_tokens} (obs={obs_tokens} task={task_tokens} readout={readout_tokens})")
+    print(f"  hidden dim: {model_spec['token_embedding_size']}")
+    print(f"  transformer layers: {model_spec['transformer_kwargs']['num_layers']}")
+    print(f"  transformer heads: {model_spec['transformer_kwargs']['num_attention_heads']}")
+    print(f"  xflow self-attend layers: {xflow_head['num_self_attend_layers']}")
+    print(f"  xflow head blocks: {xflow_head['num_blocks']}")
     wandb.config.update(
         {
             "example_batch_spec": spec(example_batch),
             "obs_keys": obs_keys,
             "max_a": max_a,
-            **cfg.model.create(),
+            **model_cfg,
         },
         allow_val_change=True,
     )
@@ -267,7 +330,7 @@ def main(cfg: Config):
     init_rng, train_rng, pred_rng = jax.random.split(rng, 3)
 
     model = CrossFormerModel.from_config(
-        cfg.model.create(),
+        model_cfg,
         init_batch,
         text_processor=None,
         verbose=cfg.verbose,
@@ -282,7 +345,9 @@ def main(cfg: Config):
         example_batch=jax.tree.map(lambda x: jax.device_put(x, replicated_sharding), model.example_batch),
     )
     n_params = sum(x.size for x in jax.tree.leaves(model.params))
+    param_dtypes = _leaf_dtypes(model.params)
     print(f"  params: {n_params:,}")
+    print(f"  param dtypes: {param_dtypes}")
     print(f"  heads: {list(model.module.heads.keys())}")
     if cfg.frozen_keys:
         print(f"  frozen_keys: {list(cfg.frozen_keys)}")
@@ -294,25 +359,11 @@ def main(cfg: Config):
         print(f"  guide_keys={cfg.guide_keys} shape={guide_example.shape}")
 
     # Optimizer + state
-    lr_kwargs: dict = {
-        "learning_rate": (
-            {
-                "name": cfg.lr_schedule,
-                "init_value": 0.0,
-                "peak_value": cfg.lr,
-                "warmup_steps": cfg.warmup_steps,
-                **({"decay_steps": cfg.steps} if cfg.lr_schedule == "cosine" else {}),
-            }
-            if cfg.warmup_steps > 0
-            else cfg.lr
-        ),
-        "weight_decay": cfg.weight_decay,
-    }
-    if cfg.clip_gradient is not None:
-        lr_kwargs["clip_gradient"] = cfg.clip_gradient
-    if cfg.frozen_keys:
-        lr_kwargs["frozen_keys"] = list(cfg.frozen_keys)
-    tx, lr_callable, param_norm_callable = create_optimizer(model.params, **lr_kwargs)
+    params = model.params
+    tx, lr_callable, param_norm_callable = create_optimizer(params, **model.config["optimizer"])
+    print(Rule("optimizer"))
+    print(f"  config: {model.config['optimizer']}")
+    print(f"  tx: {tx}")
     state = TrainState.create(model=model, tx=tx, rng=train_rng)
     train_step = make_train_step(model.module, lr_callable, param_norm_callable)
 
