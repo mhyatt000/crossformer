@@ -10,6 +10,7 @@ import os
 import resource
 from typing import Any, Protocol
 
+import cv2
 import grain
 from grain.experimental import ThreadPrefetchIterDataset
 import numpy as np
@@ -77,13 +78,6 @@ def _grain_mp_worker_init(worker_index: int, worker_count: int) -> None:
 
     with quiet_jax_xla_bridge():
         _ = jax.devices("cpu")
-
-
-def np2jax(x):
-    jax = import_jax_cpu_safe()
-    jnp = jax.numpy
-    dev = _grain_cpu_device()
-    return jax.tree.map(lambda y: jnp.array(y, device=dev), x)
 
 
 @jtyped
@@ -286,6 +280,15 @@ def make_single_dataset(
     return ds, stats
 
 
+def imresize(x, size=(64, 64)):
+    import jax
+
+    x["observation"]["image"] = jax.tree.map(lambda y: cv2.resize(y, size), x["observation"]["image"])
+    # reshape WHC to win,WHC
+    x["observation"]["image"] = jax.tree.map(lambda y: y.reshape(-1, *y.shape[-3:]), x["observation"]["image"])
+    return x
+
+
 def kind(x):
     jax = import_jax_cpu_safe()
     if isinstance(x, np.ndarray):
@@ -318,6 +321,8 @@ class GrainDataFactory:
     # None disables both stages (image stays at native size, no center_crop).
     resize: int | tuple[int, int] | None = (64, 64)
 
+    verbose: bool = False  # log extra info like batch spec, and warmup prefetch
+
     def source2ds(self, dconfig, cfg: TrainLike, dataset: Arec, max_a: int = 0) -> GrainDataLoader:
         ds, stats = make_single_dataset(
             dconfig,
@@ -335,6 +340,8 @@ class GrainDataFactory:
                 shuffle_slot=self.shuffle_slot,
             )
             ds = ds.map(embody_fn)
+            if self.resize is not None:
+                ds = ds.map(partial(imresize, size=self.resize))
             log.debug("applied embody transform: %s (max_a=%d)", dconfig.name, max_a)
         self.stats[dconfig.name] = stats
         return ds
@@ -374,6 +381,24 @@ class GrainDataFactory:
 
         ds = grain.MapDataset.mix(dsets, weights=[1.0] * len(dsets))
         return ds
+
+    def default_sharding(self):
+        import jax
+        from jax.experimental import multihost_utils
+        from jax.sharding import Mesh, NamedSharding, PartitionSpec
+
+        devices = jax.devices()
+        print(devices)
+        mesh = Mesh(devices, axis_names="batch")
+        dp_sharding = NamedSharding(mesh, PartitionSpec("batch"))
+        replicated_sharding = NamedSharding(mesh, PartitionSpec())
+
+        def shard_batch(batch, mesh):
+            """Shard a host-local batch across the data axis."""
+            return multihost_utils.host_local_array_to_global_array(batch, mesh, PartitionSpec("batch"))
+
+        shard_fn = partial(shard_batch, mesh=mesh)
+        return shard_fn
 
     def make(
         self,
@@ -435,12 +460,16 @@ class GrainDataFactory:
             os.environ["JAX_PLATFORM_NAME"] = "cpu"
             os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
             ds = ds.mp_prefetch(
-                grain.MultiprocessingOptions(num_workers=self.mp, per_worker_buffer_size=8),
+                grain.MultiprocessingOptions(num_workers=self.mp, per_worker_buffer_size=2),
                 worker_init_fn=_grain_mp_worker_init,
             )
 
         batch = next(iter(ds))
-        log.debug("batch spec: %s", spec(batch))
+        if self.verbose:
+            log.debug("batch spec: %s", spec(batch))
+            leaves = jax.tree.leaves(batch)
+            print("num_leaves", len(leaves))
+            print("largest_mb", sorted([x.nbytes for x in leaves], reverse=True)[:10])
 
         # then frame lvl transforms in jax
 
@@ -449,15 +478,12 @@ class GrainDataFactory:
         #
         # blocks mp prefetch so that final jax ops can be main proc
         #
-        ds = ThreadPrefetchIterDataset(ds, prefetch_buffer_size=2)
-        # print(jax.tree.map(kind, self.stats))
-        # print(jax.tree.map(kind, batch))
-        # quit()
-        # return GrainDataLoader(dataset=ds, statistics=self.stats, config=sources[0][1])
+        ds = ThreadPrefetchIterDataset(ds, prefetch_buffer_size=4)
 
-        ds = ds.map(np2jax)  # dont use jax+grain yet... buggy
-        if shard_fn is not None:
-            ds = ds.map(shard_fn)
+        # dont use jax+grain yet... buggy
+        shard_fn = shard_fn or self.default_sharding()
+        ds = ds.map(shard_fn)
+        print("applied shard fn")
 
         # quick hack with keys
         dconfig = sources[0][1]
