@@ -1,5 +1,42 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+import numpy as np
+
+
+@dataclass
+class AugmentationConfig:
+    """Configuration for data augmentation."""
+
+    p_proprio_drop: float = (
+        0.0  # probability of dropping all proprio for some samples (zeroing pixels and flipping pmd)
+    )
+    p_im_drop: float = (
+        0.0  # probability of dropping entire camera views for some samples (zeroing pixels and flipping pmd)
+    )
+    p_im_shuffle: float = 0.0  # probability of shuffling camera views across view slots for some samples
+    p_im_occlude: float = 0.0
+    occlude_size: list[float] = (0.05, 0.5)  # min and max fraction of image area to occlude
+
+    def aug_im_occlude(self, step: dict, rng) -> dict:
+        return patch_occlude(
+            step,
+            rng,
+            self.p_occlude,
+            min_frac=self.occlude_size[0],
+            max_frac=self.occlude_size[1],
+        )
+
+    def aug_im_view_drop(self, step: dict, rng) -> dict:
+        return image_view_drop(step, rng, self.image_view_drop_prob)
+
+    def aug_im_key_shuffle(self, step: dict, rng) -> dict:
+        return image_key_shuffle(step, rng, self.image_key_shuffle_prob)
+
+    def aug_proprio_drop(self, step: dict, rng) -> dict:
+        return proprio_sample_drop(step, rng, self.proprio_drop_prob)
+
 
 def patch_occlude(step: dict, rng, prob: float, min_frac: float = 0.05, max_frac: float = 0.5) -> dict:
     """Randomly zero out a rectangular region in each image view.
