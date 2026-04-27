@@ -95,6 +95,7 @@ class ModelFactory(CN):
     vision: Vision = Vision().field()
     xflow: XFlow = XFlow().field()
     debug: bool = False
+    proprio_token_drop_prob: float = 0.0
 
     @property
     def heads(self) -> list[str]:
@@ -160,7 +161,9 @@ class ModelFactory(CN):
         return flat
 
     def make_obs_proprio(self, key: str) -> LowdimTokenizerCfg:
-        return LowdimTokenizerCfg(name=key, obs_keys=(f"proprio_{key}",), dropout_rate=0.2)
+        return LowdimTokenizerCfg(
+            name=key, obs_keys=(f"proprio_{key}",), dropout_rate=0.2, token_drop=self.proprio_token_drop_prob
+        )
 
     def make_obs_im(self, key: str, *, encoder: ModuleSpec) -> ImageTokenizerCfg:
         # DINOv3 takes 3-channel inputs only — disable channel-stacked goal images + FiLM.
