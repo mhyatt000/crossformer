@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from flax import linen as nn
 
+VGG19_BLOCKS = (
+    (64, 2),
+    (128, 2),
+    (256, 4),
+    (512, 4),
+    (512, 4),
+)
+
 
 class VGGBlock(nn.Module):
     ch: int
@@ -44,37 +52,22 @@ class DreamVGG(nn.Module):
     def __call__(self, x):
         stages = []
 
-        x = VGGBlock(64, 2, name="enc1")(x)
-        stages.append(("enc1", x))
-        x = nn.max_pool(x, (2, 2), strides=(2, 2), padding="SAME")
-        stages.append(("pool1", x))
+        for i, (ch, depth) in enumerate(VGG19_BLOCKS, start=1):
+            x = VGGBlock(ch, depth, name=f"enc{i}")(x)
+            stages.append((f"enc{i}", x))
+            if i < len(VGG19_BLOCKS):
+                x = nn.max_pool(x, (2, 2), strides=(2, 2), padding="SAME")
+                stages.append((f"pool{i}", x))
 
-        x = VGGBlock(128, 2, name="enc2")(x)
-        stages.append(("enc2", x))
-        x = nn.max_pool(x, (2, 2), strides=(2, 2), padding="SAME")
-        stages.append(("pool2", x))
-
-        x = VGGBlock(256, 4, name="enc3")(x)
-        stages.append(("enc3", x))
-        x = nn.max_pool(x, (2, 2), strides=(2, 2), padding="SAME")
-        stages.append(("pool3", x))
-
-        x = VGGBlock(512, 4, name="enc4")(x)
-        stages.append(("enc4", x))
-        x = nn.max_pool(x, (2, 2), strides=(2, 2), padding="SAME")
-        stages.append(("pool4", x))
-
-        for i, ch in enumerate((256, 128), start=1):
-            x = DecoderBlock(ch, name=f"dec_q{i}")(x)
-            stages.append((f"dec_q{i}", x))
-
-        if self.variant in {"half", "full"}:
-            x = DecoderBlock(64, name="dec_h")(x)
-            stages.append(("dec_h", x))
-
-        if self.variant == "full":
-            x = DecoderBlock(32, name="dec_f")(x)
-            stages.append(("dec_f", x))
+        dec_ch = {
+            "quarter": (256, 128),
+            "half": (256, 128, 64),
+            "full": (256, 128, 64, 32),
+        }[self.variant]
+        dec_names = ("dec_q1", "dec_q2", "dec_h", "dec_f")
+        for name, ch in zip(dec_names, dec_ch, strict=True):
+            x = DecoderBlock(ch, name=name)(x)
+            stages.append((name, x))
 
         x = nn.Conv(64, (3, 3), padding="SAME", name="head1")(x)
         x = nn.relu(x)
