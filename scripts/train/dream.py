@@ -7,8 +7,8 @@ from dataclasses import dataclass, field
 from flax.training.train_state import TrainState
 import grain
 import jax
-import jax.image
 import jax.numpy as jnp
+import numpy as np
 import optax
 from rich import print
 from rich.pretty import pprint
@@ -16,10 +16,18 @@ from rich.rule import Rule
 from rich.table import Table
 import tyro
 
+import crossformer.cn as cn
+from crossformer.cn.base import default
 from crossformer.cn.dataset.mix import Arec
 from crossformer.data.grain.datasets import unpack_record
 from crossformer.model.dream import DreamVGG
 from crossformer.utils.spec import spec
+import wandb
+
+
+@dataclass
+class DreamVizConfig:
+    every: int = 5000
 
 
 @dataclass
@@ -28,6 +36,8 @@ class Config:
 
     seed: int = 0
     bs: int = 1
+    steps: int = 1_000_000
+    log_every: int = 100
     image_h: int = 480
     image_w: int = 640
     image_c: int = 3
@@ -36,8 +46,8 @@ class Config:
     mix: Arec = field(default_factory=lambda: Arec.from_name("xarm_dream_100k"))
     sigma: float = 2.0  # TODO desc
     lr: float = 1e-3
-    steps: int = 1
-    log_every: int = 1
+    vis: DreamVizConfig = default(DreamVizConfig())
+    wandb: cn.Wandb = default(cn.Wandb(project="bela-dream"))
     verbose: bool = False
 
 
@@ -103,6 +113,11 @@ def _scaled_kp2d(batch: dict, out_h: int, out_w: int) -> jax.Array:
     return batch["keypoints_2d"] * scale
 
 
+def _unscale_kp2d(kp2d: jax.Array, image_h: int, image_w: int, out_h: int, out_w: int) -> jax.Array:
+    scale = jnp.array([image_w / out_w, image_h / out_h], dtype=jnp.float32)
+    return kp2d * scale
+
+
 def dream_loss_fn(batch: dict, out_dict: dict, sigma: float = 2.0):
     pred = out_dict["pred_heatmaps"]
     _, _, out_h, out_w = pred.shape
@@ -116,6 +131,71 @@ def dream_loss_fn(batch: dict, out_dict: dict, sigma: float = 2.0):
         "visible_kp": vis.sum(),
     }
     return loss, metrics
+
+
+def _extract_keypoints_one(hm: jax.Array) -> tuple[jax.Array, jax.Array]:
+    k, h, w = hm.shape
+    flat = hm.reshape(k, h * w)
+    idx = jnp.argmax(flat, axis=-1)
+    conf = jnp.take_along_axis(flat, idx[:, None], axis=-1)[:, 0]
+    ys = idx // w
+    xs = idx % w
+    uv = jnp.stack([xs, ys], axis=-1).astype(jnp.float32)
+    return uv, conf
+
+
+def extract_keypoints(pred_heatmaps: jax.Array) -> tuple[jax.Array, jax.Array]:
+    return jax.vmap(_extract_keypoints_one)(pred_heatmaps)
+
+
+def _render_overlay(batch: dict, pred_uv: np.ndarray, pred_conf: np.ndarray, pred_heatmaps: np.ndarray, idx: int = 0):
+    import matplotlib.pyplot as plt
+
+    image = np.asarray(batch["image"][idx])
+    uv_gt = np.asarray(batch["keypoints_2d"][idx])
+    vis = np.asarray(batch["keypoints_visible"][idx])
+    uv_pred = np.asarray(pred_uv[idx])
+    conf = np.asarray(pred_conf[idx])
+    hm = np.asarray(pred_heatmaps[idx])
+
+    fig, axes = plt.subplots(1, 3, figsize=(14, 5))
+    axes[0].imshow(image)
+    axes[0].scatter(uv_gt[vis, 0], uv_gt[vis, 1], c="lime", s=20, label="gt")
+    axes[0].scatter(uv_pred[:, 0], uv_pred[:, 1], c="red", s=20, label="pred")
+    axes[0].set_title("image + keypoints")
+    axes[0].legend()
+    axes[0].axis("off")
+
+    axes[1].imshow(hm.max(axis=0), cmap="magma")
+    axes[1].set_title("max heatmap")
+    axes[1].axis("off")
+
+    axes[2].imshow(image)
+    axes[2].imshow(hm.max(axis=0), cmap="magma", alpha=0.5)
+    axes[2].set_title(f"overlay conf={conf.mean():.3f}")
+    axes[2].axis("off")
+
+    fig.tight_layout()
+    out = wandb.Image(fig)
+    plt.close(fig)
+    return out
+
+
+def maybe_log_viz(cfg: Config, batch: dict, out_dict: dict, step: int):
+    if not cfg.wandb.use or cfg.vis.every <= 0 or step % cfg.vis.every != 0:
+        return
+    pred_uv, pred_conf = extract_keypoints(out_dict["pred_heatmaps"])
+    _, _, out_h, out_w = out_dict["pred_heatmaps"].shape
+    pred_uv = _unscale_kp2d(pred_uv, batch["image"].shape[1], batch["image"].shape[2], out_h, out_w)
+    log = {
+        "viz/predictions": _render_overlay(
+            jax.device_get(batch),
+            jax.device_get(pred_uv),
+            jax.device_get(pred_conf),
+            jax.device_get(out_dict["pred_heatmaps"]),
+        )
+    }
+    cfg.wandb.log(log, step=step)
 
 
 def make_train_step_dream(model, loss_fn):
@@ -170,6 +250,7 @@ def main(cfg: Config):
 
     print(Rule("DREAM Prepared Sample", style="bold magenta"))
     pprint(spec(batch))
+    run = cfg.wandb.initialize(cfg)
 
     rng = jax.random.PRNGKey(cfg.seed)
     init_rng = rng
@@ -194,27 +275,31 @@ def main(cfg: Config):
     print(f"params={_count_params(state.params):,}")
     print(f"pred_heatmaps.shape={out_dict['pred_heatmaps'].shape}")
     print(f"init_loss={float(init_metrics['loss']):.6f}")
+    maybe_log_viz(cfg, batch, out_dict, step=0)
 
     print(Rule("DREAM Train Loop", style="bold magenta"))
     for step in range(cfg.steps):
         batch = prepare_sample(next(dsit))
         state, metrics = train_step(state, batch)
+        eval_metrics = None
         if step % cfg.log_every == 0:
+            eval_batch = prepare_sample(next(dsit))
+            eval_metrics = eval_step(state, eval_batch)
+            cfg.wandb.log({"train": metrics, "eval": eval_metrics}, step=step)
             print(
                 f"step={step} loss={float(metrics['loss']):.6f} "
+                f"eval_loss={float(eval_metrics['loss']):.6f} "
                 f"grad_norm={float(metrics['grad_norm']):.6f} "
                 f"visible_kp={int(metrics['visible_kp'])}"
             )
-
-    eval_batch = prepare_sample(next(dsit))
-    eval_metrics = eval_step(state, eval_batch)
-    print(
-        f"eval_loss={float(eval_metrics['loss']):.6f} "
-        f"eval_visible_kp={int(eval_metrics['visible_kp'])}"
-    )
+        if cfg.vis.every > 0 and step % cfg.vis.every == 0:
+            pred_heatmaps, _ = model.apply({"params": state.params}, batch["image"])
+            out_dict = {"pred_heatmaps": jnp.transpose(pred_heatmaps, (0, 3, 1, 2))}
+            maybe_log_viz(cfg, batch, out_dict, step=step)
 
     if cfg.verbose:
         print(model.tabulate(init_rng, batch["image"], depth=2))
+    cfg.wandb.finish()
 
 
 if __name__ == "__main__":
