@@ -43,7 +43,7 @@ class DreamVizConfig:
 
 @dataclass
 class Optim:
-    lr: float = 1e-3  
+    lr: float = 1e-3
     weight_decay: float = 0.0
     warmup_steps: int = 500
     lr_schedule: str = "constant"  # constant | cosine | rsqrt
@@ -97,38 +97,48 @@ class Config:
     mp_buf: int = 4  # per worker buffer size
     n_preshard: int = 2  # prefetch sharded data
 
-    coco_prob:float = 0.5
-    coco_dir:Path = Path().home() / 'bela/datasets/coco/train2014'
-
-def read_bg(name, width=224, height=224):
-    img = Image.open(coco_dir / name).convert("RGB")
-    img = resize_cover(img, width, height)
-    return {"image": np.asarray(img, dtype=np.uint8)} # , "name": name}
-
-def make_coco_dataset(path:Path):
-    ds = (
-            grain.MapDataset.source(sorted(path.listdir()))
-            .seed(seed)
-            .shuffle()
-            .repeat()
-            .map(read_bg)
-            .map(lambda x: {'bg':x['image']}) # remap
-            .to_iter_dataset()
-            )
-    return ds
+    coco_prob: float = 0.5
+    coco_dir: Path = Path.home() / "bela/datasets/coco/train2014"
 
 
-def add_bg(x:dict, rng, prob=0.5):
-    if rng > prob:
-        x['image'] = np.where(x["mask"][..., None] > 0, x["image"], x['bg'])
+def _resize_cover(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
+    src_w, src_h = img.size
+    scale = max(target_w / src_w, target_h / src_h)
+    new_w = max(target_w, round(src_w * scale))
+    new_h = max(target_h, round(src_h * scale))
+    img = img.resize((new_w, new_h), Image.BILINEAR)
+    left = (new_w - target_w) // 2
+    top = (new_h - target_h) // 2
+    return img.crop((left, top, left + target_w, top + target_h))
+
+
+def make_coco_dataset(cfg: Config):
+    names = sorted(p.name for p in cfg.coco_dir.glob("*.jpg"))
+    if not names:
+        raise FileNotFoundError(f"no .jpg files under {cfg.coco_dir}")
+    net_h, net_w = cfg.net_in_size
+
+    def read_bg(name: str):
+        img = Image.open(cfg.coco_dir / name).convert("RGB")
+        img = _resize_cover(img, net_w, net_h)
+        return {"bg": np.asarray(img, dtype=np.uint8)}
+
+    return grain.MapDataset.source(names).seed(cfg.seed).shuffle().repeat().map(read_bg).to_iter_dataset()
+
+
+def add_bg(x: dict, rng, prob=0.5):
+    if rng.random() < prob:
+        x["image"] = np.where(x["mask"][..., None] > 0, x["image"], x["bg"])
+    x.pop("bg", None)
+    x.pop("mask", None)
     return x
 
 
-def mix_with_bg(robot_ds, coco_ds, cfg:Config):
+def mix_with_bg(robot_ds, coco_ds, cfg: Config):
     """mix robot dataset with coco background"""
 
     ds = grain.experimental.ZipIterDataset([robot_ds, coco_ds], strict=False)
-    ds = ds.map(lambda a,b: a|b) # group dicts
+    ds = ds.map(lambda pair: pair[0] | pair[1])
     ds = ds.seed(cfg.seed).random_map(partial(add_bg, prob=cfg.coco_prob))
     return ds
 
@@ -143,18 +153,13 @@ def make_dataset(cfg: Config):
         .to_iter_dataset(
             grain.ReadOptions(num_threads=32, prefetch_buffer_size=1024)
         )  # iter before batch so that procs do batching and doesnt impede read threads
-        )
+    )
 
-
-    print(spec(next(iter(ds))))
     ds = ds.map(partial(prepare_sample_np, cfg))
     if cfg.coco_prob:
-        coco = make_coco_dataset(cfg.coco_dir)
+        coco = make_coco_dataset(cfg)
         ds = mix_with_bg(ds, coco, cfg)
-    print(spec(next(iter(ds))))
-    quit()
     ds = ds.batch(cfg.bs, drop_remainder=True)
-
 
     if cfg.mp > 0:
         lim = _apply_fd_limit(512**2)
@@ -226,6 +231,7 @@ def prepare_sample_np(cfg: Config, sample: dict) -> dict:
     if tuple(image.shape[:2]) != (raw_h, raw_w):
         raise ValueError(f"expected raw_size={(raw_h, raw_w)} but got {tuple(image.shape[:2])}")
     image = np.asarray(Image.fromarray(image).resize((net_w, net_h), Image.BILINEAR))
+    mask = np.asarray(Image.fromarray(sample["mask"]).resize((net_w, net_h), Image.NEAREST))
     joints = np.asarray(sample["state"]["joints"], dtype=np.float32)
     gripper = np.asarray([sample["state"]["gripper"]], dtype=np.float32)
     q = np.concatenate([joints, gripper], axis=-1)
@@ -234,6 +240,7 @@ def prepare_sample_np(cfg: Config, sample: dict) -> dict:
     K = np.asarray(sample["camera"]["intr"]["K"], dtype=np.float32)
     return {
         "image": image,
+        "mask": mask,
         "q": q,
         "keypoints_2d_norm": kp2d_norm,
         "keypoints_2d_raw": kp2d_raw,
@@ -503,7 +510,9 @@ def main(cfg: Config):
         tx=tx,
     )
     loss_fn = lambda batch, out_dict: dream_loss_fn(batch, out_dict, sigma=cfg.sigma, raw_size=cfg.raw_size)
-    train_step = make_train_step_dream(model, loss_fn, out_h=out_h, out_w=out_w, lr_fn=lr_fn, param_norm_fn=param_norm_fn)
+    train_step = make_train_step_dream(
+        model, loss_fn, out_h=out_h, out_w=out_w, lr_fn=lr_fn, param_norm_fn=param_norm_fn
+    )
     eval_step = make_eval_step_dream(model, loss_fn, out_h=out_h, out_w=out_w)
 
     pred_heatmaps, shapes = model.apply({"params": state.params}, image)
@@ -541,9 +550,7 @@ def main(cfg: Config):
             print({**metrics, **eval_metrics, **times})
         if cfg.viz.every > 0 and step % cfg.viz.every == 0:
             pred_heatmaps, _ = model.apply({"params": state.params}, _image_to_float(batch["image"]))
-            out_dict = {
-                "pred_heatmaps": resize_pred_heatmaps(jnp.transpose(pred_heatmaps, (0, 3, 1, 2)), out_h, out_w)
-            }
+            out_dict = {"pred_heatmaps": resize_pred_heatmaps(jnp.transpose(pred_heatmaps, (0, 3, 1, 2)), out_h, out_w)}
             maybe_log_viz(cfg, batch, out_dict, step=step)
 
     if cfg.verbose:
