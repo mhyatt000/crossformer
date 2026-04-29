@@ -163,7 +163,6 @@ def add_bg(x: dict, rng, prob=0.5):
     if rng.random() < prob:
         x["image"] = np.where(x["mask"][..., None] > 0, x["image"], x["bg"])
     x.pop("bg", None)
-    x.pop("mask", None)
     return x
 
 
@@ -413,6 +412,19 @@ def _render_heatmap_list(hm: np.ndarray):
     return out
 
 
+def _render_mask(mask: np.ndarray, idx: int = 0):
+    mask = np.asarray(mask[idx])
+    if mask.ndim == 3 and mask.shape[-1] == 1:
+        mask = mask[..., 0]
+    if mask.dtype == np.bool_:
+        mask = mask.astype(np.uint8) * 255
+    elif mask.max(initial=0) <= 1:
+        mask = (mask.astype(np.float32) * 255).astype(np.uint8)
+    else:
+        mask = np.clip(mask, 0, 255).astype(np.uint8)
+    return wandb.Image(mask)
+
+
 def maybe_log_viz(cfg: Config, batch: dict, out_dict: dict, step: int):
     if not cfg.wandb.use or cfg.viz.every <= 0 or step % cfg.viz.every != 0:
         return
@@ -439,6 +451,7 @@ def maybe_log_viz(cfg: Config, batch: dict, out_dict: dict, step: int):
             jax.device_get(out_dict["pred_heatmaps"]),
         ),
         "viz/gt": _render_heatmap_list(jax.device_get(gt_heatmaps[0])),
+        "viz/mask": _render_mask(jax.device_get(batch["mask"])),
     }
     cfg.wandb.log(log, step=step)
 
