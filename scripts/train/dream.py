@@ -8,6 +8,8 @@ from flax.training.train_state import TrainState
 import grain
 import jax
 import jax.numpy as jnp
+from jax.experimental import multihost_utils
+from jax.sharding import Mesh, PartitionSpec
 import numpy as np
 import optax
 from rich import print
@@ -23,6 +25,7 @@ from crossformer.data.grain.datasets import unpack_record
 from crossformer.model.dream import DreamVGG
 from crossformer.utils.spec import spec
 import wandb
+from tqdm import tqdm
 
 
 @dataclass
@@ -43,10 +46,10 @@ class Config:
     image_c: int = 3
     num_keypoints: int = 0  # 0 = infer from batch
     variant: str = "full"  # quarter | half | full
-    mix: Arec = field(default_factory=lambda: Arec.from_name("xarm_dream_100k"))
+    mix: Arec = default(Arec.from_name("xarm_dream_100k"))
     sigma: float = 2.0  # TODO desc
-    lr: float = 1e-3
-    vis: DreamVizConfig = default(DreamVizConfig())
+    lr: float = 1.5e-4 # 1.5e-4 is dream default
+    viz: DreamVizConfig = default(DreamVizConfig())
     wandb: cn.Wandb = default(cn.Wandb(project="bela-dream"))
     verbose: bool = False
 
@@ -62,6 +65,15 @@ def make_dataset(cfg: Config):
         .batch(cfg.bs, drop_remainder=True)
     )
     return ds
+
+
+def make_shard_fn():
+    mesh = Mesh(jax.devices(), axis_names="batch")
+
+    def shard_batch(batch):
+        return multihost_utils.host_local_array_to_global_array(batch, mesh, PartitionSpec("batch"))
+
+    return shard_batch
 
 
 def prepare_sample(sample: dict) -> dict:
@@ -118,6 +130,26 @@ def _unscale_kp2d(kp2d: jax.Array, image_h: int, image_w: int, out_h: int, out_w
     return kp2d * scale
 
 
+def keypoint_metrics(batch: dict, pred_heatmaps: jax.Array):
+    pred_uv, pred_conf = extract_keypoints(pred_heatmaps)
+    _, _, out_h, out_w = pred_heatmaps.shape
+    pred_uv = _unscale_kp2d(pred_uv, batch["image"].shape[1], batch["image"].shape[2], out_h, out_w)
+    gt_uv = batch["keypoints_2d"]
+    vis = batch["keypoints_visible"]
+    err = jnp.linalg.norm(pred_uv - gt_uv, axis=-1)
+    vis_f = vis.astype(jnp.float32)
+    denom = jnp.maximum(vis_f.sum(), 1.0)
+    mean_px = (err * vis_f).sum() / denom
+    pck_5 = ((err < 5.0).astype(jnp.float32) * vis_f).sum() / denom
+    pck_10 = ((err < 10.0).astype(jnp.float32) * vis_f).sum() / denom
+    return {
+        "mean_px": mean_px,
+        "pck_5": pck_5,
+        "pck_10": pck_10,
+        "conf_mean": pred_conf.mean(),
+    }
+
+
 def dream_loss_fn(batch: dict, out_dict: dict, sigma: float = 2.0):
     pred = out_dict["pred_heatmaps"]
     _, _, out_h, out_w = pred.shape
@@ -129,6 +161,7 @@ def dream_loss_fn(batch: dict, out_dict: dict, sigma: float = 2.0):
         "loss": loss,
         "mse": loss,
         "visible_kp": vis.sum(),
+        **keypoint_metrics(batch, pred),
     }
     return loss, metrics
 
@@ -181,19 +214,42 @@ def _render_overlay(batch: dict, pred_uv: np.ndarray, pred_conf: np.ndarray, pre
     return out
 
 
+def _render_heatmap_list(hm: np.ndarray):
+    import matplotlib.pyplot as plt
+
+    out = []
+    for i, ch in enumerate(hm):
+        fig, ax = plt.subplots(1, 1, figsize=(4, 3))
+        ax.imshow(ch, cmap="magma")
+        ax.set_title(f"kp {i}")
+        ax.axis("off")
+        fig.tight_layout()
+        out.append(wandb.Image(fig))
+        plt.close(fig)
+    return out
+
+
 def maybe_log_viz(cfg: Config, batch: dict, out_dict: dict, step: int):
-    if not cfg.wandb.use or cfg.vis.every <= 0 or step % cfg.vis.every != 0:
+    if not cfg.wandb.use or cfg.viz.every <= 0 or step % cfg.viz.every != 0:
         return
     pred_uv, pred_conf = extract_keypoints(out_dict["pred_heatmaps"])
     _, _, out_h, out_w = out_dict["pred_heatmaps"].shape
     pred_uv = _unscale_kp2d(pred_uv, batch["image"].shape[1], batch["image"].shape[2], out_h, out_w)
+    gt_heatmaps = build_heatmaps(
+        _scaled_kp2d(batch, out_h, out_w),
+        batch["keypoints_visible"],
+        image_h=out_h,
+        image_w=out_w,
+        sigma=cfg.sigma,
+    )
     log = {
         "viz/predictions": _render_overlay(
             jax.device_get(batch),
             jax.device_get(pred_uv),
             jax.device_get(pred_conf),
             jax.device_get(out_dict["pred_heatmaps"]),
-        )
+        ),
+        "viz/gt": _render_heatmap_list(jax.device_get(gt_heatmaps[0])),
     }
     cfg.wandb.log(log, step=step)
 
@@ -243,10 +299,14 @@ def _print_shapes(shapes):
 
 
 def main(cfg: Config):
+    ndev = len(jax.devices())
+    if cfg.bs % ndev != 0:
+        raise ValueError(f"bs={cfg.bs} must be divisible by device_count={ndev}")
+    shard_fn = make_shard_fn()
     ds = make_dataset(cfg)
     dsit = iter(ds)
     sample = next(dsit)
-    batch = prepare_sample(sample)
+    batch = shard_fn(prepare_sample(sample))
 
     print(Rule("DREAM Prepared Sample", style="bold magenta"))
     pprint(spec(batch))
@@ -278,21 +338,16 @@ def main(cfg: Config):
     maybe_log_viz(cfg, batch, out_dict, step=0)
 
     print(Rule("DREAM Train Loop", style="bold magenta"))
-    for step in range(cfg.steps):
-        batch = prepare_sample(next(dsit))
+    for step in tqdm(range(cfg.steps)):
+        batch = shard_fn(prepare_sample(next(dsit)))
         state, metrics = train_step(state, batch)
-        eval_metrics = None
+
         if step % cfg.log_every == 0:
-            eval_batch = prepare_sample(next(dsit))
+            eval_batch = shard_fn(prepare_sample(next(dsit)))
             eval_metrics = eval_step(state, eval_batch)
             cfg.wandb.log({"train": metrics, "eval": eval_metrics}, step=step)
-            print(
-                f"step={step} loss={float(metrics['loss']):.6f} "
-                f"eval_loss={float(eval_metrics['loss']):.6f} "
-                f"grad_norm={float(metrics['grad_norm']):.6f} "
-                f"visible_kp={int(metrics['visible_kp'])}"
-            )
-        if cfg.vis.every > 0 and step % cfg.vis.every == 0:
+            print(metrics)
+        if cfg.viz.every > 0 and step % cfg.viz.every == 0:
             pred_heatmaps, _ = model.apply({"params": state.params}, batch["image"])
             out_dict = {"pred_heatmaps": jnp.transpose(pred_heatmaps, (0, 3, 1, 2))}
             maybe_log_viz(cfg, batch, out_dict, step=step)
