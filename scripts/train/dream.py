@@ -7,6 +7,7 @@ from functools import partial
 import os
 from pathlib import Path
 
+from flax import struct
 from flax.training.train_state import TrainState
 import grain
 from grain.experimental import ThreadPrefetchIterDataset
@@ -31,6 +32,7 @@ from crossformer.cn.dataset.mix import Arec
 from crossformer.data.grain.datasets import unpack_record
 from crossformer.data.grain.loader import _apply_fd_limit, _grain_mp_worker_init
 from crossformer.model.dream import DreamVGG
+from crossformer.utils.callbacks.save import SaveCallback
 from crossformer.utils.spec import spec
 from crossformer.utils.train_utils import create_optimizer, Timer
 import wandb
@@ -76,6 +78,7 @@ class Optim:
 class Config:
     """Smoke-test config for DREAM."""
 
+    name: str = "dream"
     seed: int = 0
     steps: int = 1_000_000
     log_every: int = 100
@@ -99,6 +102,36 @@ class Config:
 
     coco_prob: float = 0.5
     coco_dir: Path = Path.home() / "bela/datasets/coco/train2014"
+
+    # Checkpointing
+    save_dir: Path | None = Path.home().expanduser()
+    save_interval: int = 25_000
+
+
+@struct.dataclass
+class DreamCheckpointModel:
+    params: dict
+
+
+@struct.dataclass
+class DreamCheckpointState:
+    model: DreamCheckpointModel
+    step: jax.Array
+    opt_state: optax.OptState
+
+
+def _save_path(cfg: Config) -> str:
+    if cfg.save_dir is None:
+        raise ValueError("save_dir is None")
+    return str((Path(cfg.save_dir).expanduser() / cfg.wandb.project / (cfg.wandb.group or "") / cfg.name).resolve())
+
+
+def _checkpoint_state(state: TrainState) -> DreamCheckpointState:
+    return DreamCheckpointState(
+        model=DreamCheckpointModel(params=state.params),
+        step=state.step,
+        opt_state=state.opt_state,
+    )
 
 
 def _resize_cover(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
@@ -509,6 +542,16 @@ def main(cfg: Config):
         params=params,
         tx=tx,
     )
+    if cfg.save_dir is not None:
+        save_dir = _save_path(cfg)
+        wandb.config.update({"save_dir": save_dir}, allow_val_change=True)
+        print(f"  save_dir: {save_dir}")
+        save_callback = SaveCallback(save_dir)
+    else:
+        save_dir = None
+        save_callback = SaveCallback(None)
+        print("  [dim]no save_dir — checkpoints disabled[/]")
+
     loss_fn = lambda batch, out_dict: dream_loss_fn(batch, out_dict, sigma=cfg.sigma, raw_size=cfg.raw_size)
     train_step = make_train_step_dream(
         model, loss_fn, out_h=out_h, out_w=out_w, lr_fn=lr_fn, param_norm_fn=param_norm_fn
@@ -552,7 +595,13 @@ def main(cfg: Config):
             pred_heatmaps, _ = model.apply({"params": state.params}, _image_to_float(batch["image"]))
             out_dict = {"pred_heatmaps": resize_pred_heatmaps(jnp.transpose(pred_heatmaps, (0, 3, 1, 2)), out_h, out_w)}
             maybe_log_viz(cfg, batch, out_dict, step=step)
+        if cfg.save_interval > 0 and (step + 1) % cfg.save_interval == 0 and save_dir is not None:
+            with timer("ckpt"):
+                save_callback.save(_checkpoint_state(state), step + 1)
 
+    if save_dir is not None:
+        save_callback.save(_checkpoint_state(state), cfg.steps)
+        save_callback.wait()
     if cfg.verbose:
         print(model.tabulate(init_rng, _image_to_float(batch["image"]), depth=2))
     cfg.wandb.finish()
