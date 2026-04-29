@@ -546,6 +546,15 @@ def main(cfg: Config):
     model = DreamVGG(num_keypoints=num_keypoints, variant=cfg.variant)
     image = _image_to_float(batch["image"])
     params = model.init(init_rng, image)["params"]
+    params = {
+        **params,
+        "head_out": {
+            **params["head_out"],
+            "kernel": jnp.zeros_like(params["head_out"]["kernel"]),
+            "bias": jnp.zeros_like(params["head_out"]["bias"]),
+        },
+    }
+
     tx, lr_fn, param_norm_fn = cfg.optim.create(params, steps=cfg.steps)
     print(Rule("optimizer", style="bold magenta"))
     print(f"  config: {cfg.optim.kwargs(cfg.steps)}")
