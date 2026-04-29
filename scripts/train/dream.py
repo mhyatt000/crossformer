@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 import os
+from pathlib import Path
 
 from flax.training.train_state import TrainState
 import grain
+from grain.experimental import ThreadPrefetchIterDataset
 import jax
 from jax.experimental import multihost_utils
 import jax.image
@@ -14,6 +17,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh, PartitionSpec
 import numpy as np
 import optax
+from PIL import Image
 from rich import print
 from rich.pretty import pprint
 from rich.rule import Rule
@@ -28,13 +32,44 @@ from crossformer.data.grain.datasets import unpack_record
 from crossformer.data.grain.loader import _apply_fd_limit, _grain_mp_worker_init
 from crossformer.model.dream import DreamVGG
 from crossformer.utils.spec import spec
-from crossformer.utils.train_utils import Timer
+from crossformer.utils.train_utils import create_optimizer, Timer
 import wandb
 
 
 @dataclass
 class DreamVizConfig:
     every: int = 5000
+
+
+@dataclass
+class Optim:
+    lr: float = 1e-3  
+    weight_decay: float = 0.0
+    warmup_steps: int = 500
+    lr_schedule: str = "constant"  # constant | cosine | rsqrt
+    clip_gradient: float | None = None
+    grad_accumulation_steps: int | None = None
+
+    def kwargs(self, steps: int) -> dict:
+        learning_rate = self.lr
+        if self.lr_schedule != "constant" or self.warmup_steps > 0:
+            decay_steps = max(steps, self.warmup_steps + 1)
+            learning_rate = {
+                "name": self.lr_schedule,
+                "init_value": 0.0,
+                "peak_value": self.lr,
+                "warmup_steps": self.warmup_steps,
+                **({"decay_steps": decay_steps} if self.lr_schedule == "cosine" else {}),
+            }
+        return {
+            "learning_rate": learning_rate,
+            "weight_decay": self.weight_decay,
+            "clip_gradient": self.clip_gradient,
+            "grad_accumulation_steps": self.grad_accumulation_steps,
+        }
+
+    def create(self, params, steps: int):
+        return create_optimizer(params, **self.kwargs(steps))
 
 
 @dataclass
@@ -50,7 +85,7 @@ class Config:
     num_keypoints: int = 0  # 0 = infer from batch
     variant: str = "full"  # quarter | half | full
     sigma: float = 2.0  # TODO desc
-    lr: float = 1.5e-4  # 1.5e-4 is dream default
+    optim: Optim = default(Optim())
     viz: DreamVizConfig = default(DreamVizConfig())
     wandb: cn.Wandb = default(cn.Wandb(project="bela-dream"))
     verbose: bool = False
@@ -60,6 +95,42 @@ class Config:
     mix: Arec = default(Arec.from_name("xarm_dream_100k"))
     mp: int = 16
     mp_buf: int = 4  # per worker buffer size
+    n_preshard: int = 2  # prefetch sharded data
+
+    coco_prob:float = 0.5
+    coco_dir:Path = Path().home() / 'bela/datasets/coco/train2014'
+
+def read_bg(name, width=224, height=224):
+    img = Image.open(coco_dir / name).convert("RGB")
+    img = resize_cover(img, width, height)
+    return {"image": np.asarray(img, dtype=np.uint8)} # , "name": name}
+
+def make_coco_dataset(path:Path):
+    ds = (
+            grain.MapDataset.source(sorted(path.listdir()))
+            .seed(seed)
+            .shuffle()
+            .repeat()
+            .map(read_bg)
+            .map(lambda x: {'bg':x['image']}) # remap
+            .to_iter_dataset()
+            )
+    return ds
+
+
+def add_bg(x:dict, rng, prob=0.5):
+    if rng > prob:
+        x['image'] = np.where(x["mask"][..., None] > 0, x["image"], x['bg'])
+    return x
+
+
+def mix_with_bg(robot_ds, coco_ds, cfg:Config):
+    """mix robot dataset with coco background"""
+
+    ds = grain.experimental.ZipIterDataset([robot_ds, coco_ds], strict=False)
+    ds = ds.map(lambda a,b: a|b) # group dicts
+    ds = ds.seed(cfg.seed).random_map(partial(add_bg, prob=cfg.coco_prob))
+    return ds
 
 
 def make_dataset(cfg: Config):
@@ -70,10 +141,20 @@ def make_dataset(cfg: Config):
         .repeat()
         .map(unpack_record)
         .to_iter_dataset(
-            grain.ReadOptions(num_threads=32)
+            grain.ReadOptions(num_threads=32, prefetch_buffer_size=1024)
         )  # iter before batch so that procs do batching and doesnt impede read threads
-        .batch(cfg.bs, drop_remainder=True)
-    )
+        )
+
+
+    print(spec(next(iter(ds))))
+    ds = ds.map(partial(prepare_sample_np, cfg))
+    if cfg.coco_prob:
+        coco = make_coco_dataset(cfg.coco_dir)
+        ds = mix_with_bg(ds, coco, cfg)
+    print(spec(next(iter(ds))))
+    quit()
+    ds = ds.batch(cfg.bs, drop_remainder=True)
+
 
     if cfg.mp > 0:
         lim = _apply_fd_limit(512**2)
@@ -87,6 +168,9 @@ def make_dataset(cfg: Config):
             worker_init_fn=_grain_mp_worker_init,
         )
 
+    shard_fn = make_shard_fn()
+    ds = ds.map(shard_fn)
+    ds = ThreadPrefetchIterDataset(ds, prefetch_buffer_size=cfg.n_preshard)
     return ds
 
 
@@ -107,13 +191,6 @@ def _denormalize_kp2d(kp2d_norm: jax.Array, h: int, w: int) -> jax.Array:
     return kp2d_norm * jnp.array([w, h], dtype=jnp.float32)
 
 
-def _resize_intrinsics(K: jax.Array, in_h: int, in_w: int, out_h: int, out_w: int) -> jax.Array:
-    sx = out_w / in_w
-    sy = out_h / in_h
-    S = jnp.array([[sx, 0.0, 0.0], [0.0, sy, 0.0], [0.0, 0.0, 1.0]], dtype=jnp.float32)
-    return jnp.einsum("ij,bjk->bik", S, K)
-
-
 def net_out_size(cfg: Config) -> tuple[int, int]:
     h, w = cfg.net_in_size
     if cfg.variant == "full":
@@ -125,26 +202,43 @@ def net_out_size(cfg: Config) -> tuple[int, int]:
     raise ValueError(f"unknown variant: {cfg.variant}")
 
 
-def prepare_sample(cfg: Config, sample: dict) -> dict:
+def _normalize_kp2d_np(kp2d: np.ndarray, h: int, w: int) -> np.ndarray:
+    return kp2d / np.array([w, h], dtype=np.float32)
+
+
+def _resize_intrinsics_np(K: np.ndarray, in_h: int, in_w: int, out_h: int, out_w: int) -> np.ndarray:
+    sx = out_w / in_w
+    sy = out_h / in_h
+    S = np.array([[sx, 0.0, 0.0], [0.0, sy, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+    return S @ K
+
+
+def _image_to_float(image: jax.Array) -> jax.Array:
+    if np.issubdtype(image.dtype, np.integer):
+        return image.astype(jnp.float32) / 255.0
+    return image.astype(jnp.float32)
+
+
+def prepare_sample_np(cfg: Config, sample: dict) -> dict:
     raw_h, raw_w = cfg.raw_size
     net_h, net_w = cfg.net_in_size
-    image = jnp.asarray(sample["image"], dtype=jnp.float32) / 255.0
-    if tuple(image.shape[1:3]) != (raw_h, raw_w):
-        raise ValueError(f"expected raw_size={(raw_h, raw_w)} but got {tuple(image.shape[1:3])}")
-    image = jax.image.resize(image, (image.shape[0], net_h, net_w, image.shape[-1]), method="bilinear")
-    joints = jnp.asarray(sample["state"]["joints"], dtype=jnp.float32)
-    gripper = jnp.asarray(sample["state"]["gripper"], dtype=jnp.float32)[..., None]
-    q = jnp.concatenate([joints, gripper], axis=-1)
-    kp2d_raw = jnp.asarray(sample["state"]["kp2d"], dtype=jnp.float32)
-    kp2d_norm = _normalize_kp2d(kp2d_raw, raw_h, raw_w)
-    K = jnp.asarray(sample["camera"]["intr"]["K"], dtype=jnp.float32)
+    image = np.asarray(sample["image"])
+    if tuple(image.shape[:2]) != (raw_h, raw_w):
+        raise ValueError(f"expected raw_size={(raw_h, raw_w)} but got {tuple(image.shape[:2])}")
+    image = np.asarray(Image.fromarray(image).resize((net_w, net_h), Image.BILINEAR))
+    joints = np.asarray(sample["state"]["joints"], dtype=np.float32)
+    gripper = np.asarray([sample["state"]["gripper"]], dtype=np.float32)
+    q = np.concatenate([joints, gripper], axis=-1)
+    kp2d_raw = np.asarray(sample["state"]["kp2d"], dtype=np.float32)
+    kp2d_norm = _normalize_kp2d_np(kp2d_raw, raw_h, raw_w)
+    K = np.asarray(sample["camera"]["intr"]["K"], dtype=np.float32)
     return {
         "image": image,
         "q": q,
         "keypoints_2d_norm": kp2d_norm,
         "keypoints_2d_raw": kp2d_raw,
-        "keypoints_visible": jnp.asarray(sample["info"]["kp_visible"], dtype=jnp.bool_),
-        "K": _resize_intrinsics(K, raw_h, raw_w, net_h, net_w),
+        "keypoints_visible": np.asarray(sample["info"]["kp_visible"], dtype=bool),
+        "K": _resize_intrinsics_np(K, raw_h, raw_w, net_h, net_w),
     }
 
 
@@ -231,7 +325,10 @@ def extract_keypoints(pred_heatmaps: jax.Array) -> tuple[jax.Array, jax.Array]:
 def _render_overlay(batch: dict, pred_uv: np.ndarray, pred_conf: np.ndarray, pred_heatmaps: np.ndarray, idx: int = 0):
     import matplotlib.pyplot as plt
 
-    image = np.clip(np.asarray(batch["image"][idx]), 0.0, 1.0)
+    image = np.asarray(batch["image"][idx])
+    if np.issubdtype(image.dtype, np.integer):
+        image = image.astype(np.float32) / 255.0
+    image = np.clip(image, 0.0, 1.0)
     uv_gt = np.asarray(batch["keypoints_2d"][idx])
     vis = np.asarray(batch["keypoints_visible"][idx])
     uv_pred = np.asarray(pred_uv[idx])
@@ -318,25 +415,33 @@ def resize_pred_heatmaps(pred_heatmaps: jax.Array, out_h: int, out_w: int) -> ja
     return jnp.transpose(pred_heatmaps, (0, 3, 1, 2))
 
 
-def make_train_step_dream(model, loss_fn, out_h: int, out_w: int):
+def make_train_step_dream(model, loss_fn, out_h: int, out_w: int, lr_fn, param_norm_fn):
     @jax.jit
     def train_step(state, batch):
+        image = _image_to_float(batch["image"])
+
         def _loss(params):
-            pred_heatmaps, _ = model.apply({"params": params}, batch["image"])
+            pred_heatmaps, _ = model.apply({"params": params}, image)
             pred_heatmaps = jnp.transpose(pred_heatmaps, (0, 3, 1, 2))
             pred_heatmaps = resize_pred_heatmaps(pred_heatmaps, out_h, out_w)
             out_dict = {"pred_heatmaps": pred_heatmaps}
             return loss_fn(batch, out_dict)
 
         (loss, metrics), grads = jax.value_and_grad(_loss, has_aux=True)(state.params)
-        updates, _ = state.tx.update(grads, state.opt_state, state.params)
+        updates, opt_state = state.tx.update(grads, state.opt_state, state.params)
         update_info = {
             "loss": loss,
             "grad_norm": optax.global_norm(grads),
             "update_norm": optax.global_norm(updates),
+            "param_norm": param_norm_fn(state.params),
+            "learning_rate": lr_fn(state.step),
             **metrics,
         }
-        state = state.apply_gradients(grads=grads)
+        state = state.replace(
+            step=state.step + 1,
+            params=optax.apply_updates(state.params, updates),
+            opt_state=opt_state,
+        )
         return state, update_info
 
     return train_step
@@ -345,7 +450,8 @@ def make_train_step_dream(model, loss_fn, out_h: int, out_w: int):
 def make_eval_step_dream(model, loss_fn, out_h: int, out_w: int):
     @jax.jit
     def eval_step(state, batch):
-        pred_heatmaps, _ = model.apply({"params": state.params}, batch["image"])
+        image = _image_to_float(batch["image"])
+        pred_heatmaps, _ = model.apply({"params": state.params}, image)
         pred_heatmaps = jnp.transpose(pred_heatmaps, (0, 3, 1, 2))
         pred_heatmaps = resize_pred_heatmaps(pred_heatmaps, out_h, out_w)
         out_dict = {"pred_heatmaps": pred_heatmaps}
@@ -371,11 +477,9 @@ def main(cfg: Config):
     ndev = len(jax.devices())
     if cfg.bs % ndev != 0:
         raise ValueError(f"bs={cfg.bs} must be divisible by device_count={ndev}")
-    shard_fn = make_shard_fn()
     ds = make_dataset(cfg)
     dsit = iter(ds)
-    sample = next(dsit)
-    batch = shard_fn(prepare_sample(cfg, sample))
+    batch = next(dsit)
 
     print(Rule("DREAM Prepared Sample", style="bold magenta"))
     pprint(spec(batch))
@@ -387,17 +491,22 @@ def main(cfg: Config):
     print(f"raw_size={cfg.raw_size} net_in_size={cfg.net_in_size} net_out_size={net_out_size(cfg)}")
     out_h, out_w = net_out_size(cfg)
     model = DreamVGG(num_keypoints=num_keypoints, variant=cfg.variant)
-    params = model.init(init_rng, batch["image"])["params"]
+    image = _image_to_float(batch["image"])
+    params = model.init(init_rng, image)["params"]
+    tx, lr_fn, param_norm_fn = cfg.optim.create(params, steps=cfg.steps)
+    print(Rule("optimizer", style="bold magenta"))
+    print(f"  config: {cfg.optim.kwargs(cfg.steps)}")
+    print(f"  tx: {tx}")
     state = TrainState.create(
         apply_fn=model.apply,
         params=params,
-        tx=optax.adam(cfg.lr),
+        tx=tx,
     )
     loss_fn = lambda batch, out_dict: dream_loss_fn(batch, out_dict, sigma=cfg.sigma, raw_size=cfg.raw_size)
-    train_step = make_train_step_dream(model, loss_fn, out_h=out_h, out_w=out_w)
+    train_step = make_train_step_dream(model, loss_fn, out_h=out_h, out_w=out_w, lr_fn=lr_fn, param_norm_fn=param_norm_fn)
     eval_step = make_eval_step_dream(model, loss_fn, out_h=out_h, out_w=out_w)
 
-    pred_heatmaps, shapes = model.apply({"params": state.params}, batch["image"])
+    pred_heatmaps, shapes = model.apply({"params": state.params}, image)
     pred_heatmaps = jnp.transpose(pred_heatmaps, (0, 3, 1, 2))
     pred_heatmaps = resize_pred_heatmaps(pred_heatmaps, out_h, out_w)
     out_dict = {"pred_heatmaps": pred_heatmaps}
@@ -418,25 +527,27 @@ def main(cfg: Config):
     print(Rule("DREAM Train Loop", style="bold magenta"))
     for step in tqdm(range(cfg.steps)):
         with timer("data"):
-            batch = shard_fn(prepare_sample(cfg, next(dsit)))
+            batch = next(dsit)
         with timer("train_step"):
             state, metrics = train_step(state, batch)
 
         if step % cfg.log_every == 0:
             with timer("data"):
-                eval_batch = shard_fn(prepare_sample(cfg, next(dsit)))
+                eval_batch = next(dsit)
             with timer("eval_step"):
                 eval_metrics = eval_step(state, eval_batch)
             times = {f"timer/{k}": v for k, v in timer.get_average_times().items()}
             cfg.wandb.log({"train": metrics, "eval": eval_metrics, **times}, step=step)
             print({**metrics, **eval_metrics, **times})
         if cfg.viz.every > 0 and step % cfg.viz.every == 0:
-            pred_heatmaps, _ = model.apply({"params": state.params}, batch["image"])
-            out_dict = {"pred_heatmaps": jnp.transpose(pred_heatmaps, (0, 3, 1, 2))}
+            pred_heatmaps, _ = model.apply({"params": state.params}, _image_to_float(batch["image"]))
+            out_dict = {
+                "pred_heatmaps": resize_pred_heatmaps(jnp.transpose(pred_heatmaps, (0, 3, 1, 2)), out_h, out_w)
+            }
             maybe_log_viz(cfg, batch, out_dict, step=step)
 
     if cfg.verbose:
-        print(model.tabulate(init_rng, batch["image"], depth=2))
+        print(model.tabulate(init_rng, _image_to_float(batch["image"]), depth=2))
     cfg.wandb.finish()
 
 
