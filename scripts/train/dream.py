@@ -397,18 +397,33 @@ def _render_overlay(batch: dict, pred_uv: np.ndarray, pred_conf: np.ndarray, pre
     return out
 
 
-def _render_heatmap_list(hm: np.ndarray):
+def _render_heatmap_overlay(image: np.ndarray, hm: np.ndarray):
     import matplotlib.pyplot as plt
 
-    out = []
-    for i, ch in enumerate(hm):
-        fig, ax = plt.subplots(1, 1, figsize=(4, 3))
-        ax.imshow(ch, cmap="magma")
-        ax.set_title(f"kp {i}")
-        ax.axis("off")
-        fig.tight_layout()
-        out.append(wandb.Image(fig))
-        plt.close(fig)
+    image = np.asarray(image)
+    if np.issubdtype(image.dtype, np.integer):
+        image = image.astype(np.float32) / 255.0
+    image = np.clip(image, 0.0, 1.0)
+
+    hm = np.asarray(hm)
+    hm = hm.max(axis=0) if hm.ndim == 3 else hm
+    vmax = max(float(hm.max(initial=0.0)), 1e-6)
+
+    fig, ax = plt.subplots(1, 1, figsize=(4, 4))
+    ax.imshow(image)
+    ax.imshow(
+        hm,
+        cmap="magma",
+        alpha=0.5,
+        vmin=0.0,
+        vmax=vmax,
+        extent=(0, image.shape[1], image.shape[0], 0),
+    )
+    ax.set_title("max gt belief map")
+    ax.axis("off")
+    fig.tight_layout()
+    out = wandb.Image(fig)
+    plt.close(fig)
     return out
 
 
@@ -450,7 +465,7 @@ def maybe_log_viz(cfg: Config, batch: dict, out_dict: dict, step: int):
             jax.device_get(pred_conf),
             jax.device_get(out_dict["pred_heatmaps"]),
         ),
-        "viz/gt": _render_heatmap_list(jax.device_get(gt_heatmaps[0])),
+        "viz/gt": _render_heatmap_overlay(jax.device_get(batch["image"][0]), jax.device_get(gt_heatmaps[0])),
         "viz/mask": _render_mask(jax.device_get(batch["mask"])),
     }
     cfg.wandb.log(log, step=step)
