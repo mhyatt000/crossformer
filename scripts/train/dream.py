@@ -87,6 +87,13 @@ class Config:
     image_c: int = 3
     num_keypoints: int = 0  # 0 = infer from batch
     variant: str = "full"  # quarter | half | full
+    deconv_decoder: bool | None = None
+    full_output: bool | None = None
+    skip_connections: bool = False
+    n_stages: int = 1
+    internalize_spatial_softmax: bool = False
+    learned_beta: bool = True
+    initial_beta: float = 1.0
     sigma: float = 2.0  # TODO desc
     optim: Optim = default(Optim())
     viz: DreamVizConfig = default(DreamVizConfig())
@@ -243,11 +250,46 @@ def _normalize_kp2d_np(kp2d: np.ndarray, h: int, w: int) -> np.ndarray:
     return kp2d / np.array([w, h], dtype=np.float32)
 
 
-def _resize_intrinsics_np(K: np.ndarray, in_h: int, in_w: int, out_h: int, out_w: int) -> np.ndarray:
-    sx = out_w / in_w
-    sy = out_h / in_h
-    S = np.array([[sx, 0.0, 0.0], [0.0, sy, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
-    return S @ K
+def _shrink_crop_resolution(raw_h: int, raw_w: int, net_h: int, net_w: int) -> tuple[tuple[int, int], tuple[int, int]]:
+    scale_w = raw_w / net_w
+    ref_h_from_w = int(scale_w * net_h)
+    scale_h = raw_h / net_h
+    ref_w_from_h = int(scale_h * net_w)
+
+    if raw_w >= ref_w_from_h:
+        crop_w, crop_h = ref_w_from_h, raw_h
+    else:
+        crop_w, crop_h = raw_w, ref_h_from_w
+
+    left = (raw_w - crop_w) // 2
+    top = (raw_h - crop_h) // 2
+    return (crop_h, crop_w), (top, left)
+
+
+def _shrink_crop_keypoints_np(kp2d: np.ndarray, raw_h: int, raw_w: int, net_h: int, net_w: int) -> np.ndarray:
+    (crop_h, crop_w), (top, left) = _shrink_crop_resolution(raw_h, raw_w, net_h, net_w)
+    out = np.asarray(kp2d, dtype=np.float32).copy()
+    out[:, 0] = (out[:, 0] - left) / crop_w * net_w
+    out[:, 1] = (out[:, 1] - top) / crop_h * net_h
+    return out
+
+
+def _shrink_crop_intrinsics_np(K: np.ndarray, raw_h: int, raw_w: int, net_h: int, net_w: int) -> np.ndarray:
+    (crop_h, crop_w), (top, left) = _shrink_crop_resolution(raw_h, raw_w, net_h, net_w)
+    out = np.asarray(K, dtype=np.float32).copy()
+    out[0, 2] -= left
+    out[1, 2] -= top
+    out[0] *= net_w / crop_w
+    out[1] *= net_h / crop_h
+    return out
+
+
+def _shrink_crop_image_np(image: np.ndarray, net_h: int, net_w: int, resample: int) -> np.ndarray:
+    raw_h, raw_w = image.shape[:2]
+    (crop_h, crop_w), (top, left) = _shrink_crop_resolution(raw_h, raw_w, net_h, net_w)
+    pil = Image.fromarray(image)
+    pil = pil.crop((left, top, left + crop_w, top + crop_h))
+    return np.asarray(pil.resize((net_w, net_h), resample))
 
 
 def _image_to_float(image: jax.Array) -> jax.Array:
@@ -262,22 +304,24 @@ def prepare_sample_np(cfg: Config, sample: dict) -> dict:
     image = np.asarray(sample["image"])
     if tuple(image.shape[:2]) != (raw_h, raw_w):
         raise ValueError(f"expected raw_size={(raw_h, raw_w)} but got {tuple(image.shape[:2])}")
-    image = np.asarray(Image.fromarray(image).resize((net_w, net_h), Image.BILINEAR))
-    mask = np.asarray(Image.fromarray(sample["mask"]).resize((net_w, net_h), Image.NEAREST))
+    image = _shrink_crop_image_np(image, net_h, net_w, Image.BILINEAR)
+    mask = _shrink_crop_image_np(np.asarray(sample["mask"]), net_h, net_w, Image.NEAREST)
     joints = np.asarray(sample["state"]["joints"], dtype=np.float32)
     gripper = np.asarray([sample["state"]["gripper"]], dtype=np.float32)
     q = np.concatenate([joints, gripper], axis=-1)
     kp2d_raw = np.asarray(sample["state"]["kp2d"], dtype=np.float32)
-    kp2d_norm = _normalize_kp2d_np(kp2d_raw, raw_h, raw_w)
+    kp2d_netin = _shrink_crop_keypoints_np(kp2d_raw, raw_h, raw_w, net_h, net_w)
+    kp2d_norm = _normalize_kp2d_np(kp2d_netin, net_h, net_w)
     K = np.asarray(sample["camera"]["intr"]["K"], dtype=np.float32)
     return {
         "image": image,
         "mask": mask,
         "q": q,
         "keypoints_2d_norm": kp2d_norm,
+        "keypoints_2d_netin": kp2d_netin,
         "keypoints_2d_raw": kp2d_raw,
         "keypoints_visible": np.asarray(sample["info"]["kp_visible"], dtype=bool),
-        "K": _resize_intrinsics_np(K, raw_h, raw_w, net_h, net_w),
+        "K": _shrink_crop_intrinsics_np(K, raw_h, raw_w, net_h, net_w),
     }
 
 
@@ -290,11 +334,29 @@ def _build_heatmaps_one(
 ) -> jax.Array:
     ys = jnp.arange(image_h, dtype=jnp.float32)[:, None]
     xs = jnp.arange(image_w, dtype=jnp.float32)[None, :]
-    u = kp2d[:, 0][:, None, None]
-    v = kp2d[:, 1][:, None, None]
-    dist2 = (xs - u) ** 2 + (ys - v) ** 2
+    u = kp2d[:, 0]
+    v = kp2d[:, 1]
+    pixel_u = u.astype(jnp.int32)
+    pixel_v = v.astype(jnp.int32)
+    dist2 = (xs - u[:, None, None]) ** 2 + (ys - v[:, None, None]) ** 2
     heatmaps = jnp.exp(-dist2 / (2.0 * sigma**2))
+    radius = int(sigma * 2)
+    in_window = (
+        (xs[None, :, :] >= (pixel_u[:, None, None] - radius))
+        & (xs[None, :, :] <= (pixel_u[:, None, None] + radius))
+        & (ys[None, :, :] >= (pixel_v[:, None, None] - radius))
+        & (ys[None, :, :] <= (pixel_v[:, None, None] + radius))
+    )
+    in_bounds = (
+        (pixel_u - radius >= 0)
+        & (pixel_u + radius + 1 < image_w)
+        & (pixel_v - radius >= 0)
+        & (pixel_v + radius + 1 < image_h)
+    )
+    # Match DREAM: avoid malformed clipped Gaussians near edges, at the cost of
+    # throwing away supervision for those edge-near keypoints.
     mask = visible[:, None, None]
+    mask = mask & in_bounds[:, None, None] & in_window
     return jnp.where(mask, heatmaps, jnp.zeros_like(heatmaps))
 
 
@@ -310,11 +372,11 @@ def build_heatmaps(
     )
 
 
-def keypoint_metrics(batch: dict, pred_heatmaps: jax.Array, raw_size: tuple[int, int]):
+def keypoint_metrics(batch: dict, pred_heatmaps: jax.Array):
     pred_uv, pred_conf = extract_keypoints(pred_heatmaps)
     _, _, out_h, out_w = pred_heatmaps.shape
-    pred_uv = _denormalize_kp2d(pred_uv / jnp.array([out_w, out_h], dtype=jnp.float32), *raw_size)
-    gt_uv = batch["keypoints_2d_raw"]
+    pred_uv = _denormalize_kp2d(pred_uv / jnp.array([out_w, out_h], dtype=jnp.float32), *batch["image"].shape[1:3])
+    gt_uv = batch["keypoints_2d_netin"]
     vis = batch["keypoints_visible"]
     err = jnp.linalg.norm(pred_uv - gt_uv, axis=-1)
     vis_f = vis.astype(jnp.float32)
@@ -330,18 +392,22 @@ def keypoint_metrics(batch: dict, pred_heatmaps: jax.Array, raw_size: tuple[int,
     }
 
 
-def dream_loss_fn(batch: dict, out_dict: dict, sigma: float = 2.0, raw_size: tuple[int, int] = (480, 640)):
+def dream_loss_fn(batch: dict, out_dict: dict, sigma: float = 2.0):
     pred = out_dict["pred_heatmaps"]
-    _, _, out_h, out_w = pred.shape
+    preds = pred if isinstance(pred, tuple) else (pred,)
+    final_pred = preds[-1]
+    _, _, out_h, out_w = final_pred.shape
     uv = _denormalize_kp2d(batch["keypoints_2d_norm"], out_h, out_w)
     vis = batch["keypoints_visible"]
     target = build_heatmaps(uv, vis, image_h=out_h, image_w=out_w, sigma=sigma)
-    loss = jnp.mean((pred - target) ** 2)
+    stage_losses = tuple(jnp.mean((stage_pred - target) ** 2) for stage_pred in preds)
+    loss = jnp.mean(jnp.stack(stage_losses))
     metrics = {
         "loss": loss,
         "mse": loss,
         "visible_kp": vis.sum(),
-        **keypoint_metrics(batch, pred, raw_size=raw_size),
+        **{f"stage_{i + 1}_mse": stage_loss for i, stage_loss in enumerate(stage_losses)},
+        **keypoint_metrics(batch, final_pred),
     }
     return loss, metrics
 
@@ -443,8 +509,9 @@ def _render_mask(mask: np.ndarray, idx: int = 0):
 def maybe_log_viz(cfg: Config, batch: dict, out_dict: dict, step: int):
     if not cfg.wandb.use or cfg.viz.every <= 0 or step % cfg.viz.every != 0:
         return
-    pred_uv, pred_conf = extract_keypoints(out_dict["pred_heatmaps"])
-    _, _, out_h, out_w = out_dict["pred_heatmaps"].shape
+    pred_heatmaps = final_pred_heatmaps(out_dict["pred_heatmaps"])
+    pred_uv, pred_conf = extract_keypoints(pred_heatmaps)
+    _, _, out_h, out_w = pred_heatmaps.shape
     pred_uv = _denormalize_kp2d(pred_uv / jnp.array([out_w, out_h], dtype=jnp.float32), *cfg.net_in_size)
     gt_uv = _denormalize_kp2d(batch["keypoints_2d_norm"], *cfg.net_in_size)
     gt_heatmaps = build_heatmaps(
@@ -463,7 +530,7 @@ def maybe_log_viz(cfg: Config, batch: dict, out_dict: dict, step: int):
             },
             jax.device_get(pred_uv),
             jax.device_get(pred_conf),
-            jax.device_get(out_dict["pred_heatmaps"]),
+            jax.device_get(pred_heatmaps),
         ),
         "viz/gt": _render_heatmap_overlay(jax.device_get(batch["image"][0]), jax.device_get(gt_heatmaps[0])),
         "viz/mask": _render_mask(jax.device_get(batch["mask"])),
@@ -483,15 +550,42 @@ def resize_pred_heatmaps(pred_heatmaps: jax.Array, out_h: int, out_w: int) -> ja
     return jnp.transpose(pred_heatmaps, (0, 3, 1, 2))
 
 
+def _stage_belief_maps(model_out):
+    if hasattr(model_out, "shape"):
+        return (model_out,)
+    if not isinstance(model_out, tuple | list):
+        raise TypeError(f"unexpected DREAM output type: {type(model_out)}")
+    if not model_out:
+        raise ValueError("DREAM returned no outputs")
+
+    first = model_out[0]
+    if hasattr(first, "shape"):
+        return tuple(model_out)
+    if isinstance(first, tuple | list):
+        return tuple(stage[0] for stage in model_out)
+    raise TypeError(f"unexpected DREAM stage output type: {type(first)}")
+
+
+def prepare_pred_heatmaps(model_out, out_h: int, out_w: int):
+    preds = tuple(
+        resize_pred_heatmaps(jnp.transpose(stage, (0, 3, 1, 2)), out_h, out_w)
+        for stage in _stage_belief_maps(model_out)
+    )
+    return preds[0] if len(preds) == 1 else preds
+
+
+def final_pred_heatmaps(pred_heatmaps):
+    return pred_heatmaps[-1] if isinstance(pred_heatmaps, tuple) else pred_heatmaps
+
+
 def make_train_step_dream(model, loss_fn, out_h: int, out_w: int, lr_fn, param_norm_fn):
     @jax.jit
     def train_step(state, batch):
         image = _image_to_float(batch["image"])
 
         def _loss(params):
-            pred_heatmaps, _ = model.apply({"params": params}, image)
-            pred_heatmaps = jnp.transpose(pred_heatmaps, (0, 3, 1, 2))
-            pred_heatmaps = resize_pred_heatmaps(pred_heatmaps, out_h, out_w)
+            model_out, _ = model.apply({"params": params}, image)
+            pred_heatmaps = prepare_pred_heatmaps(model_out, out_h, out_w)
             out_dict = {"pred_heatmaps": pred_heatmaps}
             return loss_fn(batch, out_dict)
 
@@ -519,9 +613,8 @@ def make_eval_step_dream(model, loss_fn, out_h: int, out_w: int):
     @jax.jit
     def eval_step(state, batch):
         image = _image_to_float(batch["image"])
-        pred_heatmaps, _ = model.apply({"params": state.params}, image)
-        pred_heatmaps = jnp.transpose(pred_heatmaps, (0, 3, 1, 2))
-        pred_heatmaps = resize_pred_heatmaps(pred_heatmaps, out_h, out_w)
+        model_out, _ = model.apply({"params": state.params}, image)
+        pred_heatmaps = prepare_pred_heatmaps(model_out, out_h, out_w)
         out_dict = {"pred_heatmaps": pred_heatmaps}
         loss, metrics = loss_fn(batch, out_dict)
         return {"loss": loss, **metrics}
@@ -558,7 +651,17 @@ def main(cfg: Config):
     num_keypoints = cfg.num_keypoints or int(batch["keypoints_2d_norm"].shape[1])
     print(f"raw_size={cfg.raw_size} net_in_size={cfg.net_in_size} net_out_size={net_out_size(cfg)}")
     out_h, out_w = net_out_size(cfg)
-    model = DreamVGG(num_keypoints=num_keypoints, variant=cfg.variant)
+    model = DreamVGG(
+        num_keypoints=num_keypoints,
+        variant=cfg.variant,
+        deconv_decoder=cfg.deconv_decoder,
+        full_output=cfg.full_output,
+        skip_connections=cfg.skip_connections,
+        n_stages=cfg.n_stages,
+        internalize_spatial_softmax=cfg.internalize_spatial_softmax,
+        learned_beta=cfg.learned_beta,
+        initial_beta=cfg.initial_beta,
+    )
     image = _image_to_float(batch["image"])
     params = model.init(init_rng, image)["params"]
     tx, lr_fn, param_norm_fn = cfg.optim.create(params, steps=cfg.steps)
@@ -580,26 +683,25 @@ def main(cfg: Config):
         save_callback = SaveCallback(None)
         print("  [dim]no save_dir — checkpoints disabled[/]")
 
-    loss_fn = lambda batch, out_dict: dream_loss_fn(batch, out_dict, sigma=cfg.sigma, raw_size=cfg.raw_size)
+    loss_fn = lambda batch, out_dict: dream_loss_fn(batch, out_dict, sigma=cfg.sigma)
     train_step = make_train_step_dream(
         model, loss_fn, out_h=out_h, out_w=out_w, lr_fn=lr_fn, param_norm_fn=param_norm_fn
     )
     eval_step = make_eval_step_dream(model, loss_fn, out_h=out_h, out_w=out_w)
 
-    pred_heatmaps, shapes = model.apply({"params": state.params}, image)
-    pred_heatmaps = jnp.transpose(pred_heatmaps, (0, 3, 1, 2))
-    pred_heatmaps = resize_pred_heatmaps(pred_heatmaps, out_h, out_w)
+    model_out, shapes = model.apply({"params": state.params}, image)
+    pred_heatmaps = prepare_pred_heatmaps(model_out, out_h, out_w)
     out_dict = {"pred_heatmaps": pred_heatmaps}
     _, init_metrics = loss_fn(batch, out_dict)
 
     print(Rule("DREAM Forward", style="bold magenta"))
     _print_shapes(shapes)
     print(f"params={_count_params(state.params):,}")
-    print(f"pred_heatmaps.shape={out_dict['pred_heatmaps'].shape}")
-    if tuple(out_dict["pred_heatmaps"].shape[-2:]) != (out_h, out_w):
+    final_pred = final_pred_heatmaps(out_dict["pred_heatmaps"])
+    print(f"pred_heatmaps.shape={final_pred.shape}")
+    if tuple(final_pred.shape[-2:]) != (out_h, out_w):
         raise ValueError(
-            f"expected net_out_size={(out_h, out_w)} from variant={cfg.variant}, "
-            f"got {tuple(out_dict['pred_heatmaps'].shape[-2:])}"
+            f"expected net_out_size={(out_h, out_w)} from variant={cfg.variant}, got {tuple(final_pred.shape[-2:])}"
         )
     print(f"init_loss={float(init_metrics['loss']):.6f}")
     maybe_log_viz(cfg, batch, out_dict, step=0)
@@ -620,8 +722,8 @@ def main(cfg: Config):
             cfg.wandb.log({"train": metrics, "eval": eval_metrics, **times}, step=step)
             print({**metrics, **eval_metrics, **times})
         if cfg.viz.every > 0 and step % cfg.viz.every == 0:
-            pred_heatmaps, _ = model.apply({"params": state.params}, _image_to_float(batch["image"]))
-            out_dict = {"pred_heatmaps": resize_pred_heatmaps(jnp.transpose(pred_heatmaps, (0, 3, 1, 2)), out_h, out_w)}
+            model_out, _ = model.apply({"params": state.params}, _image_to_float(batch["image"]))
+            out_dict = {"pred_heatmaps": final_pred_heatmaps(prepare_pred_heatmaps(model_out, out_h, out_w))}
             maybe_log_viz(cfg, batch, out_dict, step=step)
         if cfg.save_interval > 0 and (step + 1) % cfg.save_interval == 0 and save_dir is not None:
             with timer("ckpt"):
