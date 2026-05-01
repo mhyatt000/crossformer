@@ -45,12 +45,12 @@ class DreamVizConfig:
 
 @dataclass
 class Optim:
-    lr: float = 1e-3
-    weight_decay: float = 0.0
-    warmup_steps: int = 500
+    lr: float = 1.5e-4
+    weight_decay: float = 1e-4
+    warmup_steps: int = 100
     lr_schedule: str = "constant"  # constant | cosine | rsqrt
-    clip_gradient: float | None = None
-    grad_accumulation_steps: int | None = None
+    clip_gradient: float | None = 1.0
+    acc: int | None = None  # gradient accumulation
 
     def kwargs(self, steps: int) -> dict:
         learning_rate = self.lr
@@ -67,7 +67,7 @@ class Optim:
             "learning_rate": learning_rate,
             "weight_decay": self.weight_decay,
             "clip_gradient": self.clip_gradient,
-            "grad_accumulation_steps": self.grad_accumulation_steps,
+            "grad_accumulation_steps": self.acc,
         }
 
     def create(self, params, steps: int):
