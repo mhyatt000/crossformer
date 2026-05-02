@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 from flax import struct
+from flax.core import freeze, unfreeze
 from flax.training.train_state import TrainState
 import grain
 from grain.experimental import ThreadPrefetchIterDataset
@@ -23,6 +24,7 @@ from rich import print
 from rich.pretty import pprint
 from rich.rule import Rule
 from rich.table import Table
+from tips.scenic.utils import checkpoint as tips_checkpoint
 from tqdm import tqdm
 import tyro
 
@@ -31,16 +33,17 @@ from crossformer.cn.base import default
 from crossformer.cn.dataset.mix import Arec
 from crossformer.data.grain.datasets import unpack_record
 from crossformer.data.grain.loader import _apply_fd_limit, _grain_mp_worker_init
-from crossformer.model.dream import DreamVGG
+from crossformer.model.dream import DreamTIPS, DreamVGG
 from crossformer.utils.callbacks.save import SaveCallback
 from crossformer.utils.spec import spec
 from crossformer.utils.train_utils import create_optimizer, Timer
+from run_tips import resolve_checkpoint_path
 import wandb
 
 
 @dataclass
 class DreamVizConfig:
-    every: int = 5000
+    every: int = 100
 
 
 @dataclass
@@ -51,8 +54,9 @@ class Optim:
     lr_schedule: str = "constant"  # constant | cosine | rsqrt
     clip_gradient: float | None = 1.0
     acc: int | None = None  # gradient accumulation
+    frozen_keys: tuple[str, ...] = ()
 
-    def kwargs(self, steps: int) -> dict:
+    def kwargs(self, steps: int, frozen_keys: tuple[str, ...] = ()) -> dict:
         learning_rate = self.lr
         if self.lr_schedule != "constant" or self.warmup_steps > 0:
             decay_steps = max(steps, self.warmup_steps + 1)
@@ -63,15 +67,17 @@ class Optim:
                 "warmup_steps": self.warmup_steps,
                 **({"decay_steps": decay_steps} if self.lr_schedule == "cosine" else {}),
             }
+        all_frozen_keys = self.frozen_keys + frozen_keys
         return {
             "learning_rate": learning_rate,
             "weight_decay": self.weight_decay,
             "clip_gradient": self.clip_gradient,
             "grad_accumulation_steps": self.acc,
+            "frozen_keys": list(all_frozen_keys) if all_frozen_keys else None,
         }
 
-    def create(self, params, steps: int):
-        return create_optimizer(params, **self.kwargs(steps))
+    def create(self, params, steps: int, frozen_keys: tuple[str, ...] = ()):
+        return create_optimizer(params, **self.kwargs(steps, frozen_keys=frozen_keys))
 
 
 @dataclass
@@ -86,7 +92,11 @@ class Config:
     net_in_size: tuple[int, int] = (400, 400)
     image_c: int = 3
     num_keypoints: int = 0  # 0 = infer from batch
+    encoder: str = "vgg"  # vgg | tips
     variant: str = "full"  # quarter | half | full
+    tips_variant: str = "tips_v2_b14"
+    tips_checkpoint: Path | None = None
+    tips_trainable: bool = False
     deconv_decoder: bool | None = None
     full_output: bool | None = None
     skip_connections: bool = False
@@ -244,6 +254,49 @@ def net_out_size(cfg: Config) -> tuple[int, int]:
     if cfg.variant == "quarter":
         return h // 4, w // 4
     raise ValueError(f"unknown variant: {cfg.variant}")
+
+
+def make_model(cfg: Config, num_keypoints: int):
+    if cfg.encoder == "vgg":
+        return DreamVGG(
+            num_keypoints=num_keypoints,
+            variant=cfg.variant,
+            deconv_decoder=cfg.deconv_decoder,
+            full_output=cfg.full_output,
+            skip_connections=cfg.skip_connections,
+            n_stages=cfg.n_stages,
+            internalize_spatial_softmax=cfg.internalize_spatial_softmax,
+            learned_beta=cfg.learned_beta,
+            initial_beta=cfg.initial_beta,
+        )
+    if cfg.encoder == "tips":
+        if cfg.n_stages != 1:
+            raise ValueError("TIPS encoder currently supports n_stages=1")
+        if cfg.internalize_spatial_softmax:
+            raise ValueError("TIPS encoder does not support internalize_spatial_softmax")
+        return DreamTIPS(
+            num_keypoints=num_keypoints,
+            variant=cfg.variant,
+            tips_variant=cfg.tips_variant,
+            freeze_encoder=not cfg.tips_trainable,
+        )
+    raise ValueError(f"unknown encoder: {cfg.encoder}")
+
+
+def load_tips_params(cfg: Config, params):
+    if cfg.encoder != "tips":
+        return params
+    ckpt_path = resolve_checkpoint_path(cfg.tips_variant, cfg.tips_checkpoint)
+    p = unfreeze(params)
+    p["tips"] = tips_checkpoint.load_checkpoint(ckpt_path, p["tips"])
+    print(f"  tips_checkpoint: {ckpt_path}")
+    return freeze(p)
+
+
+def frozen_keys(cfg: Config) -> tuple[str, ...]:
+    if cfg.encoder == "tips" and not cfg.tips_trainable:
+        return ("tips.*",)
+    return ()
 
 
 def _normalize_kp2d_np(kp2d: np.ndarray, h: int, w: int) -> np.ndarray:
@@ -651,22 +704,14 @@ def main(cfg: Config):
     num_keypoints = cfg.num_keypoints or int(batch["keypoints_2d_norm"].shape[1])
     print(f"raw_size={cfg.raw_size} net_in_size={cfg.net_in_size} net_out_size={net_out_size(cfg)}")
     out_h, out_w = net_out_size(cfg)
-    model = DreamVGG(
-        num_keypoints=num_keypoints,
-        variant=cfg.variant,
-        deconv_decoder=cfg.deconv_decoder,
-        full_output=cfg.full_output,
-        skip_connections=cfg.skip_connections,
-        n_stages=cfg.n_stages,
-        internalize_spatial_softmax=cfg.internalize_spatial_softmax,
-        learned_beta=cfg.learned_beta,
-        initial_beta=cfg.initial_beta,
-    )
+    model = make_model(cfg, num_keypoints)
     image = _image_to_float(batch["image"])
     params = model.init(init_rng, image)["params"]
-    tx, lr_fn, param_norm_fn = cfg.optim.create(params, steps=cfg.steps)
+    params = load_tips_params(cfg, params)
+    frozen = frozen_keys(cfg)
+    tx, lr_fn, param_norm_fn = cfg.optim.create(params, steps=cfg.steps, frozen_keys=frozen)
     print(Rule("optimizer", style="bold magenta"))
-    print(f"  config: {cfg.optim.kwargs(cfg.steps)}")
+    print(f"  config: {cfg.optim.kwargs(cfg.steps, frozen_keys=frozen)}")
     print(f"  tx: {tx}")
     state = TrainState.create(
         apply_fn=model.apply,
