@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from functools import partial
 import os
 from pathlib import Path
@@ -111,7 +112,7 @@ class Config:
     internalize_spatial_softmax: bool = False
     learned_beta: bool = True
     initial_beta: float = 1.0
-    sigma: float = 2.0  # TODO desc
+    sigma_pct: float = 1.0  # Gaussian std dev as percent of belief-map size.
     optim: Optim = default(Optim())
     viz: DreamVizConfig = default(DreamVizConfig())
     wandb: cn.Wandb = default(cn.Wandb(project="bela-dream"))
@@ -478,6 +479,12 @@ def _build_heatmaps_one(
     return jnp.where(mask, heatmaps, jnp.zeros_like(heatmaps))
 
 
+def belief_sigma(sigma_pct: float, out_h: int, out_w: int) -> float:
+    if out_h <= 0 or out_w <= 0:
+        raise ValueError(f"invalid belief-map size: {(out_h, out_w)}")
+    return sigma_pct * min(out_h, out_w) / 100.0
+
+
 def build_heatmaps(
     kp2d: jax.Array,
     visible: jax.Array,
@@ -514,12 +521,18 @@ def keypoint_metrics(batch: dict, pred_heatmaps: jax.Array):
     }
 
 
-def focal_heatmap_loss(pred, target, alpha=2.0, beta=4.0, eps=1e-3):
+def focal_heatmap_loss(pred, target, alpha=2.0, beta=4.0, eps=1e-6):
+    """CenterNet-style focal loss for Gaussian keypoint belief maps.
+
+    See Objects as Points: https://arxiv.org/abs/1904.07850.
+    The peak pixel is positive. Every non-peak pixel is negative, but
+    (1 - target)^beta makes pixels near the Gaussian peak weak negatives
+    instead of punishing them like background.
+    """
     pred = jnp.clip(pred, eps, 1.0 - eps)
 
-    peak = target.max(axis=(-2, -1), keepdims=True)
-    pos = (target >= peak) & (peak > 0)
-    neg = ~pos
+    pos = target >= 1.0 - eps
+    neg = target < 1.0 - eps
 
     pos_loss = -((1.0 - pred) ** alpha) * jnp.log(pred) * pos
     neg_loss = -((1.0 - target) ** beta) * (pred**alpha) * jnp.log(1.0 - pred) * neg
@@ -528,14 +541,20 @@ def focal_heatmap_loss(pred, target, alpha=2.0, beta=4.0, eps=1e-3):
     return (pos_loss.sum() + neg_loss.sum()) / n_pos
 
 
-def dream_loss_fn(batch: dict, out_dict: dict, sigma: float = 2.0):
+def dream_loss_fn(batch: dict, out_dict: dict, sigma_pct: float = 1.0):
     pred = out_dict["pred_heatmaps"]
     preds = pred if isinstance(pred, tuple) else (pred,)
     final_pred = preds[-1]
     _, _, out_h, out_w = final_pred.shape
     uv = _denormalize_kp2d(batch["keypoints_2d_norm"], out_h, out_w)
     vis = batch["keypoints_visible"]
-    target = build_heatmaps(uv, vis, image_h=out_h, image_w=out_w, sigma=sigma)
+    target = build_heatmaps(
+        uv,
+        vis,
+        image_h=out_h,
+        image_w=out_w,
+        sigma=belief_sigma(sigma_pct, out_h, out_w),
+    )
     stage_losses = tuple(focal_heatmap_loss(stage_pred, target) for stage_pred in preds)
     stage_mses = tuple(jnp.mean((stage_pred - target) ** 2) for stage_pred in preds)
     loss = jnp.mean(jnp.stack(stage_losses))
@@ -799,7 +818,7 @@ def maybe_log_viz(cfg: Config, batch: dict, out_dict: dict, step: int, prefix: s
         batch["keypoints_visible"],
         image_h=out_h,
         image_w=out_w,
-        sigma=cfg.sigma,
+        sigma=belief_sigma(cfg.sigma_pct, out_h, out_w),
     )
     log = {
         f"{prefix}/predictions": _render_overlay(
@@ -916,6 +935,18 @@ def _count_params(params) -> int:
     return sum(x.size for x in jax.tree.leaves(params))
 
 
+def _count_trainable_params(params, frozen: tuple[str, ...]) -> int:
+    flat = freeze(params).unfreeze() if hasattr(params, "unfreeze") else params
+    flat = jax.tree_util.tree_flatten_with_path(flat)[0]
+    n = 0
+    for path, x in flat:
+        key = ".".join(str(p.key) for p in path)
+        if any(fnmatch(key, pattern) for pattern in frozen):
+            continue
+        n += x.size
+    return n
+
+
 def _print_shapes(shapes):
     table = Table("stage", "shape")
     for name, shape in shapes:
@@ -942,6 +973,7 @@ def main(cfg: Config):
     num_keypoints = cfg.num_keypoints or int(batch["keypoints_2d_norm"].shape[1])
     print(f"raw_size={cfg.raw_size} net_in_size={cfg.net_in_size} net_out_size={net_out_size(cfg)}")
     out_h, out_w = net_out_size(cfg)
+    print(f"target_sigma={belief_sigma(cfg.sigma_pct, out_h, out_w):.3f} output px")
     model = make_model(cfg, num_keypoints)
     image = _image_to_float(batch["image"])
     params = model.init(init_rng, image)["params"]
@@ -966,7 +998,7 @@ def main(cfg: Config):
         save_callback = SaveCallback(None)
         print("  [dim]no save_dir — checkpoints disabled[/]")
 
-    loss_fn = lambda batch, out_dict: dream_loss_fn(batch, out_dict, sigma=cfg.sigma)
+    loss_fn = lambda batch, out_dict: dream_loss_fn(batch, out_dict, sigma_pct=cfg.sigma_pct)
     train_step = make_train_step_dream(
         model, loss_fn, out_h=out_h, out_w=out_w, lr_fn=lr_fn, param_norm_fn=param_norm_fn
     )
@@ -980,6 +1012,7 @@ def main(cfg: Config):
     print(Rule("DREAM Forward", style="bold magenta"))
     _print_shapes(shapes)
     print(f"params={_count_params(state.params):,}")
+    print(f"trainable_params={_count_trainable_params(state.params, frozen):,}")
     final_pred = final_pred_heatmaps(out_dict["pred_heatmaps"])
     print(f"pred_heatmaps.shape={final_pred.shape}")
     if tuple(final_pred.shape[-2:]) != (out_h, out_w):
