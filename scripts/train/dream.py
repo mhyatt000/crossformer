@@ -445,6 +445,21 @@ def keypoint_metrics(batch: dict, pred_heatmaps: jax.Array):
     }
 
 
+def focal_heatmap_loss(pred_logits, target, alpha=2.0, beta=4.0, eps=1e-6):
+    pred = jax.nn.sigmoid(pred_logits)
+    pred = jnp.clip(pred, eps, 1.0 - eps)
+
+    peak = target.max(axis=(-2, -1), keepdims=True)
+    pos = (target >= peak) & (peak > 0)
+    neg = ~pos
+
+    pos_loss = -((1.0 - pred) ** alpha) * jnp.log(pred) * pos
+    neg_loss = -((1.0 - target) ** beta) * (pred**alpha) * jnp.log(1.0 - pred) * neg
+
+    n_pos = jnp.maximum(pos.sum(), 1.0)
+    return (pos_loss.sum() + neg_loss.sum()) / n_pos
+
+
 def dream_loss_fn(batch: dict, out_dict: dict, sigma: float = 2.0):
     pred = out_dict["pred_heatmaps"]
     preds = pred if isinstance(pred, tuple) else (pred,)
@@ -454,10 +469,12 @@ def dream_loss_fn(batch: dict, out_dict: dict, sigma: float = 2.0):
     vis = batch["keypoints_visible"]
     target = build_heatmaps(uv, vis, image_h=out_h, image_w=out_w, sigma=sigma)
     stage_losses = tuple(jnp.mean((stage_pred - target) ** 2) for stage_pred in preds)
+    stage_losses = tuple(focal_heatmap_loss(stage_pred, target) for stage_pred in preds)
+    stage_mses = tuple(jnp.mean((jax.nn.sigmoid(stage_pred) - target) ** 2) for stage_pred in preds)
     loss = jnp.mean(jnp.stack(stage_losses))
     metrics = {
         "loss": loss,
-        "mse": loss,
+        "mse": jnp.mean(jnp.stack(stage_mses)),
         "visible_kp": vis.sum(),
         **{f"stage_{i + 1}_mse": stage_loss for i, stage_loss in enumerate(stage_losses)},
         **keypoint_metrics(batch, final_pred),
