@@ -35,10 +35,16 @@ from crossformer.data.grain.datasets import unpack_record
 from crossformer.data.grain.loader import _apply_fd_limit, _grain_mp_worker_init
 from crossformer.model.dream import DreamTIPS, DreamVGG
 from crossformer.utils.callbacks.save import SaveCallback
+from crossformer.utils.callbacks.synth_viz import composite_robot, fk_keypoints, rasterize_robot, solve_pnp
 from crossformer.utils.spec import spec
 from crossformer.utils.train_utils import create_optimizer, Timer
 from run_tips import resolve_checkpoint_path
 import wandb
+
+KP_CONF_THRESHOLD = 0.03
+KP_SMOOTH_SIGMA = 1.0
+KP_SMOOTH_RADIUS = 2
+ADD_THRESHOLDS_MM = np.linspace(0.0, 100.0, 100, dtype=np.float32)
 
 
 @dataclass
@@ -113,6 +119,8 @@ class Config:
     # LOADER
     bs: int = 1
     mix: Arec = default(Arec.from_name("xarm_dream_100k"))
+    irl_mix: Arec = default(Arec.from_name("xgym_sweep_single"))
+    irl_image_keys: tuple[str, ...] = ("low", "side")
     mp: int = 16
     mp_buf: int = 4  # per worker buffer size
     n_preshard: int = 2  # prefetch sharded data
@@ -228,6 +236,15 @@ def make_dataset(cfg: Config):
     return ds
 
 
+def make_irl_dataset(cfg: Config):
+    ds = grain.MapDataset.source(cfg.irl_mix.source).seed(cfg.seed).repeat()
+    ds = ds.map(partial(prepare_irl_sample_np, cfg))
+    ds = ds.batch(cfg.bs, drop_remainder=True)
+    ds = ds.map(make_shard_fn())
+    ds = ThreadPrefetchIterDataset(ds, prefetch_buffer_size=cfg.n_preshard)
+    return ds
+
+
 def make_shard_fn():
     mesh = Mesh(jax.devices(), axis_names="batch")
 
@@ -303,6 +320,10 @@ def _normalize_kp2d_np(kp2d: np.ndarray, h: int, w: int) -> np.ndarray:
     return kp2d / np.array([w, h], dtype=np.float32)
 
 
+def _denormalize_kp2d_np(kp2d_norm: np.ndarray, h: int, w: int) -> np.ndarray:
+    return kp2d_norm * np.array([w, h], dtype=np.float32)
+
+
 def _shrink_crop_resolution(raw_h: int, raw_w: int, net_h: int, net_w: int) -> tuple[tuple[int, int], tuple[int, int]]:
     scale_w = raw_w / net_w
     ref_h_from_w = int(scale_w * net_h)
@@ -337,6 +358,20 @@ def _shrink_crop_intrinsics_np(K: np.ndarray, raw_h: int, raw_w: int, net_h: int
     return out
 
 
+def _default_intrinsics_np(h: int, w: int) -> np.ndarray:
+    f = np.float32(600.0)
+    return np.array([[f, 0.0, w / 2], [0.0, f, h / 2], [0.0, 0.0, 1.0]], dtype=np.float32)
+
+
+def _opencv_w2c_np(w2c_raw: np.ndarray) -> np.ndarray:
+    w2c = np.asarray(w2c_raw, dtype=np.float32).T
+    flip = np.diag([1.0, -1.0, -1.0]).astype(np.float32)
+    out = np.eye(4, dtype=np.float32)
+    out[:3, :3] = flip @ w2c[:3, :3]
+    out[:3, 3] = flip @ w2c[:3, 3]
+    return out
+
+
 def _shrink_crop_image_np(image: np.ndarray, net_h: int, net_w: int, resample: int) -> np.ndarray:
     raw_h, raw_w = image.shape[:2]
     (crop_h, crop_w), (top, left) = _shrink_crop_resolution(raw_h, raw_w, net_h, net_w)
@@ -366,6 +401,7 @@ def prepare_sample_np(cfg: Config, sample: dict) -> dict:
     kp2d_netin = _shrink_crop_keypoints_np(kp2d_raw, raw_h, raw_w, net_h, net_w)
     kp2d_norm = _normalize_kp2d_np(kp2d_netin, net_h, net_w)
     K = np.asarray(sample["camera"]["intr"]["K"], dtype=np.float32)
+    w2c = _opencv_w2c_np(sample["camera"]["extr"]["w2c"])
     return {
         "image": image,
         "mask": mask,
@@ -375,6 +411,32 @@ def prepare_sample_np(cfg: Config, sample: dict) -> dict:
         "keypoints_2d_raw": kp2d_raw,
         "keypoints_visible": np.asarray(sample["info"]["kp_visible"], dtype=bool),
         "K": _shrink_crop_intrinsics_np(K, raw_h, raw_w, net_h, net_w),
+        "w2c": w2c,
+    }
+
+
+def prepare_irl_sample_np(cfg: Config, sample: dict) -> dict:
+    raw_h, raw_w = cfg.raw_size
+    net_h, net_w = cfg.net_in_size
+    image_key = np.random.choice(cfg.irl_image_keys)
+    image = np.asarray(sample["image"][image_key])
+    if tuple(image.shape[:2]) != (raw_h, raw_w):
+        raise ValueError(f"expected raw_size={(raw_h, raw_w)} but got {tuple(image.shape[:2])}")
+    image = _shrink_crop_image_np(image, net_h, net_w, Image.BILINEAR)
+    joints = np.asarray(sample["proprio"]["joints"][0], dtype=np.float32)
+    gripper = np.asarray(sample["proprio"]["gripper"][0], dtype=np.float32).reshape(1)
+    kp2d_norm = np.full((10, 2), 0.5, dtype=np.float32)
+    K = _default_intrinsics_np(raw_h, raw_w)
+    return {
+        "image": image,
+        "mask": np.ones((net_h, net_w), dtype=np.uint8),
+        "q": np.concatenate([joints, gripper], axis=-1),
+        "keypoints_2d_norm": kp2d_norm,
+        "keypoints_2d_netin": _denormalize_kp2d_np(kp2d_norm, net_h, net_w),
+        "keypoints_2d_raw": _denormalize_kp2d_np(kp2d_norm, raw_h, raw_w),
+        "keypoints_visible": np.zeros((10,), dtype=bool),
+        "K": _shrink_crop_intrinsics_np(K, raw_h, raw_w, net_h, net_w),
+        "w2c": np.eye(4, dtype=np.float32),
     }
 
 
@@ -437,10 +499,14 @@ def keypoint_metrics(batch: dict, pred_heatmaps: jax.Array):
     mean_px = (err * vis_f).sum() / denom
     pck_5 = ((err < 5.0).astype(jnp.float32) * vis_f).sum() / denom
     pck_10 = ((err < 10.0).astype(jnp.float32) * vis_f).sum() / denom
+    thresholds = jnp.linspace(0.0, 20.0, 100, dtype=jnp.float32)
+    pck = ((err[..., None] < thresholds).astype(jnp.float32) * vis_f[..., None]).sum(axis=(0, 1)) / denom
+    pck_auc_20 = (((pck[1:] + pck[:-1]) * 0.5).sum() * (thresholds[1] - thresholds[0])) / thresholds[-1]
     return {
         "mean_px": mean_px,
         "pck_5": pck_5,
         "pck_10": pck_10,
+        "pck_auc_20": pck_auc_20,
         "conf_mean": pred_conf.mean(),
     }
 
@@ -481,19 +547,122 @@ def dream_loss_fn(batch: dict, out_dict: dict, sigma: float = 2.0):
     return loss, metrics
 
 
+def _gaussian_kernel2d(sigma: float = KP_SMOOTH_SIGMA, radius: int = KP_SMOOTH_RADIUS) -> jax.Array:
+    xs = jnp.arange(-radius, radius + 1, dtype=jnp.float32)
+    k = jnp.exp(-(xs**2) / (2.0 * sigma**2))
+    k = k / k.sum()
+    return jnp.outer(k, k)
+
+
+def _smooth_heatmap(hm: jax.Array) -> jax.Array:
+    kernel = _gaussian_kernel2d()[:, :, None, None]
+    return jax.lax.conv_general_dilated(
+        hm[None, :, :, None],
+        kernel,
+        (1, 1),
+        "SAME",
+        dimension_numbers=("NHWC", "HWIO", "NHWC"),
+    )[0, :, :, 0]
+
+
+def _extract_keypoint_channel(hm: jax.Array) -> tuple[jax.Array, jax.Array]:
+    hm = _smooth_heatmap(hm)
+    h, w = hm.shape
+    flat = hm.reshape(h * w)
+    idx = jnp.argmax(flat)
+    conf = flat[idx]
+    ys = jnp.arange(h, dtype=jnp.float32)[:, None]
+    xs = jnp.arange(w, dtype=jnp.float32)[None, :]
+    weights = jnp.where(hm >= KP_CONF_THRESHOLD, jnp.maximum(hm, 0.0), 0.0)
+    denom = weights.sum()
+    denom_safe = jnp.maximum(denom, 1e-8)
+    uv_sub = jnp.array([(weights * xs).sum() / denom_safe, (weights * ys).sum() / denom_safe], dtype=jnp.float32)
+    uv_argmax = jnp.array([idx % w, idx // w], dtype=jnp.float32)
+    return jnp.where(denom > 0, uv_sub, uv_argmax), conf
+
+
 def _extract_keypoints_one(hm: jax.Array) -> tuple[jax.Array, jax.Array]:
-    k, h, w = hm.shape
-    flat = hm.reshape(k, h * w)
-    idx = jnp.argmax(flat, axis=-1)
-    conf = jnp.take_along_axis(flat, idx[:, None], axis=-1)[:, 0]
-    ys = idx // w
-    xs = idx % w
-    uv = jnp.stack([xs, ys], axis=-1).astype(jnp.float32)
-    return uv, conf
+    return jax.vmap(_extract_keypoint_channel)(hm)
 
 
 def extract_keypoints(pred_heatmaps: jax.Array) -> tuple[jax.Array, jax.Array]:
     return jax.vmap(_extract_keypoints_one)(pred_heatmaps)
+
+
+def _transform_points(w2c: np.ndarray, pts_3d: np.ndarray) -> np.ndarray:
+    return (w2c[:3, :3] @ pts_3d.T).T + w2c[:3, 3]
+
+
+def _project_points(w2c: np.ndarray, pts_3d: np.ndarray, K: np.ndarray) -> np.ndarray:
+    pts_cam = _transform_points(w2c, pts_3d)
+    pix = (K @ pts_cam.T).T
+    return pix[:, :2] / np.maximum(pix[:, 2:3], 1e-8)
+
+
+def _rot_err_deg(R_pred: np.ndarray, R_gt: np.ndarray) -> float:
+    cos = (np.trace(R_pred @ R_gt.T) - 1.0) * 0.5
+    return float(np.rad2deg(np.arccos(np.clip(cos, -1.0, 1.0))))
+
+
+def _solve_pose_one(q, uv_px, conf, K) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    joints_rad = np.deg2rad(np.asarray(q[:7], dtype=np.float64))
+    pts_3d = fk_keypoints(joints_rad)
+    valid = np.isfinite(uv_px).all(axis=-1) & np.isfinite(conf) & (conf > KP_CONF_THRESHOLD)
+    try:
+        w2c = solve_pnp(pts_3d, uv_px, K, valid)
+    except Exception:
+        w2c = None
+    return joints_rad, valid, w2c
+
+
+def _pose_metrics_one(q, uv_px, conf, K, w2c_gt) -> dict:
+    joints_rad, valid, w2c_pred = _solve_pose_one(q, uv_px, conf, K)
+    pts_3d = fk_keypoints(joints_rad)
+    out = {"valid_kp": float(valid.sum()), "success": 0.0}
+    if w2c_pred is None:
+        return out
+
+    reproj = _project_points(w2c_pred, pts_3d, K)
+    reproj_err = np.linalg.norm(reproj[valid] - uv_px[valid], axis=-1).mean()
+    pred_cam = _transform_points(w2c_pred, pts_3d)
+    gt_cam = _transform_points(w2c_gt, pts_3d)
+    add_mm = np.linalg.norm(pred_cam - gt_cam, axis=-1).mean() * 1000.0
+    return {
+        **out,
+        "success": 1.0,
+        "reproj_px": float(reproj_err),
+        "add_mm": float(add_mm),
+        "rot_err_deg": _rot_err_deg(w2c_pred[:3, :3], w2c_gt[:3, :3]),
+        "trans_err_mm": float(np.linalg.norm(w2c_pred[:3, 3] - w2c_gt[:3, 3]) * 1000.0),
+    }
+
+
+def pose_metrics(cfg: Config, batch: dict, out_dict: dict) -> dict:
+    pred_uv, conf = extract_keypoints(out_dict["pred_heatmaps"])
+    _, _, out_h, out_w = out_dict["pred_heatmaps"].shape
+    pred_uv = _denormalize_kp2d(pred_uv / jnp.array([out_w, out_h], dtype=jnp.float32), *cfg.net_in_size)
+    batch_np = jax.device_get(batch)
+    uv_np = np.asarray(jax.device_get(pred_uv), dtype=np.float64)
+    conf_np = np.asarray(jax.device_get(conf), dtype=np.float64)
+    q_np = np.asarray(batch_np["q"], dtype=np.float64)
+    K_np = np.asarray(batch_np["K"], dtype=np.float64)
+    w2c_np = np.asarray(batch_np["w2c"], dtype=np.float64)
+
+    rows = [_pose_metrics_one(q_np[i], uv_np[i], conf_np[i], K_np[i], w2c_np[i]) for i in range(q_np.shape[0])]
+    vals = {}
+    for key in ("valid_kp", "success", "reproj_px", "add_mm", "rot_err_deg", "trans_err_mm"):
+        xs = np.asarray([r[key] for r in rows if key in r], dtype=np.float32)
+        vals[key] = float(xs.mean()) if len(xs) else float("nan")
+    adds = np.asarray([r["add_mm"] for r in rows if "add_mm" in r], dtype=np.float32)
+    if len(adds):
+        curve = (adds[:, None] < ADD_THRESHOLDS_MM[None]).mean(axis=0)
+        vals["add_auc_100mm"] = float(
+            (((curve[1:] + curve[:-1]) * 0.5).sum() * (ADD_THRESHOLDS_MM[1] - ADD_THRESHOLDS_MM[0]))
+            / ADD_THRESHOLDS_MM[-1]
+        )
+    else:
+        vals["add_auc_100mm"] = float("nan")
+    return vals
 
 
 def _render_overlay(batch: dict, pred_uv: np.ndarray, pred_conf: np.ndarray, pred_heatmaps: np.ndarray, idx: int = 0):
@@ -522,7 +691,7 @@ def _render_overlay(batch: dict, pred_uv: np.ndarray, pred_conf: np.ndarray, pre
     axes[1].axis("off")
 
     axes[2].imshow(image)
-    axes[2].imshow(hm.max(axis=0), cmap="magma", alpha=0.5)
+    axes[2].imshow(hm.max(axis=0), cmap="magma", alpha=0.5, extent=(0, image.shape[1], image.shape[0], 0))
     axes[2].set_title(f"overlay conf={conf.mean():.3f}")
     axes[2].axis("off")
 
@@ -575,7 +744,46 @@ def _render_mask(mask: np.ndarray, idx: int = 0):
     return wandb.Image(mask)
 
 
-def maybe_log_viz(cfg: Config, batch: dict, out_dict: dict, step: int):
+def _image_u8(image: np.ndarray) -> np.ndarray:
+    image = np.asarray(image)
+    if np.issubdtype(image.dtype, np.integer):
+        return np.clip(image, 0, 255).astype(np.uint8)
+    return (np.clip(image, 0.0, 1.0) * 255).astype(np.uint8)
+
+
+def _render_pose_overlay(batch: dict, pred_uv: np.ndarray, pred_conf: np.ndarray, idx: int = 0):
+    import matplotlib.pyplot as plt
+
+    image = _image_u8(batch["image"][idx])
+    uv = np.asarray(pred_uv[idx], dtype=np.float64)
+    conf = np.asarray(pred_conf[idx], dtype=np.float64)
+    q = np.asarray(batch["q"][idx], dtype=np.float64)
+    K = np.asarray(batch["K"][idx], dtype=np.float64)
+    joints_rad, valid, w2c = _solve_pose_one(q, uv, conf, K)
+
+    panel = image
+    title = f"PnP failed ({valid.sum()} kp)"
+    if w2c is not None:
+        try:
+            mask = rasterize_robot(joints_rad, w2c, K, image.shape[1], image.shape[0])
+            panel = composite_robot(image, mask)
+            title = f"pose overlay ({valid.sum()} kp)"
+        except Exception as exc:
+            title = f"raster failed: {type(exc).__name__}"
+
+    fig, ax = plt.subplots(1, 1, figsize=(4, 4))
+    ax.imshow(panel)
+    ax.scatter(uv[valid, 0], uv[valid, 1], c="lime", s=12)
+    ax.scatter(uv[~valid, 0], uv[~valid, 1], c="red", s=12)
+    ax.set_title(title)
+    ax.axis("off")
+    fig.tight_layout()
+    out = wandb.Image(fig)
+    plt.close(fig)
+    return out
+
+
+def maybe_log_viz(cfg: Config, batch: dict, out_dict: dict, step: int, prefix: str = "viz"):
     if not cfg.wandb.use or cfg.viz.every <= 0 or step % cfg.viz.every != 0:
         return
     pred_heatmaps = final_pred_heatmaps(out_dict["pred_heatmaps"])
@@ -591,7 +799,7 @@ def maybe_log_viz(cfg: Config, batch: dict, out_dict: dict, step: int):
         sigma=cfg.sigma,
     )
     log = {
-        "viz/predictions": _render_overlay(
+        f"{prefix}/predictions": _render_overlay(
             {
                 "image": jax.device_get(batch["image"]),
                 "keypoints_2d": jax.device_get(gt_uv),
@@ -601,8 +809,13 @@ def maybe_log_viz(cfg: Config, batch: dict, out_dict: dict, step: int):
             jax.device_get(pred_conf),
             jax.device_get(pred_heatmaps),
         ),
-        "viz/gt": _render_heatmap_overlay(jax.device_get(batch["image"][0]), jax.device_get(gt_heatmaps[0])),
-        "viz/mask": _render_mask(jax.device_get(batch["mask"])),
+        f"{prefix}/gt": _render_heatmap_overlay(jax.device_get(batch["image"][0]), jax.device_get(gt_heatmaps[0])),
+        f"{prefix}/mask": _render_mask(jax.device_get(batch["mask"])),
+        f"{prefix}/pose_overlay": _render_pose_overlay(
+            jax.device_get(batch),
+            jax.device_get(pred_uv),
+            jax.device_get(pred_conf),
+        ),
     }
     cfg.wandb.log(log, step=step)
 
@@ -645,6 +858,11 @@ def prepare_pred_heatmaps(model_out, out_h: int, out_w: int):
 
 def final_pred_heatmaps(pred_heatmaps):
     return pred_heatmaps[-1] if isinstance(pred_heatmaps, tuple) else pred_heatmaps
+
+
+def predict_heatmap_out(model, params, batch: dict, out_h: int, out_w: int) -> dict[str, jax.Array]:
+    model_out, _ = model.apply({"params": params}, _image_to_float(batch["image"]))
+    return {"pred_heatmaps": final_pred_heatmaps(prepare_pred_heatmaps(model_out, out_h, out_w))}
 
 
 def make_train_step_dream(model, loss_fn, out_h: int, out_w: int, lr_fn, param_norm_fn):
@@ -709,6 +927,7 @@ def main(cfg: Config):
         raise ValueError(f"bs={cfg.bs} must be divisible by device_count={ndev}")
     ds = make_dataset(cfg)
     dsit = iter(ds)
+    irl_dsit = iter(make_irl_dataset(cfg)) if cfg.wandb.use and cfg.viz.every > 0 else None
     batch = next(dsit)
 
     print(Rule("DREAM Prepared Sample", style="bold magenta"))
@@ -766,6 +985,10 @@ def main(cfg: Config):
         )
     print(f"init_loss={float(init_metrics['loss']):.6f}")
     maybe_log_viz(cfg, batch, out_dict, step=0)
+    if irl_dsit is not None:
+        irl_batch = next(irl_dsit)
+        irl_out = predict_heatmap_out(model, state.params, irl_batch, out_h, out_w)
+        maybe_log_viz(cfg, irl_batch, irl_out, step=0, prefix="irl")
 
     print(Rule("DREAM Train Loop", style="bold magenta"))
     for step in tqdm(range(cfg.steps)):
@@ -779,13 +1002,20 @@ def main(cfg: Config):
                 eval_batch = next(dsit)
             with timer("eval_step"):
                 eval_metrics = eval_step(state, eval_batch)
+            with timer("pose"):
+                model_out, _ = model.apply({"params": state.params}, _image_to_float(eval_batch["image"]))
+                eval_out = {"pred_heatmaps": final_pred_heatmaps(prepare_pred_heatmaps(model_out, out_h, out_w))}
+                pnp_metrics = pose_metrics(cfg, eval_batch, eval_out)
             times = {f"timer/{k}": v for k, v in timer.get_average_times().items()}
-            cfg.wandb.log({"train": metrics, "eval": eval_metrics, **times}, step=step)
-            print({**metrics, **eval_metrics, **times})
+            cfg.wandb.log({"train": metrics, "eval": eval_metrics, "pose": pnp_metrics, **times}, step=step)
+            print({**metrics, **eval_metrics, **pnp_metrics, **times})
         if cfg.viz.every > 0 and step % cfg.viz.every == 0:
-            model_out, _ = model.apply({"params": state.params}, _image_to_float(batch["image"]))
-            out_dict = {"pred_heatmaps": final_pred_heatmaps(prepare_pred_heatmaps(model_out, out_h, out_w))}
+            out_dict = predict_heatmap_out(model, state.params, batch, out_h, out_w)
             maybe_log_viz(cfg, batch, out_dict, step=step)
+            if irl_dsit is not None:
+                irl_batch = next(irl_dsit)
+                irl_out = predict_heatmap_out(model, state.params, irl_batch, out_h, out_w)
+                maybe_log_viz(cfg, irl_batch, irl_out, step=step, prefix="irl")
         if cfg.save_interval > 0 and (step + 1) % cfg.save_interval == 0 and save_dir is not None:
             with timer("ckpt"):
                 save_callback.save(_checkpoint_state(state), step + 1)
