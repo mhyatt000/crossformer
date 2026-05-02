@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 import flax.linen as nn
+import jax
 from jax import Array
 import jax.numpy as jnp
 
@@ -87,6 +88,32 @@ class ViTBackbone(nn.Module):
         return outs, h, w
 
 
+class SpatialFeatureEncoder(nn.Module):
+    """Adapt an encoder that returns one NHWC spatial feature map."""
+
+    encoder: nn.Module
+    num_readouts: int = 4
+    freeze: bool = False
+
+    @nn.compact
+    def __call__(
+        self,
+        x: Array,
+        train: bool = False,
+    ) -> tuple[tuple[Array, ...], int, int]:
+        spatial = self.encoder(x, train=train)
+        if isinstance(spatial, tuple):
+            spatial = spatial[0]
+        if self.freeze:
+            spatial = jax.lax.stop_gradient(spatial)
+        if spatial.ndim != 4:
+            raise ValueError(f"expected NHWC spatial features, got {spatial.shape}")
+
+        b, h, w, c = spatial.shape
+        tokens = spatial.reshape(b, h * w, c)
+        return (tokens,) * self.num_readouts, h, w
+
+
 class ReassembleBlock(nn.Module):
     """Convert ViT token sequence back into image-like feature map."""
 
@@ -113,7 +140,7 @@ class ReassembleBlock(nn.Module):
 def jax_image_resize(x: Array, new_h: int, new_w: int) -> Array:
     # NHWC resize
     return jnp.asarray(
-        __import__("jax").image.resize(
+        jax.image.resize(
             x,
             shape=(x.shape[0], new_h, new_w, x.shape[-1]),
             method="bilinear",
@@ -160,22 +187,28 @@ class DPTHead(nn.Module):
 
 class DPT(nn.Module):
     cfg: DPTConfig
+    encoder: nn.Module | None = None
+    scales: tuple[float, ...] = (4.0, 2.0, 1.0, 0.5)
 
     @nn.compact
     def __call__(self, x: Array, train: bool = False) -> Array:
         # x: [B, H, W, C]
         input_h, input_w = x.shape[1], x.shape[2]
 
-        tokens, h, w = ViTBackbone(self.cfg, name="vit")(x, train=train)
+        encoder = self.encoder
+        if encoder is None:
+            encoder = ViTBackbone(self.cfg, name="vit")
 
-        # DPT-style manufactured scales from transformer layers.
-        # For patch grid 14x14, these become roughly 56x56, 28x28, 14x14, 7x7.
-        scales = (4.0, 2.0, 1.0, 0.5)
+        tokens, h, w = encoder(x, train=train)
+        if not tokens:
+            raise ValueError("DPT encoder must return at least one readout")
+        if len(tokens) > len(self.scales):
+            raise ValueError(f"got {len(tokens)} readouts but only {len(self.scales)} DPT scales")
 
         feats = [
             ReassembleBlock(
                 out_dim=self.cfg.feature_dim,
-                scale=scales[i],
+                scale=self.scales[i],
                 name=f"reassemble_{i}",
             )(tok, h, w)
             for i, tok in enumerate(tokens)
@@ -188,22 +221,18 @@ class DPT(nn.Module):
         return y
 
 
-import jax
-
-cfg = DPTConfig(
-    image_size=224,
-    patch_size=16,
-    embed_dim=384,
-    depth=12,
-    num_heads=6,
-    out_channels=1,  # depth map
-)
-
-model = DPT(cfg)
-
-x = jnp.ones((2, 224, 224, 3))
-variables = model.init(jax.random.PRNGKey(0), x, train=True)
-y = model.apply(variables, x, train=True)
-
-print(y.shape)
-# (2, 224, 224, 1)
+if __name__ == "__main__":
+    cfg = DPTConfig(
+        image_size=224,
+        patch_size=16,
+        embed_dim=384,
+        depth=12,
+        num_heads=6,
+        out_channels=1,  # depth map
+    )
+    model = DPT(cfg)
+    x = jnp.ones((2, 224, 224, 3))
+    variables = model.init(jax.random.PRNGKey(0), x, train=True)
+    y = model.apply(variables, x, train=True)
+    print(y.shape)
+    # (2, 224, 224, 1)
