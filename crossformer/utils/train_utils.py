@@ -256,6 +256,8 @@ def freeze_weights(
         lambda path, v: ("frozen" if any(fnmatch(".".join(path), key) for key in frozen_keys) else "trainable"),
         params_or_params_shape,
     )
+    if isinstance(params_or_params_shape, flax.core.FrozenDict):
+        param_partitions = flax.core.freeze(param_partitions)
     tx = optax.multi_transform(partition_optimizers, param_partitions)
 
     logging.debug("Frozen params:")
