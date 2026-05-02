@@ -89,6 +89,8 @@ dependencies = [
     "fsspec>=2025.12.0",
     "filelock>=3.20.1",
     "flatbuffers>=25.12.19",
+    "tips",
+    "scenic",
 ]
 
 [dependency-groups]
@@ -108,6 +110,8 @@ xclients = { git = "https://github.com/mhyatt000/xclients" , rev = '638c1db'}
 jaxtyping = { git = "https://github.com/patrick-kidger/jaxtyping" }
 nvdiffrast = { git = "https://github.com/NVlabs/nvdiffrast.git" }
 jax-bonsai = { git = "https://github.com/jax-ml/bonsai" }
+tips = { git = "https://github.com/mhyatt000/tips" }
+scenic = { git = "https://github.com/google-research/scenic" }
 
 [tool.pyright]
 typeCheckingMode = "basic"
