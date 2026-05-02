@@ -25,6 +25,16 @@ def _resize_like(x, ref):
     return jax.image.resize(ref, (b, h, w, c), method="nearest")
 
 
+def _variant_out_size(variant: str, h: int, w: int) -> tuple[int, int]:
+    if variant == "full":
+        return h, w
+    if variant == "half":
+        return h // 2, w // 2
+    if variant == "quarter":
+        return h // 4, w // 4
+    raise ValueError(f"unknown variant: {variant}")
+
+
 class VGGBlock(nn.Module):
     ch: int
     depth: int
@@ -124,71 +134,55 @@ class DreamHourglass(nn.Module):
         if self.output_scale not in {"quarter", "half", "full"}:
             raise ValueError(f"unknown output_scale: {self.output_scale}")
 
+    def _skip(self, x, ref):
+        return x + ref if self.skip_connections else x
+
     def _encoder(self, x, stages):
-        x_0_1 = VGGBlock(64, 2, name="layer_0_1_down")(x)
-        stages.append(("enc1", x_0_1))
-        x_0_1_d = nn.max_pool(x_0_1, (2, 2), strides=(2, 2), padding="SAME")
-        stages.append(("pool1", x_0_1_d))
-
-        x_0_2 = VGGBlock(128, 2, name="layer_0_2_down")(x_0_1_d)
-        stages.append(("enc2", x_0_2))
-        x_0_2_d = nn.max_pool(x_0_2, (2, 2), strides=(2, 2), padding="SAME")
-        stages.append(("pool2", x_0_2_d))
-
-        x_0_3 = VGGBlock(256, 4, name="layer_0_3_down")(x_0_2_d)
-        stages.append(("enc3", x_0_3))
-        x_0_3_d = nn.max_pool(x_0_3, (2, 2), strides=(2, 2), padding="SAME")
-        stages.append(("pool3", x_0_3_d))
-
-        x_0_4 = VGGBlock(512, 4, name="layer_0_4_down")(x_0_3_d)
-        stages.append(("enc4", x_0_4))
-        x_0_4_d = nn.max_pool(x_0_4, (2, 2), strides=(2, 2), padding="SAME")
-        stages.append(("pool4", x_0_4_d))
-
-        x_0_5 = VGGBlock(512, 4, name="layer_0_5_down")(x_0_4_d)
-        stages.append(("enc5", x_0_5))
-        return x_0_1, x_0_1_d, x_0_2_d, x_0_3_d, x_0_4_d, x_0_5
+        feats = []
+        pools = []
+        for i, (ch, depth) in enumerate(VGG19_BLOCKS, start=1):
+            x = VGGBlock(ch, depth, name=f"layer_0_{i}_down")(x)
+            feats.append(x)
+            stages.append((f"enc{i}", x))
+            if i < len(VGG19_BLOCKS):
+                x = nn.max_pool(x, (2, 2), strides=(2, 2), padding="SAME")
+                pools.append(x)
+                stages.append((f"pool{i}", x))
+        return feats[0], pools[0], pools[1], pools[2], pools[3], feats[4]
 
     def _deconv_decoder(self, xs, stages):
         x_0_1, x_0_1_d, x_0_2_d, x_0_3_d, x_0_4_d, x_0_5 = xs
-        x = x_0_5 + x_0_4_d if self.skip_connections else x_0_5
-
-        x = DeconvBlock(256, 256, name="deconv_0_4")(x)
-        stages.append(("deconv_0_4", x))
-
-        x = DeconvBlock(128, 128, name="deconv_0_3")(x + x_0_3_d if self.skip_connections else x)
-        stages.append(("deconv_0_3", x))
-        if self.output_scale == "quarter":
-            return x
-
-        x = DeconvBlock(64, 64, name="deconv_0_2")(x + x_0_2_d if self.skip_connections else x)
-        stages.append(("deconv_0_2", x))
-        if self.output_scale == "half":
-            return x
-
-        x = DeconvBlock(64, None, name="deconv_0_1")(x + x_0_1_d if self.skip_connections else x)
-        stages.append(("deconv_0_1", x))
-        return x + x_0_1 if self.skip_connections else x
+        x = self._skip(x_0_5, x_0_4_d)
+        specs = (
+            ("deconv_0_4", 256, 256, None, None),
+            ("deconv_0_3", 128, 128, x_0_3_d, "quarter"),
+            ("deconv_0_2", 64, 64, x_0_2_d, "half"),
+            ("deconv_0_1", 64, None, x_0_1_d, "full"),
+        )
+        for name, out_ch, refine_ch, skip, stop in specs:
+            x = self._skip(x, skip) if skip is not None else x
+            x = DeconvBlock(out_ch, refine_ch, name=name)(x)
+            stages.append((name, x))
+            if self.output_scale == stop:
+                return self._skip(x, x_0_1) if stop == "full" else x
+        return x
 
     def _upsample_decoder(self, xs, stages):
         x_0_1, _, _, x_0_3_d, x_0_4_d, x_0_5 = xs
-        x = x_0_5 + x_0_4_d if self.skip_connections else x_0_5
-
-        x = UpsampleBlock(256, 256, name="upsample_0_4")(x)
-        stages.append(("upsample_0_4", x))
-        x = UpsampleBlock(128, 64, name="upsample_0_3")(x + x_0_3_d if self.skip_connections else x)
-        stages.append(("upsample_0_3", x))
-        if self.output_scale == "quarter" and not self.full_output:
-            return x
-
-        x = UpsampleBlock(64, 64, relu_after_refine=True, name="upsample_0_2")(x)
-        stages.append(("upsample_0_2", x))
-        if self.output_scale == "half" and not self.full_output:
-            return x
-
-        x = UpsampleBlock(64, 64, relu_after_refine=True, name="upsample_0_1")(x)
-        stages.append(("upsample_0_1", x))
-        return x + x_0_1 if self.skip_connections else x
+        x = self._skip(x_0_5, x_0_4_d)
+        specs = (
+            ("upsample_0_4", 256, 256, False, None, None),
+            ("upsample_0_3", 128, 64, False, x_0_3_d, "quarter"),
+            ("upsample_0_2", 64, 64, True, None, "half"),
+            ("upsample_0_1", 64, 64, True, None, "full"),
+        )
+        for name, out_ch, refine_ch, relu, skip, stop in specs:
+            x = self._skip(x, skip) if skip is not None else x
+            x = UpsampleBlock(out_ch, refine_ch, relu_after_refine=relu, name=name)(x)
+            stages.append((name, x))
+            if self.output_scale == stop and not self.full_output:
+                return self._skip(x, x_0_1) if stop == "full" else x
+        return self._skip(x, x_0_1)
 
     @nn.compact
     def __call__(self, x):
@@ -309,13 +303,6 @@ class DreamTIPS(nn.Module):
         if self.variant not in {"quarter", "half", "full"}:
             raise ValueError(f"unknown variant: {self.variant}")
 
-    def _out_size(self, h: int, w: int) -> tuple[int, int]:
-        if self.variant == "full":
-            return h, w
-        if self.variant == "half":
-            return h // 2, w // 2
-        return h // 4, w // 4
-
     @nn.compact
     def __call__(self, x):
         cfg = tips_model_config.get_config(self.tips_variant)
@@ -331,7 +318,7 @@ class DreamTIPS(nn.Module):
             spatial = jax.lax.stop_gradient(spatial)
 
         b, h, w, _ = x.shape
-        out_h, out_w = self._out_size(h, w)
+        out_h, out_w = _variant_out_size(self.variant, h, w)
         stages = [("tips_spatial", spatial)]
 
         y = nn.LayerNorm(name="tips_ln")(spatial)
