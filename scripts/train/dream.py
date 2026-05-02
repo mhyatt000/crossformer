@@ -100,6 +100,7 @@ class Config:
     num_keypoints: int = 0  # 0 = infer from batch
     encoder: str = "vgg"  # vgg | tips
     variant: str = "full"  # quarter | half | full
+    decoder: str = "auto"  # auto | upsample | deconv | dpt
     tips_variant: str = "tips_v2_b14"
     tips_checkpoint: Path | None = None
     tips_trainable: bool = False
@@ -278,6 +279,7 @@ def make_model(cfg: Config, num_keypoints: int):
         return DreamVGG(
             num_keypoints=num_keypoints,
             variant=cfg.variant,
+            decoder=cfg.decoder,
             deconv_decoder=cfg.deconv_decoder,
             full_output=cfg.full_output,
             skip_connections=cfg.skip_connections,
@@ -294,6 +296,7 @@ def make_model(cfg: Config, num_keypoints: int):
         return DreamTIPS(
             num_keypoints=num_keypoints,
             variant=cfg.variant,
+            decoder=cfg.decoder,
             tips_variant=cfg.tips_variant,
             freeze_encoder=not cfg.tips_trainable,
         )
