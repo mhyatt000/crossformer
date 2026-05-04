@@ -35,11 +35,11 @@ from crossformer.cn.dataset.mix import Arec
 from crossformer.data.grain.datasets import unpack_record
 from crossformer.data.grain.loader import _apply_fd_limit, _grain_mp_worker_init
 from crossformer.model.dream import DreamTIPS, DreamVGG
+from crossformer.model.load import resolve_checkpoint_path
 from crossformer.utils.callbacks.save import SaveCallback
 from crossformer.utils.callbacks.synth_viz import composite_robot, fk_keypoints, rasterize_robot, solve_pnp
 from crossformer.utils.spec import spec
 from crossformer.utils.train_utils import create_optimizer, Timer
-from run_tips import resolve_checkpoint_path
 import wandb
 
 KP_CONF_THRESHOLD = 0.03
