@@ -98,6 +98,15 @@ class HeatmapHead(nn.Module):
         return jax.nn.sigmoid(logits)
 
 
+class MaskHead(nn.Module):
+    @nn.compact
+    def __call__(self, x):
+        x = nn.Conv(64, (3, 3), padding="SAME", name="conv1")(x)
+        x = nn.relu(x)
+        logits = nn.Conv(1, (1, 1), padding="SAME", name="out")(x)
+        return jax.nn.sigmoid(logits)
+
+
 class SoftArgmaxPavlo(nn.Module):
     num_keypoints: int
     learned_beta: bool = True
@@ -217,8 +226,12 @@ class DreamHourglass(nn.Module):
 
         heatmaps = HeatmapHead(self.num_keypoints, name="heads_0")(x)
         stages.append(("heatmaps", heatmaps))
+        mask = MaskHead(name="mask_head")(x) if self.decoder == "dpt" else None
+        if mask is not None:
+            stages.append(("mask", mask))
         if not self.internalize_spatial_softmax:
-            return heatmaps, tuple((name, arr.shape) for name, arr in stages)
+            out = {"heatmaps": heatmaps, "mask": mask} if mask is not None else heatmaps
+            return out, tuple((name, arr.shape) for name, arr in stages)
 
         keypoints = SoftArgmaxPavlo(
             self.num_keypoints,
@@ -227,7 +240,10 @@ class DreamHourglass(nn.Module):
             name="softmax",
         )(heatmaps)
         stages.append(("keypoints", keypoints))
-        return (heatmaps, keypoints), tuple((name, arr.shape) for name, arr in stages)
+        out = {"heatmaps": heatmaps, "keypoints": keypoints}
+        if mask is not None:
+            out["mask"] = mask
+        return out, tuple((name, arr.shape) for name, arr in stages)
 
 
 class DreamHourglassMultiStage(nn.Module):
@@ -272,7 +288,7 @@ class DreamHourglassMultiStage(nn.Module):
             )(stage_input)
             outputs.append(out)
             shapes.extend((f"stage{i + 1}/{name}", shape) for name, shape in stage_shapes)
-            prev_heatmaps = out[0] if self.internalize_spatial_softmax else out
+            prev_heatmaps = out["heatmaps"] if isinstance(out, dict) else out
 
         return tuple(outputs), tuple(shapes)
 
@@ -372,7 +388,9 @@ class DreamTIPS(nn.Module):
             y = self._dpt_decoder(x, cfg, out_h, out_w, stages)
             heatmaps = HeatmapHead(self.num_keypoints, name="heads_0")(y)
             stages.append(("heatmaps", heatmaps))
-            return heatmaps, tuple((name, arr.shape) for name, arr in stages)
+            mask = MaskHead(name="mask_head")(y)
+            stages.append(("mask", mask))
+            return {"heatmaps": heatmaps, "mask": mask}, tuple((name, arr.shape) for name, arr in stages)
 
         enc = tips.VisionEncoder(
             variant=cfg.variant,

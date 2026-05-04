@@ -113,6 +113,7 @@ class Config:
     learned_beta: bool = True
     initial_beta: float = 1.0
     sigma_pct: float = 1.0  # Gaussian std dev as percent of belief-map size.
+    mask_weight: float = 0.1
     optim: Optim = default(Optim())
     viz: DreamVizConfig = default(DreamVizConfig())
     wandb: cn.Wandb = default(cn.Wandb(project="bela-dream"))
@@ -541,7 +542,16 @@ def focal_heatmap_loss(pred, target, alpha=2.0, beta=4.0, eps=1e-6):
     return (pos_loss.sum() + neg_loss.sum()) / n_pos
 
 
-def dream_loss_fn(batch: dict, out_dict: dict, sigma_pct: float = 1.0):
+def mask_loss(pred: jax.Array, target: jax.Array, eps: float = 1e-6) -> tuple[jax.Array, dict[str, jax.Array]]:
+    target = target.astype(pred.dtype)
+    bce = -(target * jnp.log(pred + eps) + (1.0 - target) * jnp.log1p(-pred + eps)).mean()
+    inter = (pred * target).sum(axis=(-2, -1))
+    denom = pred.sum(axis=(-2, -1)) + target.sum(axis=(-2, -1))
+    dice = 1.0 - ((2.0 * inter + eps) / (denom + eps)).mean()
+    return bce + dice, {"mask_bce": bce, "mask_dice": dice}
+
+
+def dream_loss_fn(batch: dict, out_dict: dict, sigma_pct: float = 1.0, mask_weight: float = 0.1):
     pred = out_dict["pred_heatmaps"]
     preds = pred if isinstance(pred, tuple) else (pred,)
     final_pred = preds[-1]
@@ -557,15 +567,27 @@ def dream_loss_fn(batch: dict, out_dict: dict, sigma_pct: float = 1.0):
     )
     stage_losses = tuple(focal_heatmap_loss(stage_pred, target) for stage_pred in preds)
     stage_mses = tuple(jnp.mean((stage_pred - target) ** 2) for stage_pred in preds)
-    loss = jnp.mean(jnp.stack(stage_losses))
+    heatmap_loss = jnp.mean(jnp.stack(stage_losses))
+    loss = heatmap_loss
     metrics = {
         "loss": loss,
+        "heatmap_loss": heatmap_loss,
         "mse": jnp.mean(jnp.stack(stage_mses)),
         "visible_kp": vis.sum(),
         **{f"stage_{i + 1}_mse": stage_mse for i, stage_mse in enumerate(stage_mses)},
         **{f"stage_{i + 1}_focal": stage_loss for i, stage_loss in enumerate(stage_losses)},
         **keypoint_metrics(batch, final_pred),
     }
+    if mask_weight > 0.0 and "pred_mask" in out_dict:
+        mask_term, mask_metrics = mask_loss(out_dict["pred_mask"], mask_target(batch["mask"], out_h, out_w))
+        loss = heatmap_loss + mask_weight * mask_term
+        metrics = {
+            **metrics,
+            "loss": loss,
+            "mask_loss": mask_term,
+            "mask_weighted_loss": mask_weight * mask_term,
+            **mask_metrics,
+        }
     return loss, metrics
 
 
@@ -754,7 +776,14 @@ def _render_heatmap_overlay(image: np.ndarray, hm: np.ndarray):
 
 
 def _render_mask(mask: np.ndarray, idx: int = 0):
+    mask = _mask_image(mask, idx=idx)
+    return wandb.Image(mask)
+
+
+def _mask_image(mask: np.ndarray, idx: int = 0) -> np.ndarray:
     mask = np.asarray(mask[idx])
+    if mask.ndim == 3 and mask.shape[0] == 1:
+        mask = mask[0]
     if mask.ndim == 3 and mask.shape[-1] == 1:
         mask = mask[..., 0]
     if mask.dtype == np.bool_:
@@ -763,7 +792,27 @@ def _render_mask(mask: np.ndarray, idx: int = 0):
         mask = (mask.astype(np.float32) * 255).astype(np.uint8)
     else:
         mask = np.clip(mask, 0, 255).astype(np.uint8)
-    return wandb.Image(mask)
+    return mask
+
+
+def _render_mask_overlay(image: np.ndarray, mask: np.ndarray, idx: int = 0, title: str = "mask overlay"):
+    import matplotlib.pyplot as plt
+
+    image = np.asarray(image[idx] if image.ndim == 4 else image)
+    if np.issubdtype(image.dtype, np.integer):
+        image = image.astype(np.float32) / 255.0
+    image = np.clip(image, 0.0, 1.0)
+    mask = _mask_image(mask, idx=idx).astype(np.float32) / 255.0
+
+    fig, ax = plt.subplots(1, 1, figsize=(4, 4))
+    ax.imshow(image)
+    ax.imshow(mask, cmap="magma", alpha=0.45, vmin=0.0, vmax=1.0)
+    ax.set_title(title)
+    ax.axis("off")
+    fig.tight_layout()
+    out = wandb.Image(fig)
+    plt.close(fig)
+    return out
 
 
 def _image_u8(image: np.ndarray) -> np.ndarray:
@@ -832,13 +881,23 @@ def maybe_log_viz(cfg: Config, batch: dict, out_dict: dict, step: int, prefix: s
             jax.device_get(pred_heatmaps),
         ),
         f"{prefix}/gt": _render_heatmap_overlay(jax.device_get(batch["image"][0]), jax.device_get(gt_heatmaps[0])),
-        f"{prefix}/mask": _render_mask(jax.device_get(batch["mask"])),
+        f"{prefix}/mask": _render_mask_overlay(
+            jax.device_get(batch["image"]),
+            jax.device_get(batch["mask"]),
+            title="gt mask",
+        ),
         f"{prefix}/pose_overlay": _render_pose_overlay(
             jax.device_get(batch),
             jax.device_get(pred_uv),
             jax.device_get(pred_conf),
         ),
     }
+    if "pred_mask" in out_dict:
+        log[f"{prefix}/pred_mask"] = _render_mask_overlay(
+            jax.device_get(batch["image"]),
+            jax.device_get(out_dict["pred_mask"]),
+            title="pred mask",
+        )
     cfg.wandb.log(log, step=step)
 
 
@@ -854,7 +913,32 @@ def resize_pred_heatmaps(pred_heatmaps: jax.Array, out_h: int, out_w: int) -> ja
     return jnp.transpose(pred_heatmaps, (0, 3, 1, 2))
 
 
+def resize_pred_mask(pred_mask: jax.Array, out_h: int, out_w: int) -> jax.Array:
+    if tuple(pred_mask.shape[-2:]) == (out_h, out_w):
+        return pred_mask
+    pred_mask = jnp.transpose(pred_mask, (0, 2, 3, 1))
+    pred_mask = jax.image.resize(
+        pred_mask,
+        (pred_mask.shape[0], out_h, out_w, pred_mask.shape[-1]),
+        method="bilinear",
+    )
+    return jnp.transpose(pred_mask, (0, 3, 1, 2))
+
+
+def mask_target(mask: jax.Array, out_h: int, out_w: int) -> jax.Array:
+    mask = (mask > 0).astype(jnp.float32)
+    if mask.ndim == 3:
+        mask = mask[:, None, :, :]
+    if tuple(mask.shape[-2:]) == (out_h, out_w):
+        return mask
+    mask = jnp.transpose(mask, (0, 2, 3, 1))
+    mask = jax.image.resize(mask, (mask.shape[0], out_h, out_w, mask.shape[-1]), method="nearest")
+    return jnp.transpose(mask, (0, 3, 1, 2))
+
+
 def _stage_belief_maps(model_out):
+    if isinstance(model_out, dict):
+        return (model_out["heatmaps"],)
     if hasattr(model_out, "shape"):
         return (model_out,)
     if not isinstance(model_out, tuple | list):
@@ -863,11 +947,25 @@ def _stage_belief_maps(model_out):
         raise ValueError("DREAM returned no outputs")
 
     first = model_out[0]
+    if isinstance(first, dict):
+        return tuple(stage["heatmaps"] for stage in model_out)
     if hasattr(first, "shape"):
         return tuple(model_out)
     if isinstance(first, tuple | list):
         return tuple(stage[0] for stage in model_out)
     raise TypeError(f"unexpected DREAM stage output type: {type(first)}")
+
+
+def _stage_masks(model_out):
+    if isinstance(model_out, dict):
+        return (model_out["mask"],) if "mask" in model_out else ()
+    if not isinstance(model_out, tuple | list) or not model_out:
+        return ()
+
+    first = model_out[0]
+    if isinstance(first, dict):
+        return tuple(stage["mask"] for stage in model_out if "mask" in stage)
+    return ()
 
 
 def prepare_pred_heatmaps(model_out, out_h: int, out_w: int):
@@ -878,13 +976,24 @@ def prepare_pred_heatmaps(model_out, out_h: int, out_w: int):
     return preds[0] if len(preds) == 1 else preds
 
 
+def prepare_pred_mask(model_out, out_h: int, out_w: int):
+    masks = tuple(
+        resize_pred_mask(jnp.transpose(stage, (0, 3, 1, 2)), out_h, out_w) for stage in _stage_masks(model_out)
+    )
+    return masks[-1] if masks else None
+
+
 def final_pred_heatmaps(pred_heatmaps):
     return pred_heatmaps[-1] if isinstance(pred_heatmaps, tuple) else pred_heatmaps
 
 
 def predict_heatmap_out(model, params, batch: dict, out_h: int, out_w: int) -> dict[str, jax.Array]:
     model_out, _ = model.apply({"params": params}, _image_to_float(batch["image"]))
-    return {"pred_heatmaps": final_pred_heatmaps(prepare_pred_heatmaps(model_out, out_h, out_w))}
+    out = {"pred_heatmaps": final_pred_heatmaps(prepare_pred_heatmaps(model_out, out_h, out_w))}
+    pred_mask = prepare_pred_mask(model_out, out_h, out_w)
+    if pred_mask is not None:
+        out["pred_mask"] = pred_mask
+    return out
 
 
 def make_train_step_dream(model, loss_fn, out_h: int, out_w: int, lr_fn, param_norm_fn):
@@ -896,6 +1005,9 @@ def make_train_step_dream(model, loss_fn, out_h: int, out_w: int, lr_fn, param_n
             model_out, _ = model.apply({"params": params}, image)
             pred_heatmaps = prepare_pred_heatmaps(model_out, out_h, out_w)
             out_dict = {"pred_heatmaps": pred_heatmaps}
+            pred_mask = prepare_pred_mask(model_out, out_h, out_w)
+            if pred_mask is not None:
+                out_dict["pred_mask"] = pred_mask
             return loss_fn(batch, out_dict)
 
         (loss, metrics), grads = jax.value_and_grad(_loss, has_aux=True)(state.params)
@@ -925,6 +1037,9 @@ def make_eval_step_dream(model, loss_fn, out_h: int, out_w: int):
         model_out, _ = model.apply({"params": state.params}, image)
         pred_heatmaps = prepare_pred_heatmaps(model_out, out_h, out_w)
         out_dict = {"pred_heatmaps": pred_heatmaps}
+        pred_mask = prepare_pred_mask(model_out, out_h, out_w)
+        if pred_mask is not None:
+            out_dict["pred_mask"] = pred_mask
         loss, metrics = loss_fn(batch, out_dict)
         return {"loss": loss, **metrics}
 
@@ -998,7 +1113,9 @@ def main(cfg: Config):
         save_callback = SaveCallback(None)
         print("  [dim]no save_dir — checkpoints disabled[/]")
 
-    loss_fn = lambda batch, out_dict: dream_loss_fn(batch, out_dict, sigma_pct=cfg.sigma_pct)
+    loss_fn = lambda batch, out_dict: dream_loss_fn(
+        batch, out_dict, sigma_pct=cfg.sigma_pct, mask_weight=cfg.mask_weight
+    )
     train_step = make_train_step_dream(
         model, loss_fn, out_h=out_h, out_w=out_w, lr_fn=lr_fn, param_norm_fn=param_norm_fn
     )
@@ -1007,6 +1124,9 @@ def main(cfg: Config):
     model_out, shapes = model.apply({"params": state.params}, image)
     pred_heatmaps = prepare_pred_heatmaps(model_out, out_h, out_w)
     out_dict = {"pred_heatmaps": pred_heatmaps}
+    pred_mask = prepare_pred_mask(model_out, out_h, out_w)
+    if pred_mask is not None:
+        out_dict["pred_mask"] = pred_mask
     _, init_metrics = loss_fn(batch, out_dict)
 
     print(Rule("DREAM Forward", style="bold magenta"))
@@ -1015,6 +1135,8 @@ def main(cfg: Config):
     print(f"trainable_params={_count_trainable_params(state.params, frozen):,}")
     final_pred = final_pred_heatmaps(out_dict["pred_heatmaps"])
     print(f"pred_heatmaps.shape={final_pred.shape}")
+    if "pred_mask" in out_dict:
+        print(f"pred_mask.shape={out_dict['pred_mask'].shape}")
     if tuple(final_pred.shape[-2:]) != (out_h, out_w):
         raise ValueError(
             f"expected net_out_size={(out_h, out_w)} from variant={cfg.variant}, got {tuple(final_pred.shape[-2:])}"
