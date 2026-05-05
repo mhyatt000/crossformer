@@ -586,8 +586,9 @@ def focal_heatmap_loss(pred, target, alpha=2.0, beta=4.0, eps=1e-6):
     """
     pred = jnp.clip(pred, eps, 1.0 - eps)
 
-    pos = target >= 1.0 - eps
-    neg = target < 1.0 - eps
+    peak = target.max(axis=(-2, -1), keepdims=True)
+    pos = (target >= peak) & (peak > 0)
+    neg = ~pos
 
     pos_loss = -((1.0 - pred) ** alpha) * jnp.log(pred) * pos
     neg_loss = -((1.0 - target) ** beta) * (pred**alpha) * jnp.log(1.0 - pred) * neg
