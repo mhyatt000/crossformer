@@ -212,6 +212,8 @@ def mix_with_bg(robot_ds, coco_ds, cfg: Config):
 
 
 def make_dataset(cfg: Config):
+    # MapDataset stage = cheap I/O only (read + msgpack + visibility filter). Tag
+    # with _kind so the unified prepare can dispatch downstream.
     synth = (
         grain.MapDataset.source(cfg.mix.source)
         .seed(42)
@@ -219,21 +221,27 @@ def make_dataset(cfg: Config):
         .repeat()
         .map(unpack_record)
         .filter(lambda s: int(np.asarray(s["info"]["kp_visible"]).sum()) >= cfg.min_visible_kp)
-        .map(partial(prepare_sample_np, cfg))
-    )  # iter before batch so that procs do batching and doesnt impede read threads
+        .map(lambda s: {**s, "_kind": "synth"})
+    )
 
     if cfg.real_prob > 0.0:
         real_src = cfg.real_mix.source
         real = grain.MapDataset.source(real_src).seed(43).shuffle().repeat()
         if not isinstance(real_src, MultiArrayRecordSource):
             real = real.map(unpack_record)
-
-        real = real.map(partial(prepare_irl_sample_np, cfg))
+        real = real.map(lambda s: {**s, "_kind": "real"})
         md = grain.MapDataset.mix([synth, real], weights=[1.0 - cfg.real_prob, cfg.real_prob])
     else:
         md = synth
 
     ds = md.to_iter_dataset(grain.ReadOptions(num_threads=32, prefetch_buffer_size=1024))
+
+    # Heavy prepare runs AFTER to_iter so mp_prefetch workers parallelize it.
+    def _prepare(s):
+        kind = s.pop("_kind")
+        return prepare_sample_np(cfg, s) if kind == "synth" else prepare_irl_sample_np(cfg, s)
+
+    ds = ds.map(_prepare)
 
     if cfg.coco_prob:
         coco = make_coco_dataset(cfg)

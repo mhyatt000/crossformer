@@ -1,15 +1,16 @@
-"""Static rig calibration and CPU robot-silhouette mask rendering
+"""Static rig calibration and CPU robot-silhouette mask rendering.
 
-Provider per-camera (K, w2c) for the xgym rig and thin wrapper around
-xclients CPI maskRenderer for use inside grain data workers.
+Provides per-camera (K, w2c) for the xgym rig and a thin wrapper around the
+in-tree CPU mask renderer for use inside grain data workers.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-import sys
 
 import numpy as np
+
+from crossformer.utils.mask_renderer import Intrinsics, rasterize_mesh
 
 FLU2RDF = np.array(
     [[0, 0, 1, 0], [-1, 0, 0, 0], [0, -1, 0, 0], [0, 0, 0, 1]],
@@ -49,28 +50,23 @@ def render_robot_mask(
 ) -> np.ndarray:
     """Render binary robot silhouette (h, w) uint8 in {0, 255}.
 
-    Uses the same pyroki FK as fk_keypoints so joint conventions are
-    identical, then rasterizes via the CPU z-buffer from mask_renderer.
+    Uses pyroki FK (same as fk_keypoints) for joint convention parity, then
+    rasterizes via the in-tree CPU z-buffer.
     """
-    xclients_synth = str(Path.home() / "xclients/plugins/synth")
-    if xclients_synth not in sys.path:
-        sys.path.insert(0, xclients_synth)
-    from mask_renderer import _rasterize_mesh, Intrinsics
-
     from crossformer.utils.callbacks.synth_viz import _get_robot_mesh
 
     robot = _get_robot_mesh()
     q = np.zeros((1, robot.actuated), dtype=np.float32)
     q[0, :7] = joints_rad
-    q[0, 7] = float(gripper_rad)  # drive_joint in URDF radians [0, 0.85]
+    q[0, 7] = float(gripper_rad)
 
-    # World-frame vertices (B=1, V, 4) homogeneous via pyroki FK.
-    verts_world = robot.posed_verts(q)[0]  # (V, 4)
+    # World-frame vertices via pyroki FK.
+    verts_world = robot.posed_verts(q)[0]  # (V, 4) homogeneous
 
-    # Transform to OpenGL camera frame (mask_renderer expects -Z forward).
+    # Transform to OpenGL camera frame (-Z forward).
     flip = np.diag([1.0, -1.0, -1.0, 1.0])
     w2c_gl = flip @ w2c.astype(np.float64)
-    verts_cam = (w2c_gl @ verts_world.astype(np.float64).T).T[:, :3]  # (V, 3)
+    verts_cam = (w2c_gl @ verts_world.astype(np.float64).T).T[:, :3]
 
     intr = Intrinsics(
         fx=float(K[0, 0]),
@@ -82,5 +78,5 @@ def render_robot_mask(
     )
     depth_buf = np.full((h, w), np.inf, dtype=np.float32)
     inst_buf = np.zeros((h, w), dtype=np.uint8)
-    _rasterize_mesh(verts_cam, robot.faces, 1, intr, depth_buf, inst_buf)
+    rasterize_mesh(verts_cam, robot.faces, 1, intr, depth_buf, inst_buf)
     return (inst_buf > 0).astype(np.uint8) * 255
