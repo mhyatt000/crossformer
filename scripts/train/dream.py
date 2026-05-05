@@ -8,7 +8,6 @@ from functools import partial
 import os
 from pathlib import Path
 
-from crossformer.utis.rig import K_for_size, load_w2c, render_robot_mask
 from flax import struct
 from flax.core import freeze, unfreeze
 from flax.training.train_state import TrainState
@@ -39,6 +38,7 @@ from crossformer.model.dream import DreamTIPS, DreamVGG
 from crossformer.model.load import resolve_checkpoint_path
 from crossformer.utils.callbacks.save import SaveCallback
 from crossformer.utils.callbacks.synth_viz import composite_robot, fk_keypoints, rasterize_robot, solve_pnp
+from crossformer.utils.rig import K_for_size, load_w2c, render_robot_mask
 from crossformer.utils.spec import spec
 from crossformer.utils.train_utils import create_optimizer, Timer
 import wandb
@@ -223,7 +223,7 @@ def make_dataset(cfg: Config):
     )  # iter before batch so that procs do batching and doesnt impede read threads
 
     if cfg.real_prob > 0.0:
-        real_src = cfg.real_mix_source
+        real_src = cfg.real_mix.source
         real = grain.MapDataset.source(real_src).seed(43).shuffle().repeat()
         if not isinstance(real_src, MultiArrayRecordSource):
             real = real.map(unpack_record)
