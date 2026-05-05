@@ -125,7 +125,7 @@ class Config:
     mix: Arec = default(Arec.from_name("xarm_dream_100k"))
     real_mix: Arec = default(Arec.from_name("xgym_sweep_single"))
     real_prob: float = 0.0
-    min_visible_kp: int = 4
+    min_visible_kp: int = 5
     irl_mix: Arec = default(Arec.from_name("xgym_sweep_single"))
     irl_image_keys: tuple[str, ...] = ("low", "side")
     mp: int = 16
@@ -196,7 +196,7 @@ SOURCE_REAL = np.int32(1)
 
 
 def add_bg(x: dict, rng, prob=0.5):
-    if int(x.get("source", SOURCE_SYNTH)) == int(SOURCE_SYNTH) and rng.random() < prob:
+    if rng.random() < prob:
         x["image"] = np.where(x["mask"][..., None] > 0, x["image"], x["bg"])
     x.pop("bg", None)
     return x
@@ -220,7 +220,6 @@ def make_dataset(cfg: Config):
         .shuffle()
         .repeat()
         .map(unpack_record)
-        .filter(lambda s: int(np.asarray(s["info"]["kp_visible"]).sum()) <= cfg.min_visible_kp)
         .map(lambda s: {**s, "_kind": "synth"})
     )
 
@@ -242,6 +241,7 @@ def make_dataset(cfg: Config):
         return prepare_sample_np(cfg, s) if kind == "synth" else prepare_irl_sample_np(cfg, s)
 
     ds = ds.map(_prepare)
+    ds = ds.filter(lambda s: int(np.asarray(s["keypoints_visible"]).sum()) >= cfg.min_visible_kp)
 
     if cfg.coco_prob:
         coco = make_coco_dataset(cfg)
