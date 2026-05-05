@@ -177,7 +177,7 @@ _ = (TFDS(name="xgym_duck_single", head=Head.SINGLE, embodiment=SINGLE),)
 XGYM = [
     Arec(name="xgym_lift_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.7", branch="main"),
     Arec(name="xgym_stack_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.5", branch="main"),
-    Arec(name="xgym_sweep_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.6", branch="main"),
+    Arec(name="xgym_sweep_single", head=Head.SINGLE, embodiment=SINGLE, version="0.6.0", branch="main"),
     Arec(name="sweep_mano", head=Head.MANO, embodiment=HUMAN_SINGLE, version="0.0.2", branch="to_step"),
 ]
 XGYM_WEIGHTS = [len(x.source) for x in XGYM]  # size weighted rn, not uniform
