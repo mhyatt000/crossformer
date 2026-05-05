@@ -38,7 +38,7 @@ from crossformer.model.dream import DreamTIPS, DreamVGG
 from crossformer.model.load import resolve_checkpoint_path
 from crossformer.utils.callbacks.save import SaveCallback
 from crossformer.utils.callbacks.synth_viz import composite_robot, fk_keypoints, rasterize_robot, solve_pnp
-from crossformer.utils.rig import K_for_size, load_w2c, render_robot_mask
+from crossformer.utils.rig import K_for_size, load_w2c
 from crossformer.utils.spec import spec
 from crossformer.utils.train_utils import create_optimizer, Timer
 import wandb
@@ -448,46 +448,40 @@ def prepare_sample_np(cfg: Config, sample: dict) -> dict:
     }
 
 
-def _project_kp_np(pts_3d: np.ndarray, w2c: np.ndarray, K: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Project (N,3) world points → (uv (N,2), z (N,)) via OpenCV w2c."""
-    pts_h = np.concatenate([pts_3d, np.ones((pts_3d.shape[0], 1), dtype=pts_3d.dtype)], axis=-1)
-    cam = (w2c.astype(np.float64) @ pts_h.T).T[:, :3]
-    z = cam[:, 2]
-    z_safe = np.where(np.abs(z) < 1e-6, 1e-6, z)
-    pix = (K.astype(np.float64) @ cam.T).T
-    uv = pix[:, :2] / z_safe[:, None]
-    return uv.astype(np.float32), z.astype(np.float32)
-
-
 def prepare_irl_sample_np(cfg: Config, sample: dict) -> dict:
+    """Prepare a real-data sample using PRE-RENDERED mask + kp2d baked into the
+    arec (xgym_sweep_single >= v0.6.0). No FK or rasterization at training time.
+    """
     raw_h, raw_w = cfg.raw_size
     net_h, net_w = cfg.net_in_size
     image_key = str(np.random.choice(cfg.irl_image_keys))
+
     image_raw = np.asarray(sample["image"][image_key])
     if image_raw.ndim == 4:
         image_raw = image_raw[0]
     if tuple(image_raw.shape[:2]) != (raw_h, raw_w):
         raise ValueError(f"expected raw_size={(raw_h, raw_w)} but got {tuple(image_raw.shape[:2])}")
 
+    mask_raw = np.asarray(sample["mask"][image_key])
+    if mask_raw.ndim == 3:
+        mask_raw = mask_raw[0]
+
+    kp2d_raw = np.asarray(sample["kp2d"][image_key], dtype=np.float32)  # (10, 3) u,v,vis
+    if kp2d_raw.ndim == 3:
+        kp2d_raw = kp2d_raw[0]
+    visible = kp2d_raw[:, 2] > 0.5
+
     joints_arr = np.asarray(sample["proprio"]["joints"], dtype=np.float32).reshape(-1, 7)
     joints = joints_arr[0]
     gripper_arr = np.asarray(sample["proprio"]["gripper"], dtype=np.float32).reshape(-1)
     gripper = gripper_arr[:1]
-    gripper_drive = float(gripper_arr[0]) * 0.85  # 0=open, 1=closed → drive_joint [0, 0.85]
 
     K_raw = K_for_size(raw_h, raw_w)
     w2c = load_w2c(image_key)
 
-    pts_3d = fk_keypoints(joints.astype(np.float64))  # (10, 3) world
-    kp2d_raw, z_cam = _project_kp_np(pts_3d, w2c, K_raw)
-    in_frame = (kp2d_raw[:, 0] >= 0) & (kp2d_raw[:, 0] < raw_w) & (kp2d_raw[:, 1] >= 0) & (kp2d_raw[:, 1] < raw_h)
-    visible = in_frame & (z_cam > 0)
-
-    mask_raw = render_robot_mask(joints, w2c, K_raw, raw_h, raw_w, gripper_rad=gripper_drive)
-
     image = _shrink_crop_image_np(image_raw, net_h, net_w, Image.BILINEAR)
     mask = _shrink_crop_image_np(mask_raw, net_h, net_w, Image.NEAREST)
-    kp2d_netin = _shrink_crop_keypoints_np(kp2d_raw, raw_h, raw_w, net_h, net_w)
+    kp2d_netin = _shrink_crop_keypoints_np(kp2d_raw[:, :2], raw_h, raw_w, net_h, net_w)
     kp2d_norm = _normalize_kp2d_np(kp2d_netin, net_h, net_w)
     K = _shrink_crop_intrinsics_np(K_raw, raw_h, raw_w, net_h, net_w)
 
@@ -497,7 +491,7 @@ def prepare_irl_sample_np(cfg: Config, sample: dict) -> dict:
         "q": np.concatenate([joints, gripper], axis=-1),
         "keypoints_2d_norm": kp2d_norm,
         "keypoints_2d_netin": kp2d_netin,
-        "keypoints_2d_raw": kp2d_raw,
+        "keypoints_2d_raw": kp2d_raw[:, :2],
         "keypoints_visible": visible,
         "K": K,
         "w2c": w2c.astype(np.float32),
