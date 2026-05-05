@@ -236,7 +236,9 @@ def main() -> None:
                     pro = unpack_record(pro_src[i])
                     joints = np.asarray(pro["proprio"]["joints"], dtype=np.float32).reshape(7)
                     gripper = float(np.asarray(pro["proprio"]["gripper"]).reshape(-1)[0])
-                    gripper_drive = gripper * 0.85  # 0=open → 1=closed
+                    # Real convention: gripper=0 → closed, gripper=1 → open.
+                    # URDF drive_joint: 0 → open, 0.85 → closed. Invert + scale.
+                    gripper_drive = (1.0 - gripper) * 0.85
                     yield (i, joints, gripper_drive)
 
             t0 = time.perf_counter()

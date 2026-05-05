@@ -220,7 +220,7 @@ def make_dataset(cfg: Config):
         .shuffle()
         .repeat()
         .map(unpack_record)
-        .filter(lambda s: int(np.asarray(s["info"]["kp_visible"]).sum()) >= cfg.min_visible_kp)
+        .filter(lambda s: int(np.asarray(s["info"]["kp_visible"]).sum()) <= cfg.min_visible_kp)
         .map(lambda s: {**s, "_kind": "synth"})
     )
 
