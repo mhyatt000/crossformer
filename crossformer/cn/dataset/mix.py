@@ -188,12 +188,15 @@ NEW = [
         name="xarm_dream_100k",
         head=Head.SINGLE,
         embodiment=SINGLE_GRIP_CAL,
-        version="0.0.2",
+        version="0.0.5",
         branch="main",
         chunk=1,
         restructure=ModuleSpec.create("crossformer.data.grain.restructure:restructure_xarm_dream"),
     ),
 ]
+
+xarm_mix = [DataSource.REGISTRY["xarm_dream_100k"], DataSource.REGISTRY["xgym_sweep_single"]]
+MultiDataSource(name="xarm_mix", data=xarm_mix, weights=[1.0] * len(xarm_mix))
 
 # multi source
 MultiDataSource(
