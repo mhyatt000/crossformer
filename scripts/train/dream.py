@@ -229,7 +229,7 @@ def make_dataset(cfg: Config):
             real = real.map(unpack_record)
 
         real = real.map(partial(prepare_irl_sample_np, cfg))
-        md = grain.MapDataset.mix([synth, real], weights=[1.0, cfg.real_prob, cfg.real_prob])
+        md = grain.MapDataset.mix([synth, real], weights=[1.0 - cfg.real_prob, cfg.real_prob])
     else:
         md = synth
 
