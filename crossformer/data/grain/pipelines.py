@@ -536,6 +536,7 @@ class RandomAspect(augmax.GeometricTransformation):
         coordinates.push_transform(transform)
 
 
+# TODO - add augmentations
 def get_frame_transform(
     config: builders.GrainDatasetConfig,
     tfconfig: TransformConfig,
