@@ -131,6 +131,8 @@ class Config:
     mp: int = 16
     mp_buf: int = 4  # per worker buffer size
     n_preshard: int = 2  # prefetch sharded data
+    imaug: bool = True  # apply grain-style image augmentation
+    rotate: bool = True  # apply grain-style random rotation
 
     coco_prob: float = 0.5
     coco_dir: Path = Path("/home/bela/datasets/coco/train2014")
@@ -230,6 +232,63 @@ def _drop_low_cam(s):
     return s
 
 
+def _rotate_image_np(image: np.ndarray, angle_deg: float, resample: int, fill: int = 0) -> np.ndarray:
+    out = Image.fromarray(image).rotate(angle_deg, resample=resample, expand=False, fillcolor=fill)
+    return np.asarray(out)
+
+
+def _rotate_keypoints_np(kp2d: np.ndarray, angle_deg: float, h: int, w: int) -> np.ndarray:
+    a = np.deg2rad(np.float32(angle_deg))
+    c, s = np.cos(a), np.sin(a)
+    cx = np.float32(w) * 0.5
+    cy = np.float32(h) * 0.5
+    x = kp2d[..., 0] - cx
+    y = kp2d[..., 1] - cy
+    return np.stack([c * x - s * y + cx, s * x + c * y + cy], axis=-1).astype(np.float32)
+
+
+def _maybe_apply_grain_imaug(ds, cfg: Config):
+    if not (cfg.imaug or cfg.rotate):
+        return ds
+
+    def aug(batch: dict, rng):
+        image = np.asarray(batch["image"]).copy()
+        mask = np.asarray(batch["mask"]).copy()
+        kp = np.asarray(batch["keypoints_2d_netin"], dtype=np.float32).copy()
+        vis = np.asarray(batch["keypoints_visible"], dtype=bool).copy()
+        h, w = image.shape[1:3]
+
+        for i in range(image.shape[0]):
+            if cfg.imaug and rng.random() < 0.5:
+                image[i] = image[i][..., rng.permutation(image.shape[-1])]
+
+            if cfg.rotate and rng.random() < 0.3:
+                angle = float(rng.uniform(-15.0, 15.0))
+                image[i] = _rotate_image_np(image[i], angle, Image.BILINEAR, fill=0)
+                mask_rot = _rotate_image_np(mask[i].astype(np.uint8), angle, Image.NEAREST, fill=0)
+                mask[i] = mask_rot.astype(mask.dtype)
+                kp_i = _rotate_keypoints_np(kp[i], angle, h=h, w=w)
+                in_bounds = (
+                    (kp_i[:, 0] >= 0.0)
+                    & (kp_i[:, 0] < np.float32(w))
+                    & (kp_i[:, 1] >= 0.0)
+                    & (kp_i[:, 1] < np.float32(h))
+                )
+                kp[i] = kp_i
+                vis[i] = vis[i] & in_bounds
+
+        return {
+            **batch,
+            "image": image,
+            "mask": mask,
+            "keypoints_2d_netin": kp,
+            "keypoints_2d_norm": _normalize_kp2d_np(kp, h=h, w=w),
+            "keypoints_visible": vis,
+        }
+
+    return ds.random_map(aug)
+
+
 def make_dataset(cfg: Config):
     # MapDataset stage = cheap I/O only (read + msgpack + visibility filter). Tag
     # with _kind so the unified prepare can dispatch downstream.
@@ -266,6 +325,7 @@ def make_dataset(cfg: Config):
         coco = make_coco_dataset(cfg)
         ds = mix_with_bg(ds, coco, cfg)
     ds = ds.batch(cfg.bs, drop_remainder=True)
+    ds = _maybe_apply_grain_imaug(ds, cfg)
 
     if cfg.mp > 0:
         lim = _apply_fd_limit(512**2)
