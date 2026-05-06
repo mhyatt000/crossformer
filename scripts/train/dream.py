@@ -127,7 +127,7 @@ class Config:
     real_prob: float = 0.0
     min_visible_kp: int = 5
     irl_mix: Arec = default(Arec.from_name("xgym_sweep_single"))
-    irl_image_keys: tuple[str, ...] = ("low", "side")
+    irl_image_keys: tuple[str, ...] = ("side",)
     mp: int = 16
     mp_buf: int = 4  # per worker buffer size
     n_preshard: int = 2  # prefetch sharded data
@@ -211,6 +211,25 @@ def mix_with_bg(robot_ds, coco_ds, cfg: Config):
     return ds
 
 
+_DROPPED_CAMS = ("low",)
+
+
+def _drop_low_cam(s):
+    """Strip dropped cams from every per-cam dict in a sample.
+
+    The static HT for `low` doesn't match the data (mask coverage ~0% for many
+    frames), so we drop it before anything downstream can read it. Applied to
+    both the train mix and the IRL viz loader.
+    """
+    if not isinstance(s, dict):
+        return s
+    for v in s.values():
+        if isinstance(v, dict):
+            for cam in _DROPPED_CAMS:
+                v.pop(cam, None)
+    return s
+
+
 def make_dataset(cfg: Config):
     # MapDataset stage = cheap I/O only (read + msgpack + visibility filter). Tag
     # with _kind so the unified prepare can dispatch downstream.
@@ -228,7 +247,7 @@ def make_dataset(cfg: Config):
         real = grain.MapDataset.source(real_src).seed(43).shuffle().repeat()
         if not isinstance(real_src, MultiArrayRecordSource):
             real = real.map(unpack_record)
-        real = real.map(lambda s: {**s, "_kind": "real"})
+        real = real.map(_drop_low_cam).map(lambda s: {**s, "_kind": "real"})
         md = grain.MapDataset.mix([synth, real], weights=[1.0 - cfg.real_prob, cfg.real_prob])
     else:
         md = synth
@@ -268,6 +287,7 @@ def make_dataset(cfg: Config):
 
 def make_irl_dataset(cfg: Config):
     ds = grain.MapDataset.source(cfg.irl_mix.source).seed(cfg.seed).repeat()
+    ds = ds.map(_drop_low_cam)
     ds = ds.map(partial(prepare_irl_sample_np, cfg))
     ds = ds.batch(cfg.bs, drop_remainder=True)
     ds = ds.map(make_shard_fn())
@@ -455,6 +475,8 @@ def prepare_irl_sample_np(cfg: Config, sample: dict) -> dict:
     raw_h, raw_w = cfg.raw_size
     net_h, net_w = cfg.net_in_size
     image_key = str(np.random.choice(cfg.irl_image_keys))
+    if image_key in _DROPPED_CAMS:
+        raise ValueError(f"irl_image_keys={cfg.irl_image_keys} contains a dropped cam ({image_key}); see _DROPPED_CAMS")
 
     image_raw = np.asarray(sample["image"][image_key])
     if image_raw.ndim == 4:
