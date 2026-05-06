@@ -32,12 +32,13 @@ import tyro
 import crossformer.cn as cn
 from crossformer.cn.base import default
 from crossformer.cn.dataset.mix import Arec
-from crossformer.data.grain.datasets import unpack_record
+from crossformer.data.grain.datasets import MultiArrayRecordSource, unpack_record
 from crossformer.data.grain.loader import _apply_fd_limit, _grain_mp_worker_init
 from crossformer.model.dream import DreamTIPS, DreamVGG
 from crossformer.model.load import resolve_checkpoint_path
 from crossformer.utils.callbacks.save import SaveCallback
 from crossformer.utils.callbacks.synth_viz import composite_robot, fk_keypoints, rasterize_robot, solve_pnp
+from crossformer.utils.rig import K_for_size, load_w2c
 from crossformer.utils.spec import spec
 from crossformer.utils.train_utils import create_optimizer, Timer
 import wandb
@@ -122,14 +123,19 @@ class Config:
     # LOADER
     bs: int = 1
     mix: Arec = default(Arec.from_name("xarm_dream_100k"))
+    real_mix: Arec = default(Arec.from_name("xgym_sweep_single"))
+    real_prob: float = 0.0
+    min_visible_kp: int = 5
     irl_mix: Arec = default(Arec.from_name("xgym_sweep_single"))
-    irl_image_keys: tuple[str, ...] = ("low", "side")
+    irl_image_keys: tuple[str, ...] = ("side",)
     mp: int = 16
     mp_buf: int = 4  # per worker buffer size
     n_preshard: int = 2  # prefetch sharded data
+    imaug: bool = True  # apply grain-style image augmentation
+    rotate: bool = True  # apply grain-style random rotation
 
     coco_prob: float = 0.5
-    coco_dir: Path = Path.home() / "bela/datasets/coco/train2014"
+    coco_dir: Path = Path("/home/bela/datasets/coco/train2014")
 
     # Checkpointing
     save_dir: Path | None = Path.home().expanduser()
@@ -187,6 +193,10 @@ def make_coco_dataset(cfg: Config):
     return grain.MapDataset.source(names).seed(cfg.seed).shuffle().repeat().map(read_bg).to_iter_dataset()
 
 
+SOURCE_SYNTH = np.int32(0)
+SOURCE_REAL = np.int32(1)
+
+
 def add_bg(x: dict, rng, prob=0.5):
     if rng.random() < prob:
         x["image"] = np.where(x["mask"][..., None] > 0, x["image"], x["bg"])
@@ -203,23 +213,119 @@ def mix_with_bg(robot_ds, coco_ds, cfg: Config):
     return ds
 
 
+_DROPPED_CAMS = ("low",)
+
+
+def _drop_low_cam(s):
+    """Strip dropped cams from every per-cam dict in a sample.
+
+    The static HT for `low` doesn't match the data (mask coverage ~0% for many
+    frames), so we drop it before anything downstream can read it. Applied to
+    both the train mix and the IRL viz loader.
+    """
+    if not isinstance(s, dict):
+        return s
+    for v in s.values():
+        if isinstance(v, dict):
+            for cam in _DROPPED_CAMS:
+                v.pop(cam, None)
+    return s
+
+
+def _rotate_image_np(image: np.ndarray, angle_deg: float, resample: int, fill: int = 0) -> np.ndarray:
+    out = Image.fromarray(image).rotate(angle_deg, resample=resample, expand=False, fillcolor=fill)
+    return np.asarray(out)
+
+
+def _rotate_keypoints_np(kp2d: np.ndarray, angle_deg: float, h: int, w: int) -> np.ndarray:
+    a = np.deg2rad(np.float32(angle_deg))
+    c, s = np.cos(a), np.sin(a)
+    cx = np.float32(w) * 0.5
+    cy = np.float32(h) * 0.5
+    x = kp2d[..., 0] - cx
+    y = kp2d[..., 1] - cy
+    return np.stack([c * x - s * y + cx, s * x + c * y + cy], axis=-1).astype(np.float32)
+
+
+def _maybe_apply_grain_imaug(ds, cfg: Config):
+    if not (cfg.imaug or cfg.rotate):
+        return ds
+
+    def aug(batch: dict, rng):
+        image = np.asarray(batch["image"]).copy()
+        mask = np.asarray(batch["mask"]).copy()
+        kp = np.asarray(batch["keypoints_2d_netin"], dtype=np.float32).copy()
+        vis = np.asarray(batch["keypoints_visible"], dtype=bool).copy()
+        h, w = image.shape[1:3]
+
+        for i in range(image.shape[0]):
+            if cfg.imaug and rng.random() < 0.5:
+                image[i] = image[i][..., rng.permutation(image.shape[-1])]
+
+            if cfg.rotate and rng.random() < 0.3:
+                angle = float(rng.uniform(-15.0, 15.0))
+                image[i] = _rotate_image_np(image[i], angle, Image.BILINEAR, fill=0)
+                mask_rot = _rotate_image_np(mask[i].astype(np.uint8), angle, Image.NEAREST, fill=0)
+                mask[i] = mask_rot.astype(mask.dtype)
+                kp_i = _rotate_keypoints_np(kp[i], angle, h=h, w=w)
+                in_bounds = (
+                    (kp_i[:, 0] >= 0.0)
+                    & (kp_i[:, 0] < np.float32(w))
+                    & (kp_i[:, 1] >= 0.0)
+                    & (kp_i[:, 1] < np.float32(h))
+                )
+                kp[i] = kp_i
+                vis[i] = vis[i] & in_bounds
+
+        return {
+            **batch,
+            "image": image,
+            "mask": mask,
+            "keypoints_2d_netin": kp,
+            "keypoints_2d_norm": _normalize_kp2d_np(kp, h=h, w=w),
+            "keypoints_visible": vis,
+        }
+
+    return ds.random_map(aug)
+
+
 def make_dataset(cfg: Config):
-    ds = (
+    # MapDataset stage = cheap I/O only (read + msgpack + visibility filter). Tag
+    # with _kind so the unified prepare can dispatch downstream.
+    synth = (
         grain.MapDataset.source(cfg.mix.source)
         .seed(42)
         .shuffle()
         .repeat()
         .map(unpack_record)
-        .to_iter_dataset(
-            grain.ReadOptions(num_threads=32, prefetch_buffer_size=1024)
-        )  # iter before batch so that procs do batching and doesnt impede read threads
+        .map(lambda s: {**s, "_kind": "synth"})
     )
 
-    ds = ds.map(partial(prepare_sample_np, cfg))
+    if cfg.real_prob > 0.0:
+        real_src = cfg.real_mix.source
+        real = grain.MapDataset.source(real_src).seed(43).shuffle().repeat()
+        if not isinstance(real_src, MultiArrayRecordSource):
+            real = real.map(unpack_record)
+        real = real.map(_drop_low_cam).map(lambda s: {**s, "_kind": "real"})
+        md = grain.MapDataset.mix([synth, real], weights=[1.0 - cfg.real_prob, cfg.real_prob])
+    else:
+        md = synth
+
+    ds = md.to_iter_dataset(grain.ReadOptions(num_threads=32, prefetch_buffer_size=1024))
+
+    # Heavy prepare runs AFTER to_iter so mp_prefetch workers parallelize it.
+    def _prepare(s):
+        kind = s.pop("_kind")
+        return prepare_sample_np(cfg, s) if kind == "synth" else prepare_irl_sample_np(cfg, s)
+
+    ds = ds.map(_prepare)
+    ds = ds.filter(lambda s: int(np.asarray(s["keypoints_visible"]).sum()) >= cfg.min_visible_kp)
+
     if cfg.coco_prob:
         coco = make_coco_dataset(cfg)
         ds = mix_with_bg(ds, coco, cfg)
     ds = ds.batch(cfg.bs, drop_remainder=True)
+    ds = _maybe_apply_grain_imaug(ds, cfg)
 
     if cfg.mp > 0:
         lim = _apply_fd_limit(512**2)
@@ -241,6 +347,7 @@ def make_dataset(cfg: Config):
 
 def make_irl_dataset(cfg: Config):
     ds = grain.MapDataset.source(cfg.irl_mix.source).seed(cfg.seed).repeat()
+    ds = ds.map(_drop_low_cam)
     ds = ds.map(partial(prepare_irl_sample_np, cfg))
     ds = ds.batch(cfg.bs, drop_remainder=True)
     ds = ds.map(make_shard_fn())
@@ -417,31 +524,60 @@ def prepare_sample_np(cfg: Config, sample: dict) -> dict:
         "keypoints_visible": np.asarray(sample["info"]["kp_visible"], dtype=bool),
         "K": _shrink_crop_intrinsics_np(K, raw_h, raw_w, net_h, net_w),
         "w2c": w2c,
+        "source": SOURCE_SYNTH,
     }
 
 
 def prepare_irl_sample_np(cfg: Config, sample: dict) -> dict:
+    """Prepare a real-data sample using PRE-RENDERED mask + kp2d baked into the
+    arec (xgym_sweep_single >= v0.6.0). No FK or rasterization at training time.
+    """
     raw_h, raw_w = cfg.raw_size
     net_h, net_w = cfg.net_in_size
-    image_key = np.random.choice(cfg.irl_image_keys)
-    image = np.asarray(sample["image"][image_key])
-    if tuple(image.shape[:2]) != (raw_h, raw_w):
-        raise ValueError(f"expected raw_size={(raw_h, raw_w)} but got {tuple(image.shape[:2])}")
-    image = _shrink_crop_image_np(image, net_h, net_w, Image.BILINEAR)
-    joints = np.asarray(sample["proprio"]["joints"][0], dtype=np.float32)
-    gripper = np.asarray(sample["proprio"]["gripper"][0], dtype=np.float32).reshape(1)
-    kp2d_norm = np.full((10, 2), 0.5, dtype=np.float32)
-    K = _default_intrinsics_np(raw_h, raw_w)
+    image_key = str(np.random.choice(cfg.irl_image_keys))
+    if image_key in _DROPPED_CAMS:
+        raise ValueError(f"irl_image_keys={cfg.irl_image_keys} contains a dropped cam ({image_key}); see _DROPPED_CAMS")
+
+    image_raw = np.asarray(sample["image"][image_key])
+    if image_raw.ndim == 4:
+        image_raw = image_raw[0]
+    if tuple(image_raw.shape[:2]) != (raw_h, raw_w):
+        raise ValueError(f"expected raw_size={(raw_h, raw_w)} but got {tuple(image_raw.shape[:2])}")
+
+    mask_raw = np.asarray(sample["mask"][image_key])
+    if mask_raw.ndim == 3:
+        mask_raw = mask_raw[0]
+
+    kp2d_raw = np.asarray(sample["kp2d"][image_key], dtype=np.float32)  # (10, 3) u,v,vis
+    if kp2d_raw.ndim == 3:
+        kp2d_raw = kp2d_raw[0]
+    visible = kp2d_raw[:, 2] > 0.5
+
+    joints_arr = np.asarray(sample["proprio"]["joints"], dtype=np.float32).reshape(-1, 7)
+    joints = joints_arr[0]
+    gripper_arr = np.asarray(sample["proprio"]["gripper"], dtype=np.float32).reshape(-1)
+    gripper = gripper_arr[:1]
+
+    K_raw = K_for_size(raw_h, raw_w)
+    w2c = load_w2c(image_key)
+
+    image = _shrink_crop_image_np(image_raw, net_h, net_w, Image.BILINEAR)
+    mask = _shrink_crop_image_np(mask_raw, net_h, net_w, Image.NEAREST)
+    kp2d_netin = _shrink_crop_keypoints_np(kp2d_raw[:, :2], raw_h, raw_w, net_h, net_w)
+    kp2d_norm = _normalize_kp2d_np(kp2d_netin, net_h, net_w)
+    K = _shrink_crop_intrinsics_np(K_raw, raw_h, raw_w, net_h, net_w)
+
     return {
         "image": image,
-        "mask": np.ones((net_h, net_w), dtype=np.uint8),
+        "mask": mask,
         "q": np.concatenate([joints, gripper], axis=-1),
         "keypoints_2d_norm": kp2d_norm,
-        "keypoints_2d_netin": _denormalize_kp2d_np(kp2d_norm, net_h, net_w),
-        "keypoints_2d_raw": _denormalize_kp2d_np(kp2d_norm, raw_h, raw_w),
-        "keypoints_visible": np.zeros((10,), dtype=bool),
-        "K": _shrink_crop_intrinsics_np(K, raw_h, raw_w, net_h, net_w),
-        "w2c": np.eye(4, dtype=np.float32),
+        "keypoints_2d_netin": kp2d_netin,
+        "keypoints_2d_raw": kp2d_raw[:, :2],
+        "keypoints_visible": visible,
+        "K": K,
+        "w2c": w2c.astype(np.float32),
+        "source": SOURCE_REAL,
     }
 
 

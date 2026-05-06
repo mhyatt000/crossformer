@@ -62,12 +62,12 @@ class RobotVgaLoader:
         jsons = sorted(self.path.glob("view_*.json"), key=lambda p: _frame_index(p.stem))
         if not jsons:
             raise ValueError(f"no view_*.json under {self.path}")
-        self._items: list[tuple[int, Path, Path]] = []
+        self._items: list[tuple[int, Path, Path, Path]] = []
         for jp in jsons:
             ip = jp.with_suffix(".png")
             if not ip.exists():
                 continue
-            self._items.append((_frame_index(jp.stem), jp, ip))
+            self._items.append((_frame_index(jp.stem), jp, ip, mp))
 
     def __len__(self) -> int:
         return len(self._items)
@@ -76,14 +76,17 @@ class RobotVgaLoader:
         frame_idx, jp, ip = self._items[idx]
         meta = json.loads(jp.read_text())
         img = np.asarray(Image.open(ip).convert("RGB"))
-        return standardize(meta, img, frame_idx=frame_idx, global_idx=idx)
+        mask = np.asarray(Image.open(mp).convert("L"))
+        return standardize(meta, img, mask, frame_idx=frame_idx, global_idx=idx)
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
         for i in range(len(self)):
             yield self[i]
 
 
-def standardize(meta: dict[str, Any], img: np.ndarray, *, frame_idx: int, global_idx: int) -> dict[str, Any]:
+def standardize(
+    meta: dict[str, Any], img: np.ndarray, mask: np.ndarray, *, frame_idx: int, global_idx: int
+) -> dict[str, Any]:
     joints = np.asarray([meta["joints"][k] for k in _JOINT_KEYS], dtype=np.float32)
     gripper = np.float32(meta["joints"]["gripper_angle"])
 
@@ -99,6 +102,7 @@ def standardize(meta: dict[str, Any], img: np.ndarray, *, frame_idx: int, global
 
     return {
         "image": img,
+        "mask": mask,
         "state": {
             "joints": joints,
             "gripper": gripper,
