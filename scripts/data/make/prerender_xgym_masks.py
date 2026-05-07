@@ -11,18 +11,25 @@ By pre-computing these once, ``prepare_irl_sample_np`` becomes synth-fast.
 Usage:
     # preview a few records to a tmp arec
     uv run scripts/data/make/prerender_xgym_masks.py \\
-        --name xgym_sweep_single --src-version 0.5.6 --dst-version 0.6.0 \\
-        --cams low side --n-preview 16
+        --name xgym_sweep_single --src-version 0.5.6 --dst-version 0.6.1 \\
+        --n-preview 16
 
     # full build (this is the slow step — uses --workers parallelism)
     uv run scripts/data/make/prerender_xgym_masks.py \\
-        --name xgym_sweep_single --src-version 0.5.6 --dst-version 0.6.0 \\
-        --cams low side --workers 16
+        --name xgym_sweep_single --src-version 0.5.6 --dst-version 0.6.1 \\
+        --workers 16
+
+    # full build with per-step alignment offsets
+    uv run scripts/data/make/prerender_xgym_masks.py \\
+        --name xgym_sweep_single --src-version 0.5.6 --dst-version 0.6.1 \\
+        --cams side --workers 16 --offsets-json /tmp/xgym_mask_offsets.json
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import json
 import multiprocessing as mp
 import os
 from pathlib import Path
@@ -50,7 +57,18 @@ def _worker_init(extr_dir: str, cams: tuple[str, ...], raw_h: int, raw_w: int) -
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
 
     # Imports happen inside worker so the parent process doesn't pay them.
-    from crossformer.utils.callbacks.synth_viz import _get_robot_mesh, fk_keypoints
+    #
+    # NOTE: avoid importing via package path (crossformer.utils.callbacks.*)
+    # because callbacks/__init__.py imports training configs that may probe
+    # latest dataset versions while dst-version is only partially written.
+    synth_viz_path = Path(__file__).parents[3] / "crossformer" / "utils" / "callbacks" / "synth_viz.py"
+    spec = importlib.util.spec_from_file_location("cf_synth_viz_worker", synth_viz_path)
+    assert spec is not None and spec.loader is not None, f"failed to load {synth_viz_path}"
+    synth_viz = importlib.util.module_from_spec(spec)
+    sys.modules["cf_synth_viz_worker"] = synth_viz
+    spec.loader.exec_module(synth_viz)
+    _get_robot_mesh = synth_viz._get_robot_mesh
+    fk_keypoints = synth_viz.fk_keypoints
     from crossformer.utils.rig import K_for_size, load_w2c
 
     robot = _get_robot_mesh()  # warms pyroki singleton
@@ -125,13 +143,13 @@ def _render_one(joints: np.ndarray, gripper_drive: float, w2c: np.ndarray) -> tu
     return mask, kp2d
 
 
-def _process_record(args: tuple[int, np.ndarray, float]) -> tuple[int, dict]:
+def _process_record(args: tuple[int, int, np.ndarray, float, dict]) -> tuple[int, int, dict, dict]:
     """Render masks + kp2d for all configured cameras.
 
-    Input: (idx, joints (7,), gripper_drive float)
-    Output: (idx, {"mask": {cam: (H,W) uint8}, "kp2d": {cam: (10,3) float32}})
+    Input: (out_idx, render_idx, joints (7,), gripper_drive float, align_meta)
+    Output: (out_idx, render_idx, align_meta, {"mask": ..., "kp2d": ...})
     """
-    idx, joints, gripper_drive = args
+    out_idx, render_idx, joints, gripper_drive, align_meta = args
     ctx = _WORKER_CTX
     assert ctx is not None
     masks: dict[str, np.ndarray] = {}
@@ -140,7 +158,7 @@ def _process_record(args: tuple[int, np.ndarray, float]) -> tuple[int, dict]:
         mask, kp2d = _render_one(joints, gripper_drive, ctx["w2c"][cam])
         masks[cam] = mask
         kps[cam] = kp2d
-    return idx, {"mask": masks, "kp2d": kps}
+    return out_idx, render_idx, align_meta, {"mask": masks, "kp2d": kps}
 
 
 # ---------------------------------------------------------------------------
@@ -158,8 +176,6 @@ def _open_src(name: str, version: str, branch: str, root: Path):
     meta_path = builder.root / "meta.json"
     if not meta_path.exists():
         raise FileNotFoundError(f"missing meta: {meta_path}")
-    import json
-
     meta = json.loads(meta_path.read_text())
     builder.writers = builder._normalize_writers(meta["writers"])
     builder.default_writer = "data" if "data" in builder.writers else next(iter(builder.writers))
@@ -167,26 +183,61 @@ def _open_src(name: str, version: str, branch: str, root: Path):
     return builder, meta
 
 
+def _as_int(x) -> int | None:
+    try:
+        return int(np.asarray(x).reshape(-1)[0])
+    except Exception:
+        return None
+
+
+def _episode_id(rec: dict) -> int | None:
+    info = rec.get("info", {})
+    info_id = info.get("id") if isinstance(info, dict) else None
+    if isinstance(info_id, dict) and "episode" in info_id:
+        return _as_int(info_id["episode"])
+    if info_id is not None:
+        return _as_int(info_id)
+    return None
+
+
+def _load_offsets(path: Path | None) -> dict[int, dict]:
+    if path is None:
+        return {}
+    payload = json.loads(path.expanduser().read_text())
+    table = payload.get("by_global_index")
+    if not isinstance(table, dict):
+        raise ValueError(f"offset file missing by_global_index map: {path}")
+    out: dict[int, dict] = {}
+    for k, v in table.items():
+        try:
+            out[int(k)] = dict(v)
+        except Exception:
+            continue
+    return out
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--name", default="xgym_sweep_single")
     p.add_argument("--src-version", default="0.5.6")
-    p.add_argument("--dst-version", default="0.6.0")
+    p.add_argument("--dst-version", default="0.6.1")
     p.add_argument("--branch", default="main")
     p.add_argument("--root", type=Path, default=Path.home() / ".cache/arrayrecords")
-    p.add_argument("--cams", nargs="+", default=["low", "side"])
+    p.add_argument("--cams", nargs="+", default=["side"])
     p.add_argument("--extr-dir", type=Path, default=Path.home() / "data/extr/cam")
     p.add_argument("--raw-h", type=int, default=480)
     p.add_argument("--raw-w", type=int, default=640)
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--n-preview", type=int, default=0, help="if > 0, only process this many records to a tmp branch")
     p.add_argument("--shard-size", type=int, default=1000)
+    p.add_argument("--offsets-json", type=Path, default=None, help="JSON from estimate_xgym_mask_offsets.py")
+    p.add_argument("--default-offset", type=int, default=0, help="fallback when no per-index offset exists")
     args = p.parse_args()
 
     root = args.root.expanduser()
     cams = tuple(args.cams)
     print(f"reading {args.name} v{args.src_version} from {root}", flush=True)
-    src_builder, src_meta = _open_src(args.name, args.src_version, args.branch, root)
+    src_builder, _src_meta = _open_src(args.name, args.src_version, args.branch, root)
 
     if not {"image", "proprio"}.issubset(src_builder.writers):
         raise ValueError(f"expected image+proprio writers, got {list(src_builder.writers)}")
@@ -196,6 +247,12 @@ def main() -> None:
     n = len(img_src)
     assert n == len(pro_src), f"image/proprio length mismatch: {len(img_src)} vs {len(pro_src)}"
     print(f"  records: {n}", flush=True)
+
+    offsets = _load_offsets(args.offsets_json)
+    if offsets:
+        print(f"  loaded offsets for {len(offsets)} steps from {args.offsets_json}", flush=True)
+    else:
+        print(f"  no offsets loaded; using default offset={args.default_offset}", flush=True)
 
     if args.n_preview > 0:
         n = min(n, args.n_preview)
@@ -233,33 +290,57 @@ def main() -> None:
 
             def task_iter():
                 for i in range(n):
-                    pro = unpack_record(pro_src[i])
-                    joints = np.asarray(pro["proprio"]["joints"], dtype=np.float32).reshape(7)
-                    gripper = float(np.asarray(pro["proprio"]["gripper"]).reshape(-1)[0])
+                    pro_i = unpack_record(pro_src[i])
+                    ep_i = _episode_id(pro_i)
+                    row = offsets.get(i)
+                    req_offset = int(row.get("offset", args.default_offset)) if row else int(args.default_offset)
+                    render_idx = max(0, min(n - 1, i + req_offset))
+                    pro_j = unpack_record(pro_src[render_idx])
+                    if ep_i is not None and _episode_id(pro_j) != ep_i:
+                        render_idx = i
+                        pro_j = pro_i
+
+                    joints = np.asarray(pro_j["proprio"]["joints"], dtype=np.float32).reshape(7)
+                    gripper = float(np.asarray(pro_j["proprio"]["gripper"]).reshape(-1)[0])
                     # Real convention: gripper=0 → closed, gripper=1 → open.
                     # URDF drive_joint: 0 → open, 0.85 → closed. Invert + scale.
                     gripper_drive = (1.0 - gripper) * 0.85
-                    yield (i, joints, gripper_drive)
+                    align_meta = {
+                        "offset": int(render_idx - i),
+                        "requested_offset": int(req_offset),
+                        "score": float(row.get("score")) if row and row.get("score") is not None else float("nan"),
+                        "confidence": float(row.get("confidence")) if row else 1.0,
+                    }
+                    yield (i, render_idx, joints, gripper_drive, align_meta)
 
             t0 = time.perf_counter()
-            n_done = 0
-            for idx, render_out in tqdm(
-                pool.imap(_process_record, task_iter(), chunksize=4),
-                total=n,
-                desc="rendering",
+            for n_done, (idx, render_idx, align_meta, render_out) in enumerate(
+                tqdm(
+                    pool.imap(_process_record, task_iter(), chunksize=4),
+                    total=n,
+                    desc="rendering",
+                ),
+                start=1,
             ):
                 # re-read at consumption time so we have image+proprio for this idx
                 img_rec = unpack_record(img_src[idx])
                 pro_rec = unpack_record(pro_src[idx])
+                info = dict(pro_rec.get("info", {}))
+                info["align"] = {
+                    "offset": np.asarray(align_meta["offset"], dtype=np.int16),
+                    "requested_offset": np.asarray(align_meta["requested_offset"], dtype=np.int16),
+                    "render_index": np.asarray(render_idx, dtype=np.int32),
+                    "score": np.asarray(align_meta["score"], dtype=np.float32),
+                    "confidence": np.asarray(align_meta["confidence"], dtype=np.float32),
+                }
                 sample = {
                     "image": img_rec["image"],  # dict[cam, img]
                     "mask": render_out["mask"],  # dict[cam, mask]
                     "proprio": pro_rec["proprio"],
-                    "info": pro_rec.get("info", {}),
+                    "info": info,
                     "kp2d": render_out["kp2d"],  # dict[cam, (10,3)]
                 }
                 yield sample
-                n_done += 1
                 if n_done % 500 == 0:
                     elapsed = time.perf_counter() - t0
                     rate = n_done / elapsed

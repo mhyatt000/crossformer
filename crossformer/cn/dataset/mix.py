@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 # from crossformer.data.oxe.oxe_standardization_transforms import  OXE_STANDARDIZATION_TRANSFORMS
+import json
 import logging
 from pathlib import Path
 from typing import ClassVar, Sequence
@@ -121,10 +122,45 @@ class Arec(DataSource):
         log.info(f"No version specified for dataset {self.name}.")
         log.info(f"Inferring latest version for dataset {self.name}")
         path = self._cache / self.name  # no root yet
-        versions = [v.name for v in path.iterdir() if v.is_dir()]
-        if not versions:
+        if not path.exists():
             raise FileNotFoundError(f"No versions found for dataset {self.name} in {path}")
-        return sorted(versions)[-1]
+
+        valid_versions: list[str] = []
+        incomplete_versions: list[str] = []
+        for v in path.iterdir():
+            if not v.is_dir():
+                continue
+            branch_root = v / self.branch
+            meta_path = branch_root / "meta.json"
+            if not meta_path.exists():
+                incomplete_versions.append(v.name)
+                continue
+            try:
+                meta = json.loads(meta_path.read_text())
+                writers = meta.get("writers", {})
+                writer_names = list(writers) if isinstance(writers, dict) else ["data"]
+                if not writer_names:
+                    writer_names = ["data"]
+                has_all_writers = all(sorted((branch_root / w).glob("data-*.arrayrecord")) for w in writer_names)
+                if has_all_writers:
+                    valid_versions.append(v.name)
+                else:
+                    incomplete_versions.append(v.name)
+            except Exception:
+                incomplete_versions.append(v.name)
+
+        if not valid_versions:
+            msg = f"No valid versions found for dataset {self.name} in {path}"
+            if incomplete_versions:
+                msg += f" (incomplete: {sorted(set(incomplete_versions))})"
+            raise FileNotFoundError(msg)
+        if incomplete_versions:
+            log.info(
+                "Ignoring incomplete versions for %s: %s",
+                self.name,
+                sorted(set(incomplete_versions)),
+            )
+        return sorted(valid_versions)[-1]
 
     def get_version(self):
         # TODO infer version at post init
@@ -177,7 +213,8 @@ _ = (TFDS(name="xgym_duck_single", head=Head.SINGLE, embodiment=SINGLE),)
 XGYM = [
     Arec(name="xgym_lift_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.7", branch="main"),
     Arec(name="xgym_stack_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.5", branch="main"),
-    Arec(name="xgym_sweep_single", head=Head.SINGLE, embodiment=SINGLE, version="0.6.0", branch="main"),
+    # Keep this on latest available local version (e.g. aligned v0.6.1 once built).
+    Arec(name="xgym_sweep_single", head=Head.SINGLE, embodiment=SINGLE, version=None, branch="main"),
     Arec(name="sweep_mano", head=Head.MANO, embodiment=HUMAN_SINGLE, version="0.0.2", branch="to_step"),
 ]
 XGYM_WEIGHTS = [len(x.source) for x in XGYM]  # size weighted rn, not uniform

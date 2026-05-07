@@ -553,23 +553,24 @@ def get_frame_transform(
             chain_ops.append(augmax.Resize(width=w, height=h))
         else:
             chain_ops.append(augmax.Resize(re))
-    if imaug:
-        chain_ops.append(augmax.ChannelShuffle(p=0.5))
-        (RandomAspect(x_range=(0.9, 1.1), y_range=(0.9, 1.1), p=0.5),)
-        (augmax.RandomGrayscale(p=0.5),)
-        (augmax.ByteToFloat(),)
-        (augmax.ChannelDrop(),)
-        (augmax.Warp(strength=5, coarseness=32),)
-        (augmax.Normalize(),)
-        (augmax.Blur(),)
-        (augmax.RandomBrightness((-1.0, 1.0), p=0.5),)
-        (augmax.RandomContrast(),)
-        (augmax.RandomGamma(),)
-        (augmax.RandomChannelGamma(),)
-        (augmax.ColorJitter(),)
-        (augmax.Solarization(),)
-    if rotate:
-        chain_ops.append(augmax.Rotate((-15, 15), p=0.3))
+    # if imaug:
+    #     chain_ops.extend([
+    #         augmax.ChannelShuffle(p=0.5),
+    #         RandomAspect(x_range=(0.9, 1.1), y_range=(0.9, 1.1), p=0.5),
+    #         augmax.RandomGrayscale(p=0.5),
+    #         augmax.ChannelDrop(),
+    #         augmax.Warp(strength=5, coarseness=32),
+    #         augmax.Normalize(),
+    #         augmax.Blur(),
+    #         augmax.RandomBrightness((-1.0, 1.0), p=0.5),
+    #         augmax.RandomContrast(),
+    #         augmax.RandomGamma(),
+    #         augmax.RandomChannelGamma(),
+    #         augmax.ColorJitter(),
+    #         augmax.Solarization(),
+    #     ])
+    # if rotate:
+    #     chain_ops.append(augmax.Rotate((-15, 15), p=0.3))
     chain = augmax.Chain(*chain_ops)
 
     v = jax.vmap

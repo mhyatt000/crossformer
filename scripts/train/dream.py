@@ -8,6 +8,7 @@ from functools import partial
 import os
 from pathlib import Path
 
+import augmax
 from flax import struct
 from flax.core import freeze, unfreeze
 from flax.training.train_state import TrainState
@@ -115,6 +116,11 @@ class Config:
     initial_beta: float = 1.0
     sigma_pct: float = 1.0  # Gaussian std dev as percent of belief-map size.
     mask_weight: float = 0.1
+    real_loss_weight: float = 1.0
+    real_loss_warmup_steps: int = 0
+    use_real_confidence_weight: bool = False
+    real_confidence_floor: float = 0.2
+    real_confidence_power: float = 1.0
     optim: Optim = default(Optim())
     viz: DreamVizConfig = default(DreamVizConfig())
     wandb: cn.Wandb = default(cn.Wandb(project="bela-dream"))
@@ -244,7 +250,57 @@ def _rotate_keypoints_np(kp2d: np.ndarray, angle_deg: float, h: int, w: int) -> 
     cy = np.float32(h) * 0.5
     x = kp2d[..., 0] - cx
     y = kp2d[..., 1] - cy
-    return np.stack([c * x - s * y + cx, s * x + c * y + cy], axis=-1).astype(np.float32)
+    # PIL rotates CCW in screen/y-down coords: x' = c*x + s*y, y' = -s*x + c*y
+    return np.stack([c * x + s * y + cx, -s * x + c * y + cy], axis=-1).astype(np.float32)
+
+
+_augmax_color_chain = augmax.Chain(
+    augmax.ChannelShuffle(p=0.5),
+    augmax.RandomGrayscale(p=0.5),
+    augmax.ChannelDrop(),
+    augmax.Blur(),
+    augmax.RandomBrightness((-1.0, 1.0), p=0.5),
+    augmax.RandomContrast(),
+    augmax.RandomGamma(),
+    augmax.RandomChannelGamma(),
+    augmax.ColorJitter(),
+    augmax.Solarization(),
+)
+
+
+def _apply_augmax_color(image: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """Apply augmax color transforms to a single HWC uint8 image, returns uint8."""
+    key = jax.random.key(rng.integers(2**32 - 1, dtype=np.uint32))
+    img_f = jnp.asarray(image, dtype=jnp.float32) / 255.0
+    img_f = _augmax_color_chain(key, img_f)
+    return np.clip(np.asarray(img_f) * 255.0, 0, 255).astype(np.uint8)
+
+
+def _translate_image_np(
+    image: np.ndarray, tx: float, ty: float, resample: int = Image.BILINEAR, fill: int = 0
+) -> np.ndarray:
+    pil = Image.fromarray(image)
+    pil = pil.transform(pil.size, Image.AFFINE, (1, 0, -tx, 0, 1, -ty), resample=resample, fillcolor=fill)
+    return np.asarray(pil)
+
+
+def _zoom_image_np(image: np.ndarray, scale: float, resample: int = Image.BILINEAR, fill: int = 0) -> np.ndarray:
+    h, w = image.shape[:2]
+    cx, cy = w * 0.5, h * 0.5
+    inv_s = 1.0 / scale
+    pil = Image.fromarray(image)
+    pil = pil.transform(
+        pil.size,
+        Image.AFFINE,
+        (inv_s, 0, cx * (1 - inv_s), 0, inv_s, cy * (1 - inv_s)),
+        resample=resample,
+        fillcolor=fill,
+    )
+    return np.asarray(pil)
+
+
+def _kp_in_bounds(kp2d: np.ndarray, h: int, w: int) -> np.ndarray:
+    return (kp2d[:, 0] >= 0.0) & (kp2d[:, 0] < np.float32(w)) & (kp2d[:, 1] >= 0.0) & (kp2d[:, 1] < np.float32(h))
 
 
 def _maybe_apply_grain_imaug(ds, cfg: Config):
@@ -259,23 +315,44 @@ def _maybe_apply_grain_imaug(ds, cfg: Config):
         h, w = image.shape[1:3]
 
         for i in range(image.shape[0]):
-            if cfg.imaug and rng.random() < 0.5:
-                image[i] = image[i][..., rng.permutation(image.shape[-1])]
+            if cfg.imaug:
+                image[i] = _apply_augmax_color(image[i], rng)
+            if cfg.rotate:
+                if rng.random() < 0.3:
+                    angle = float(rng.uniform(-15.0, 15.0))
+                    image[i] = _rotate_image_np(image[i], angle, Image.BILINEAR, fill=0)
+                    mask[i] = _rotate_image_np(mask[i].astype(np.uint8), angle, Image.NEAREST, fill=0).astype(
+                        mask.dtype
+                    )
+                    kp_i = _rotate_keypoints_np(kp[i], angle, h=h, w=w)
+                    vis[i] = vis[i] & _kp_in_bounds(kp_i, h, w)
+                    kp[i] = kp_i
 
-            if cfg.rotate and rng.random() < 0.3:
-                angle = float(rng.uniform(-15.0, 15.0))
-                image[i] = _rotate_image_np(image[i], angle, Image.BILINEAR, fill=0)
-                mask_rot = _rotate_image_np(mask[i].astype(np.uint8), angle, Image.NEAREST, fill=0)
-                mask[i] = mask_rot.astype(mask.dtype)
-                kp_i = _rotate_keypoints_np(kp[i], angle, h=h, w=w)
-                in_bounds = (
-                    (kp_i[:, 0] >= 0.0)
-                    & (kp_i[:, 0] < np.float32(w))
-                    & (kp_i[:, 1] >= 0.0)
-                    & (kp_i[:, 1] < np.float32(h))
-                )
-                kp[i] = kp_i
-                vis[i] = vis[i] & in_bounds
+                if rng.random() < 0.5:
+                    tx = float(rng.uniform(-0.1 * w, 0.1 * w))
+                    ty = float(rng.uniform(-0.1 * h, 0.1 * h))
+                    image[i] = _translate_image_np(image[i], tx, ty, resample=Image.BILINEAR, fill=0)
+                    mask[i] = _translate_image_np(
+                        mask[i].astype(np.uint8), tx, ty, resample=Image.NEAREST, fill=0
+                    ).astype(mask.dtype)
+                    kp_i = kp[i].copy()
+                    kp_i[:, 0] += tx
+                    kp_i[:, 1] += ty
+                    vis[i] = vis[i] & _kp_in_bounds(kp_i, h, w)
+                    kp[i] = kp_i
+
+                if rng.random() < 0.5:
+                    scale = float(rng.uniform(0.85, 1.15))
+                    image[i] = _zoom_image_np(image[i], scale, resample=Image.BILINEAR, fill=0)
+                    mask[i] = _zoom_image_np(mask[i].astype(np.uint8), scale, resample=Image.NEAREST, fill=0).astype(
+                        mask.dtype
+                    )
+                    cx, cy = np.float32(w) * 0.5, np.float32(h) * 0.5
+                    kp_i = kp[i].copy()
+                    kp_i[:, 0] = (kp_i[:, 0] - cx) * scale + cx
+                    kp_i[:, 1] = (kp_i[:, 1] - cy) * scale + cy
+                    vis[i] = vis[i] & _kp_in_bounds(kp_i, h, w)
+                    kp[i] = kp_i
 
         return {
             **batch,
@@ -524,8 +601,19 @@ def prepare_sample_np(cfg: Config, sample: dict) -> dict:
         "keypoints_visible": np.asarray(sample["info"]["kp_visible"], dtype=bool),
         "K": _shrink_crop_intrinsics_np(K, raw_h, raw_w, net_h, net_w),
         "w2c": w2c,
+        "align_confidence": np.float32(1.0),
+        "align_offset": np.int16(0),
         "source": SOURCE_SYNTH,
     }
+
+
+def _first_scalar(x, default: float = 0.0) -> float:
+    if x is None:
+        return float(default)
+    a = np.asarray(x)
+    if a.size == 0:
+        return float(default)
+    return float(a.reshape(-1)[0])
 
 
 def prepare_irl_sample_np(cfg: Config, sample: dict) -> dict:
@@ -566,6 +654,9 @@ def prepare_irl_sample_np(cfg: Config, sample: dict) -> dict:
     kp2d_netin = _shrink_crop_keypoints_np(kp2d_raw[:, :2], raw_h, raw_w, net_h, net_w)
     kp2d_norm = _normalize_kp2d_np(kp2d_netin, net_h, net_w)
     K = _shrink_crop_intrinsics_np(K_raw, raw_h, raw_w, net_h, net_w)
+    align = sample.get("info", {}).get("align", {})
+    align_conf = np.float32(np.clip(_first_scalar(align.get("confidence"), 1.0), 0.0, 1.0))
+    align_offset = np.int16(round(_first_scalar(align.get("offset"), 0.0)))
 
     return {
         "image": image,
@@ -577,6 +668,8 @@ def prepare_irl_sample_np(cfg: Config, sample: dict) -> dict:
         "keypoints_visible": visible,
         "K": K,
         "w2c": w2c.astype(np.float32),
+        "align_confidence": align_conf,
+        "align_offset": align_offset,
         "source": SOURCE_REAL,
     }
 
@@ -658,7 +751,7 @@ def keypoint_metrics(batch: dict, pred_heatmaps: jax.Array):
     }
 
 
-def focal_heatmap_loss(pred, target, alpha=2.0, beta=4.0, eps=1e-6):
+def focal_heatmap_loss_per_sample(pred, target, alpha=2.0, beta=4.0, eps=1e-6):
     """CenterNet-style focal loss for Gaussian keypoint belief maps.
 
     See Objects as Points: https://arxiv.org/abs/1904.07850.
@@ -669,29 +762,56 @@ def focal_heatmap_loss(pred, target, alpha=2.0, beta=4.0, eps=1e-6):
     pred = jnp.clip(pred, eps, 1.0 - eps)
 
     peak = target.max(axis=(-2, -1), keepdims=True)
-    pos = (target >= peak) & (peak > 0)
-    neg = ~pos
+    has_target = peak > 0  # keypoints with all-zero target (invisible/edge) contribute nothing
+    pos = (target >= peak) & has_target
+    neg = ~pos & has_target  # exclude no-target keypoint channels from neg loss too
 
     pos_loss = -((1.0 - pred) ** alpha) * jnp.log(pred) * pos
     neg_loss = -((1.0 - target) ** beta) * (pred**alpha) * jnp.log(1.0 - pred) * neg
 
-    n_pos = jnp.maximum(pos.sum(), 1.0)
-    return (pos_loss.sum() + neg_loss.sum()) / n_pos
+    axes = tuple(range(1, pred.ndim))
+    n_pos = jnp.maximum(pos.sum(axis=axes), 1.0)
+    return (pos_loss.sum(axis=axes) + neg_loss.sum(axis=axes)) / n_pos
+
+
+def focal_heatmap_loss(pred, target, alpha=2.0, beta=4.0, eps=1e-6):
+    return focal_heatmap_loss_per_sample(pred, target, alpha=alpha, beta=beta, eps=eps).mean()
+
+
+def mask_loss_per_sample(
+    pred: jax.Array, target: jax.Array, eps: float = 1e-6
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    target = target.astype(pred.dtype)
+    axes = tuple(range(1, pred.ndim))
+    bce = -(target * jnp.log(pred + eps) + (1.0 - target) * jnp.log1p(-pred + eps)).mean(axis=axes)
+    inter = (pred * target).sum(axis=(-2, -1))
+    denom = pred.sum(axis=(-2, -1)) + target.sum(axis=(-2, -1))
+    dice = 1.0 - ((2.0 * inter + eps) / (denom + eps)).mean(axis=-1)
+    return bce + dice, bce, dice
 
 
 def mask_loss(pred: jax.Array, target: jax.Array, eps: float = 1e-6) -> tuple[jax.Array, dict[str, jax.Array]]:
-    target = target.astype(pred.dtype)
-    bce = -(target * jnp.log(pred + eps) + (1.0 - target) * jnp.log1p(-pred + eps)).mean()
-    inter = (pred * target).sum(axis=(-2, -1))
-    denom = pred.sum(axis=(-2, -1)) + target.sum(axis=(-2, -1))
-    dice = 1.0 - ((2.0 * inter + eps) / (denom + eps)).mean()
-    return bce + dice, {"mask_bce": bce, "mask_dice": dice}
+    term, bce, dice = mask_loss_per_sample(pred, target, eps=eps)
+    return term.mean(), {"mask_bce": bce.mean(), "mask_dice": dice.mean()}
 
 
-def dream_loss_fn(batch: dict, out_dict: dict, sigma_pct: float = 1.0, mask_weight: float = 0.1):
+def dream_loss_fn(
+    batch: dict,
+    out_dict: dict,
+    sigma_pct: float = 1.0,
+    mask_weight: float = 0.1,
+    real_loss_weight: float = 1.0,
+    real_loss_warmup_steps: int = 0,
+    use_real_confidence_weight: bool = False,
+    real_confidence_floor: float = 0.2,
+    real_confidence_power: float = 1.0,
+    step=None,
+):
+    wmean = lambda x, w: (x * w).sum() / jnp.maximum(w.sum(), 1e-6)
     pred = out_dict["pred_heatmaps"]
     preds = pred if isinstance(pred, tuple) else (pred,)
     final_pred = preds[-1]
+    batch_size = final_pred.shape[0]
     _, _, out_h, out_w = final_pred.shape
     uv = _denormalize_kp2d(batch["keypoints_2d_norm"], out_h, out_w)
     vis = batch["keypoints_visible"]
@@ -702,28 +822,56 @@ def dream_loss_fn(batch: dict, out_dict: dict, sigma_pct: float = 1.0, mask_weig
         image_w=out_w,
         sigma=belief_sigma(sigma_pct, out_h, out_w),
     )
-    stage_losses = tuple(focal_heatmap_loss(stage_pred, target) for stage_pred in preds)
-    stage_mses = tuple(jnp.mean((stage_pred - target) ** 2) for stage_pred in preds)
+    src = batch.get("source", jnp.full((batch_size,), SOURCE_SYNTH, dtype=jnp.int32))
+    src = jnp.asarray(src).reshape(batch_size)
+    is_real = src == SOURCE_REAL
+    sample_w = jnp.ones((batch_size,), dtype=jnp.float32)
+
+    if real_loss_warmup_steps > 0 and step is not None:
+        warm = jnp.clip((jnp.asarray(step, dtype=jnp.float32) + 1.0) / float(real_loss_warmup_steps), 0.0, 1.0)
+    else:
+        warm = jnp.array(1.0, dtype=jnp.float32)
+    real_w = 1.0 + (jnp.asarray(real_loss_weight, dtype=jnp.float32) - 1.0) * warm
+    sample_w = jnp.where(is_real, sample_w * real_w, sample_w)
+
+    conf = jnp.asarray(batch.get("align_confidence", jnp.ones((batch_size,), dtype=jnp.float32))).reshape(batch_size)
+    conf = jnp.clip(conf, 0.0, 1.0)
+    if use_real_confidence_weight:
+        c = jnp.maximum(real_confidence_floor, conf) ** real_confidence_power
+        sample_w = jnp.where(is_real, sample_w * c, sample_w)
+
+    stage_losses_ps = tuple(focal_heatmap_loss_per_sample(stage_pred, target) for stage_pred in preds)
+    stage_mse_ps = tuple(((stage_pred - target) ** 2).mean(axis=(1, 2, 3)) for stage_pred in preds)
+    stage_losses = tuple(wmean(stage_loss, sample_w) for stage_loss in stage_losses_ps)
+    stage_mses = tuple(wmean(stage_mse, sample_w) for stage_mse in stage_mse_ps)
     heatmap_loss = jnp.mean(jnp.stack(stage_losses))
     loss = heatmap_loss
+    real_n = jnp.maximum(is_real.astype(jnp.float32).sum(), 1.0)
     metrics = {
         "loss": loss,
         "heatmap_loss": heatmap_loss,
         "mse": jnp.mean(jnp.stack(stage_mses)),
         "visible_kp": vis.sum(),
+        "real_loss_weight_effective": real_w,
+        "real_fraction": is_real.astype(jnp.float32).mean(),
+        "real_align_confidence_mean": (conf * is_real.astype(jnp.float32)).sum() / real_n,
         **{f"stage_{i + 1}_mse": stage_mse for i, stage_mse in enumerate(stage_mses)},
         **{f"stage_{i + 1}_focal": stage_loss for i, stage_loss in enumerate(stage_losses)},
         **keypoint_metrics(batch, final_pred),
     }
     if mask_weight > 0.0 and "pred_mask" in out_dict:
-        mask_term, mask_metrics = mask_loss(out_dict["pred_mask"], mask_target(batch["mask"], out_h, out_w))
+        mask_ps, mask_bce_ps, mask_dice_ps = mask_loss_per_sample(
+            out_dict["pred_mask"], mask_target(batch["mask"], out_h, out_w)
+        )
+        mask_term = wmean(mask_ps, sample_w)
         loss = heatmap_loss + mask_weight * mask_term
         metrics = {
             **metrics,
             "loss": loss,
             "mask_loss": mask_term,
             "mask_weighted_loss": mask_weight * mask_term,
-            **mask_metrics,
+            "mask_bce": wmean(mask_bce_ps, sample_w),
+            "mask_dice": wmean(mask_dice_ps, sample_w),
         }
     return loss, metrics
 
@@ -1145,7 +1293,7 @@ def make_train_step_dream(model, loss_fn, out_h: int, out_w: int, lr_fn, param_n
             pred_mask = prepare_pred_mask(model_out, out_h, out_w)
             if pred_mask is not None:
                 out_dict["pred_mask"] = pred_mask
-            return loss_fn(batch, out_dict)
+            return loss_fn(batch, out_dict, step=state.step)
 
         (loss, metrics), grads = jax.value_and_grad(_loss, has_aux=True)(state.params)
         updates, opt_state = state.tx.update(grads, state.opt_state, state.params)
@@ -1177,7 +1325,7 @@ def make_eval_step_dream(model, loss_fn, out_h: int, out_w: int):
         pred_mask = prepare_pred_mask(model_out, out_h, out_w)
         if pred_mask is not None:
             out_dict["pred_mask"] = pred_mask
-        loss, metrics = loss_fn(batch, out_dict)
+        loss, metrics = loss_fn(batch, out_dict, step=state.step)
         return {"loss": loss, **metrics}
 
     return eval_step
@@ -1250,8 +1398,17 @@ def main(cfg: Config):
         save_callback = SaveCallback(None)
         print("  [dim]no save_dir — checkpoints disabled[/]")
 
-    loss_fn = lambda batch, out_dict: dream_loss_fn(
-        batch, out_dict, sigma_pct=cfg.sigma_pct, mask_weight=cfg.mask_weight
+    loss_fn = lambda batch, out_dict, step=None: dream_loss_fn(
+        batch,
+        out_dict,
+        sigma_pct=cfg.sigma_pct,
+        mask_weight=cfg.mask_weight,
+        real_loss_weight=cfg.real_loss_weight,
+        real_loss_warmup_steps=cfg.real_loss_warmup_steps,
+        use_real_confidence_weight=cfg.use_real_confidence_weight,
+        real_confidence_floor=cfg.real_confidence_floor,
+        real_confidence_power=cfg.real_confidence_power,
+        step=step,
     )
     train_step = make_train_step_dream(
         model, loss_fn, out_h=out_h, out_w=out_w, lr_fn=lr_fn, param_norm_fn=param_norm_fn
@@ -1321,6 +1478,14 @@ def main(cfg: Config):
     if cfg.verbose:
         print(model.tabulate(init_rng, _image_to_float(batch["image"]), depth=2))
     cfg.wandb.finish()
+
+    # Explicitly tear down grain mp-worker iterators before JAX's atexit handlers
+    # run. Without this, the 16 worker processes are still alive when the main
+    # process frees its CUDA buffers, causing CUDA_ERROR_ILLEGAL_ADDRESS spam.
+    del dsit
+    if irl_dsit is not None:
+        del irl_dsit
+    jax.effects_barrier()
 
 
 if __name__ == "__main__":
