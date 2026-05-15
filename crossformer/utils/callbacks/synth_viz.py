@@ -177,16 +177,27 @@ def solve_pnp(pts_3d: np.ndarray, pts_2d_px: np.ndarray, K: np.ndarray) -> np.nd
         K: (3, 3) intrinsic matrix
     """
     # filter out invisible points (0,0)
-    mask = ~((pts_2d_px[:, 0] == 0) & (pts_2d_px[:, 1] == 0))
-    if mask.sum() < 4:
+    if pts_3d.shape[0] < 4:
         return None
     ok, rvec, tvec = cv2.solvePnP(
-        pts_3d[mask].astype(np.float64),
-        pts_2d_px[mask].astype(np.float64),
+        pts_3d.astype(np.float64),
+        pts_2d_px.astype(np.float64),
         K,
         None,
         flags=cv2.SOLVEPNP_SQPNP,
     )
+    if ok:
+        ok, rvec, tvec = cv2.solvePnP(
+            pts_3d.astype(np.float64),
+            pts_2d_px.astype(np.float64),
+            K,
+            None,
+            flags=cv2.SOLVEPNP_ITERATIVE,
+            useExtrinsicsGuess=True,
+            rvec=rvec,
+            tvec=tvec,
+        )
+
     if not ok:
         return None
     R, _ = cv2.Rodrigues(rvec)
