@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from bonsai.models.dinov3 import modeling
 from flax import linen as nn
 from flax import nnx
 import jax
@@ -27,8 +26,8 @@ from crossformer.model.components.base import TokenGroup
 
 MODEL_ID_DEFAULT = "facebook/dinov3-vits16-pretrain-lvd1689m"
 
-_IMAGENET_MEAN = jnp.array([0.485, 0.456, 0.406], dtype=jnp.float32)
-_IMAGENET_STD = jnp.array([0.229, 0.224, 0.225], dtype=jnp.float32)
+_IMAGENET_MEAN = (0.485, 0.456, 0.406)
+_IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
 def _preprocess(images: Array, target_size: tuple[int, int] | None = None) -> Array:
@@ -43,7 +42,9 @@ def _preprocess(images: Array, target_size: tuple[int, int] | None = None) -> Ar
     if target_size is not None and (x.shape[1], x.shape[2]) != target_size:
         h, w = target_size
         x = jax.image.resize(x, (x.shape[0], h, w, x.shape[-1]), method="bilinear", antialias=True)
-    x = (x - _IMAGENET_MEAN) / _IMAGENET_STD
+    mean = jnp.asarray(_IMAGENET_MEAN, dtype=jnp.float32)
+    std = jnp.asarray(_IMAGENET_STD, dtype=jnp.float32)
+    x = (x - mean) / std
     return jnp.transpose(x, (0, 3, 1, 2))
 
 
@@ -59,6 +60,8 @@ def load_dino(model_id: str = MODEL_ID_DEFAULT) -> tuple[Any, Any]:
     Prime before jit so the HF download doesn't happen inside a trace.
     """
     if model_id not in _DINO_CACHE:
+        from bonsai.models.dinov3 import modeling
+
         dino = modeling.Dinov3ViTModel.from_pretrained(model_id)
         graphdef, state = nnx.split(dino)
         state = jax.tree.map(jnp.asarray, state)
