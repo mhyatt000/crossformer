@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import augmax
 import jax
 import jax.numpy as jnp
