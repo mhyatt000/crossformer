@@ -21,7 +21,6 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 import numpy as np
 from rich import print
 from rich.rule import Rule
-from rich.table import Table
 from tqdm import tqdm
 import tyro
 
@@ -411,10 +410,6 @@ def main(cfg: Config):
 
     # Train
     print(Rule("training"))
-    table = Table(title="training")
-    table.add_column("step", justify="right", style="cyan")
-    table.add_column("loss", justify="right")
-    table.add_column("|grad|", justify="right", style="dim")
 
     losses = []
     timer = Timer()
@@ -465,9 +460,6 @@ def main(cfg: Config):
             if embody_metrics:
                 for k, v in sorted(embody_metrics.items()):
                     print(f"  {k}: {v:.4f}")
-            row = [str(step), f"{total_loss:.4f}"]
-            row.append(f"{float(update_info['grad_norm']):.4f}")
-            table.add_row(*row)
             cfg.wandb.log(
                 {
                     "training": update_info,
@@ -488,8 +480,6 @@ def main(cfg: Config):
     if save_dir is not None:
         save_callback(state, cfg.steps)
         save_callback.wait()
-
-    print(table)
 
     first = sum(losses[:10]) / min(10, len(losses))
     last = sum(losses[-10:]) / min(10, len(losses))
