@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import ast
+import json
 from pathlib import Path
 
 import jax
@@ -25,6 +27,76 @@ from crossformer.run.dream.train_steps import (
 from crossformer.utils.rig import K_for_size
 
 
+def _params_path(path: Path) -> Path:
+    path = path.expanduser().resolve()
+    return path / "params" if (path / "params").exists() else path
+
+
+def _checkpoint_step(path: Path) -> int | None:
+    mngr = ocp.CheckpointManager(_params_path(path))
+    return mngr.latest_step()
+
+
+def _load_tree_metadata(path: Path) -> dict[str, dict] | None:
+    step = _checkpoint_step(path)
+    if step is None:
+        return None
+    meta_path = _params_path(path) / str(step) / "default" / "_METADATA"
+    if not meta_path.exists():
+        return None
+    with meta_path.open("r", encoding="utf-8") as f:
+        meta = json.load(f)
+    return meta.get("tree_metadata")
+
+
+def _checkpoint_model_info(path: Path) -> dict[str, object] | None:
+    tree = _load_tree_metadata(path)
+    if not tree:
+        return None
+
+    tuples = [ast.literal_eval(k) for k in tree]
+    roots = {t[0] for t in tuples}
+    info: dict[str, object] = {}
+
+    if "tips" in roots:
+        info["encoder"] = "tips"
+        info["tips_variant"] = "tips_v2_b14"
+    elif "dream" in roots:
+        info["encoder"] = "vgg"
+
+    if any("tips_dpt_head" in t or "dpt_head" in t for t in tuples):
+        info["decoder"] = "dpt"
+
+    for t, meta in zip(tuples, tree.values(), strict=True):
+        if t[-3:] == ("heads_0", "out", "bias"):
+            shape = meta["value_metadata"]["write_shape"]
+            if shape:
+                info["num_keypoints"] = int(shape[0])
+            break
+
+    return info or None
+
+
+def _resolve_model_cfg(args) -> tuple[Config, dict[str, object] | None]:
+    info = _checkpoint_model_info(args.checkpoint)
+    if info:
+        for key, value in info.items():
+            cur = getattr(args, key, None)
+            if cur != value:
+                print(f"checkpoint override: {key}={cur} -> {value}")
+                setattr(args, key, value)
+
+    cfg = Config(
+        net_in_size=(args.net_h, args.net_w),
+        num_keypoints=args.num_keypoints,
+        encoder=args.encoder,
+        variant=args.variant,
+        decoder=args.decoder,
+        tips_variant=getattr(args, "tips_variant", Config.tips_variant),
+    )
+    return cfg, info
+
+
 class MultiArrayRecordSource:
     def __init__(self, img_src, pro_src, chunk: int = 1) -> None:
         if len(img_src) != len(pro_src):
@@ -45,9 +117,7 @@ class MultiArrayRecordSource:
 
 
 def load_params(path: Path, target_params, step: int | None):
-    path = path.expanduser().resolve()
-    if (path / "params").exists():
-        path = path / "params"
+    path = _params_path(path)
 
     mngr = ocp.CheckpointManager(path)
     step = step if step is not None else mngr.latest_step()
@@ -62,15 +132,28 @@ def load_params(path: Path, target_params, step: int | None):
     return mngr.restore(step, args=ocp.args.StandardRestore(abstract))
 
 
-def make_predict_fn(cfg: Config, ckpt: Path, step: int | None):
+def _jit_device(kind: str | None):
+    if kind == "cpu":
+        return jax.devices("cpu")[0]
+    if kind == "gpu":
+        gpus = [d for d in jax.devices() if d.platform == "gpu"]
+        return gpus[0] if gpus else None
+    return None
+
+
+def _init_model_params(cfg: Config, ckpt: Path, step: int | None):
     out_h, out_w = net_out_size(cfg)
     model = make_model(cfg, cfg.num_keypoints)
 
-    dummy = np.zeros((1, *cfg.net_in_size, cfg.image_c), dtype=np.uint8)
-    params0 = model.init(jax.random.PRNGKey(cfg.seed), _image_to_float(dummy))["params"]
-    params = load_params(ckpt, params0, step)
+    cpu = jax.devices("cpu")[0]
+    with jax.default_device(cpu):
+        dummy = np.zeros((1, *cfg.net_in_size, cfg.image_c), dtype=np.uint8)
+        params0 = model.init(jax.random.PRNGKey(cfg.seed), _image_to_float(dummy))["params"]
+        params = load_params(ckpt, params0, step)
+    return model, params, out_h, out_w
 
-    @jax.jit
+
+def _compile_predict_fn(model, params, out_h: int, out_w: int, *, device: str | None = None):
     def predict(images):
         model_out, _ = model.apply({"params": params}, _image_to_float(images))
         heatmaps = final_pred_heatmaps(prepare_pred_heatmaps(model_out, out_h, out_w))
@@ -86,16 +169,25 @@ def make_predict_fn(cfg: Config, ckpt: Path, step: int | None):
         pred_mask = prepare_pred_mask(model_out, out_h, out_w)
         return uv_px, conf, pred_mask
 
-    return predict
+    dev = _jit_device(device)
+    return jax.jit(predict, device=dev) if dev is not None else jax.jit(predict)
 
 
-def run_batched(predict, images: np.ndarray, batch_size: int):
+def run_batched(predict, images: np.ndarray, batch_size: int, fallback_predict=None):
     uv_rows, conf_rows, mask_rows = [], [], []
     has_mask = None
 
     for i in range(0, len(images), batch_size):
         batch = images[i : i + batch_size]
-        uv, conf, mask = predict(batch)
+        try:
+            uv, conf, mask = predict(batch)
+        except jax.errors.JaxRuntimeError as e:
+            if fallback_predict is None or "allocate" not in str(e).lower():
+                raise
+            print("predict OOM on gpu; falling back to cpu")
+            predict = fallback_predict
+            fallback_predict = None
+            uv, conf, mask = predict(batch)
         uv_rows.append(np.asarray(jax.device_get(uv)))
         conf_rows.append(np.asarray(jax.device_get(conf)))
 
@@ -113,7 +205,7 @@ def run_batched(predict, images: np.ndarray, batch_size: int):
     return uv, conf, pred_mask
 
 
-def build_session_npz(npz, camera_keys: tuple[str, ...], predict, batch_size: int):
+def build_session_npz(npz, camera_keys: tuple[str, ...], predict, batch_size: int, fallback_predict=None):
     session = {
         "session_id": str(npz["session_id"]) if "session_id" in npz else None,
         "q": np.asarray(npz["q"]),
@@ -139,7 +231,7 @@ def build_session_npz(npz, camera_keys: tuple[str, ...], predict, batch_size: in
         K = np.asarray(npz[K_key])
 
         print(f"running DREAM: {cam} images={images.shape}")
-        uv, conf, pred_mask = run_batched(predict, images, batch_size)
+        uv, conf, pred_mask = run_batched(predict, images, batch_size, fallback_predict=fallback_predict)
 
         session["image"][cam] = images
         session["K"][cam] = K
@@ -245,6 +337,7 @@ def build_session_arec(
     camera_keys: tuple[str, ...],
     predict,
     batch_size: int,
+    fallback_predict=None,
     *,
     start: int,
     stop: int | None,
@@ -271,7 +364,7 @@ def build_session_arec(
         masks = [sample_mask(s, cam) for s in samples]
 
         print(f"running DREAM: {cam} records={len(idxs)} images={images.shape}")
-        uv, conf, pred_mask = run_batched(predict, images, batch_size)
+        uv, conf, pred_mask = run_batched(predict, images, batch_size, fallback_predict=fallback_predict)
 
         session["image"][cam] = images
         session["K"][cam] = K
@@ -310,7 +403,7 @@ def main():
     src_group = p.add_mutually_exclusive_group(required=True)
     src_group.add_argument("--session-npz", type=Path)
     src_group.add_argument("--arec-name", type=str)
-    p.add_argument("--arec-root", type=Path, default=Path("~/.cache/arecs"))
+    p.add_argument("--arec-root", type=Path, default=Path("~/.cache/arrayrecords"))
     p.add_argument("--arec-version", type=str, default="0.0.1")
     p.add_argument("--arec-branch", type=str, default="main")
     p.add_argument("--arec-chunk", type=int, default=1)
@@ -330,23 +423,30 @@ def main():
     p.add_argument("--encoder", type=str, default="vgg")
     p.add_argument("--variant", type=str, default="full")
     p.add_argument("--decoder", type=str, default="dpt")
+    p.add_argument("--tips-variant", type=str, default=Config.tips_variant)
+    p.add_argument("--device", choices=["auto", "gpu", "cpu"], default="auto")
 
     p.add_argument("--q-radians", action="store_true")
     p.add_argument("--max-selected-frames", type=int, default=64)
     args = p.parse_args()
 
-    dream_cfg = Config(
-        net_in_size=(args.net_h, args.net_w),
-        num_keypoints=args.num_keypoints,
-        encoder=args.encoder,
-        variant=args.variant,
-        decoder=args.decoder,
-    )
-    predict = make_predict_fn(dream_cfg, args.checkpoint, args.step)
+    dream_cfg, _ = _resolve_model_cfg(args)
+    model, params, out_h, out_w = _init_model_params(dream_cfg, args.checkpoint, args.step)
+    dev = "cpu" if args.device == "cpu" else "gpu"
+    predict = _compile_predict_fn(model, params, out_h, out_w, device=dev)
+    fallback_predict = None
+    if args.device == "auto" and _jit_device("gpu") is not None:
+        fallback_predict = _compile_predict_fn(model, params, out_h, out_w, device="cpu")
 
     if args.session_npz is not None:
         with np.load(args.session_npz, allow_pickle=True) as npz:
-            session = build_session_npz(npz, tuple(args.camera_keys), predict, args.batch_size)
+            session = build_session_npz(
+                npz,
+                tuple(args.camera_keys),
+                predict,
+                args.batch_size,
+                fallback_predict=fallback_predict,
+            )
     else:
         src = open_arec_source(args.arec_root, args.arec_name, args.arec_version, args.arec_branch, args.arec_chunk)
         session = build_session_arec(
@@ -354,6 +454,7 @@ def main():
             tuple(args.camera_keys),
             predict,
             args.batch_size,
+            fallback_predict=fallback_predict,
             start=args.start,
             stop=args.stop,
             max_candidate_frames=args.max_candidate_frames,

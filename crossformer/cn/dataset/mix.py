@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 
 # from crossformer.data.oxe.oxe_standardization_transforms import  OXE_STANDARDIZATION_TRANSFORMS
 import logging
@@ -17,6 +18,20 @@ from crossformer.embody import Embodiment, HUMAN_SINGLE, SINGLE, SINGLE_GRIP_CAL
 from crossformer.utils.spec import ModuleSpec
 
 log = logging.getLogger(__name__)
+
+
+def _mix_weight(ds: Arec) -> int:
+    mp = ds.builder.root / "meta.json"
+    if not mp.exists():
+        log.debug("missing arec metadata for %s at %s; using unit weight", ds.name, mp)
+        return 1
+    try:
+        with mp.open("r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except Exception:
+        log.debug("failed to read arec metadata for %s; using unit weight", ds.name, exc_info=True)
+        return 1
+    return max(int(meta.get("num_records", 1)), 1)
 
 
 def _head(name: str, fallback: Head) -> Head:
@@ -187,12 +202,12 @@ class MultiDataSource(DataSource):
 _ = (TFDS(name="xgym_duck_single", head=Head.SINGLE, embodiment=SINGLE),)
 
 XGYM = [
-    Arec(name="xgym_lift_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.7", branch="main"),
+    Arec(name="xgym_lift_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.11", branch="main"),
     Arec(name="xgym_stack_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.5", branch="main"),
     Arec(name="xgym_sweep_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.6", branch="main"),
     Arec(name="sweep_mano", head=Head.MANO, embodiment=HUMAN_SINGLE, version="0.0.2", branch="to_step"),
 ]
-XGYM_WEIGHTS = [len(x.source) for x in XGYM]  # size weighted rn, not uniform
+XGYM_WEIGHTS = [_mix_weight(x) for x in XGYM]  # size weighted rn, not uniform
 XGYM_WEIGHTS = [w / sum(XGYM_WEIGHTS) for w in XGYM_WEIGHTS]
 
 NEW = [
