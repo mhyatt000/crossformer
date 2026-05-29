@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 
 # from crossformer.data.oxe.oxe_standardization_transforms import  OXE_STANDARDIZATION_TRANSFORMS
 import logging
@@ -19,6 +20,30 @@ from crossformer.utils.spec import ModuleSpec
 log = logging.getLogger(__name__)
 
 
+def _mix_weight(ds: Arec) -> int:
+    mp = ds.builder.root / "meta.json"
+    if not mp.exists():
+        log.debug("missing arec metadata for %s at %s; using unit weight", ds.name, mp)
+        return 1
+    try:
+        with mp.open("r", encoding="utf-8") as f:
+            meta = json.load(f)
+    except Exception:
+        log.debug("failed to read arec metadata for %s; using unit weight", ds.name, exc_info=True)
+        return 1
+    return max(int(meta.get("num_records", 1)), 1)
+
+
+def _head(name: str, fallback: Head) -> Head:
+    head = DATASET_TO_HEAD.get(name, fallback)
+    if isinstance(head, Head):
+        return head
+    try:
+        return Head[head.upper()]
+    except KeyError:
+        return Head(head)
+
+
 @dataclass
 class DataSource(CN):
     REGISTRY: ClassVar[dict[str, DataSource]] = {}
@@ -26,7 +51,9 @@ class DataSource(CN):
 
     name: str = tyro.MISSING
     head: Head = tyro.MISSING  # which head to associate with this dataset. soon to be deprecated
-    embodiment: Embodiment = tyro.MISSING  # embodiment has 1+ bodyparts. this will eventually replace self.head
+    embodiment: tyro.conf.Suppress[Embodiment] = (
+        SINGLE  # embodiment has 1+ bodyparts. this will eventually replace self.head
+    )
 
     def _register(self):
         self.REGISTRY[self.name] = self
@@ -53,9 +80,9 @@ class Arec(DataSource):
 
     chunk: int = 20
     goal: bool = False
-    restructure: ModuleSpec | None = None
+    restructure: tyro.conf.Suppress[ModuleSpec | None] = None
 
-    builder: ArrayRecordBuilder = field(init=False)
+    builder: tyro.conf.Suppress[ArrayRecordBuilder] = field(init=False)
     _cache: Path = field(init=False, default=Path("~/.cache/arrayrecords").expanduser().resolve())
 
     def __post_init__(self):
@@ -101,7 +128,7 @@ class Arec(DataSource):
         version = getattr(config, "version", None)
         branch = getattr(config, "branch", "main")
         chunk = getattr(config, "chunk", 50)
-        head = DATASET_TO_HEAD.get(name)
+        head = _head(name, getattr(config, "head"))
         embodiment = getattr(config, "embodiment")
         restructure = getattr(config, "restructure", None)
         return Arec(
@@ -175,12 +202,12 @@ class MultiDataSource(DataSource):
 _ = (TFDS(name="xgym_duck_single", head=Head.SINGLE, embodiment=SINGLE),)
 
 XGYM = [
-    Arec(name="xgym_lift_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.7", branch="main"),
+    Arec(name="xgym_lift_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.11", branch="main"),
     Arec(name="xgym_stack_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.5", branch="main"),
     Arec(name="xgym_sweep_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.6", branch="main"),
     Arec(name="sweep_mano", head=Head.MANO, embodiment=HUMAN_SINGLE, version="0.0.2", branch="to_step"),
 ]
-XGYM_WEIGHTS = [len(x.source) for x in XGYM]  # size weighted rn, not uniform
+XGYM_WEIGHTS = [_mix_weight(x) for x in XGYM]  # size weighted rn, not uniform
 XGYM_WEIGHTS = [w / sum(XGYM_WEIGHTS) for w in XGYM_WEIGHTS]
 
 NEW = [
