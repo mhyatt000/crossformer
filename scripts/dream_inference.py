@@ -10,7 +10,6 @@ import orbax.checkpoint as ocp
 
 from crossformer.data.arec.arec import ArrayRecordBuilder, unpack_record
 from crossformer.data.geometry import denormalize_kp2d
-from crossformer.data.grain.datasets import MultiArrayRecordSource
 from crossformer.run.dream.config import Config
 from crossformer.run.dream.metrics import extract_keypoints
 from crossformer.run.dream.modeling import _image_to_float, make_model, net_out_size
@@ -24,6 +23,25 @@ from crossformer.run.dream.train_steps import (
     prepare_pred_mask,
 )
 from crossformer.utils.rig import K_for_size
+
+
+class MultiArrayRecordSource:
+    def __init__(self, img_src, pro_src, chunk: int = 1) -> None:
+        if len(img_src) != len(pro_src):
+            raise ValueError("image and proprio sources must be aligned")
+        self.img_src = img_src
+        self.pro_src = pro_src
+        self.chunk = int(chunk)
+
+    def __len__(self) -> int:
+        return len(self.img_src) - self.chunk + 1
+
+    def __getitem__(self, i: int) -> dict:
+        img_rec = unpack_record(self.img_src[i])
+        idxs = list(range(i, min(i + self.chunk, len(self.pro_src))))
+        pro_recs = [unpack_record(x) for x in self.pro_src.__getitems__(idxs)]
+        pro_rec = jax.tree.map(lambda *xs: np.stack(xs), *pro_recs)
+        return {**img_rec, **pro_rec}
 
 
 def load_params(path: Path, target_params, step: int | None):
