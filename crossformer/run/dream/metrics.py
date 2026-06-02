@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+from typing import TYPE_CHECKING
 
 import cv2
 import jax
@@ -10,9 +11,8 @@ import numpy as np
 from crossformer.data.geometry import denormalize_kp2d
 from crossformer.utils.callbacks.synth_viz import fk_keypoints, rasterize_robot, solve_pnp
 
-from .config import (
+from .constants import (
     ADD_THRESHOLDS_MM,
-    Config,
     KP_CONF_THRESHOLD,
     KP_MISSING_VALUE,
     KP_PEAK_AMBIGUITY_GAP,
@@ -20,6 +20,9 @@ from .config import (
     KP_SMOOTH_RADIUS,
     KP_SMOOTH_SIGMA,
 )
+
+if TYPE_CHECKING:
+    from .config import Config
 
 
 def keypoint_metrics(batch: dict, pred_heatmaps: jax.Array):

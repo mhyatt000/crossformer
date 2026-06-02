@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import combinations
 from typing import Any
 
 import cv2
@@ -14,6 +15,20 @@ from crossformer.utils.callbacks.synth_viz import composite_robot, fk_keypoints,
 from .metrics import _mask_iou, _reprojection_errors, extract_keypoints
 
 KP_MISSING_VALUE = -999.999
+DEFAULT_CALIB_KEYPOINT_LINKS = (
+    "link_base",
+    "link1",
+    "link2",
+    "link3",
+    "link4",
+    "link5",
+    "link6",
+    "link7",
+    "link_eef",
+    "xarm_gripper_base_link",
+    "left_finger",
+    "right_finger",
+)
 
 
 @dataclass
@@ -28,17 +43,33 @@ class SessionCalibrationConfig:
     min_total_correspondences: int = 12
     min_total_inliers: int = 12
     min_frame_inliers: int = 4
-    keypoint_conf_threshold: float = 0.03
+    min_distinct_keypoints: int = 6
+    min_well_supported_keypoints: int = 6
+    min_points_per_keypoint: int = 3
+    max_top2_keypoint_fraction: float = 0.75
+    keypoint_conf_threshold: float = 0.3
+    keypoint_links: tuple[str, ...] | None = DEFAULT_CALIB_KEYPOINT_LINKS
+    require_keypoints_in_bounds: bool = True
+    drop_duplicate_object_points: bool = True
+    duplicate_decimals: int = 5
     reproj_threshold_px: float = 30.0
     frame_reproj_threshold_px: float = 30.0
+    use_ransac: bool = False
     ransac_iterations: int = 1000
     ransac_confidence: float = 0.999
+    subset_search: bool = True
+    subset_min_links: int = 4
+    subset_max_links: int | None = None
+    subset_min_points: int = 4
+    subset_top_k: int = 20
+    use_best_subset: bool = True
     max_refine_iters: int = 4
     require_same_K: bool = True
     use_mask_iou_scoring: bool = True
     min_mask_iou: float | None = None
     diversity_weight_q: float = 1.0
     diversity_weight_uv: float = 0.5
+    coverage_weight: float = 2.0
     confidence_weight: float = 1.0
     q_degrees: bool = True
 
@@ -94,6 +125,8 @@ class CameraCalibrationResult:
     per_frame_mask_iou: dict[int, float] = field(default_factory=dict)
     rasterized_masks: dict[int, np.ndarray] = field(default_factory=dict)
     overlays: dict[int, np.ndarray] = field(default_factory=dict)
+    solver: str | None = None
+    subset_keypoint_indices: tuple[int, ...] | None = None
 
 
 @dataclass
@@ -110,6 +143,8 @@ class RobustStackedPnPResult:
     w2c: np.ndarray | None
     inliers: np.ndarray
     reproj_errors: np.ndarray
+    solver: str | None = None
+    subset_link_indices: tuple[int, ...] | None = None
 
 
 def calibrate_session_cameras(session: Any, cfg: SessionCalibrationConfig) -> SessionCalibrationResult:
@@ -228,14 +263,19 @@ def build_multiframe_correspondences(
             raise ValueError(f"incompatible K for camera {frame.cam_name} frame {frame.frame_idx}")
         q = np.asarray(frame.q, dtype=np.float64)
         joints = np.deg2rad(q[:7]) if cfg.q_degrees else q[:7]
-        pts_3d = fk_keypoints(joints)
+        pts_3d = _fk_keypoints(joints, cfg)
         uv = np.asarray(frame.keypoints_px, dtype=np.float64)
         conf = np.asarray(frame.keypoints_conf, dtype=np.float64)
-        valid = _valid_keypoints(frame, cfg)
+        n = min(len(pts_3d), len(uv), len(conf))
+        valid = _valid_keypoints(frame, cfg)[:n]
+        if cfg.drop_duplicate_object_points:
+            valid_idx = np.flatnonzero(valid)
+            unique = _unique_object_mask(pts_3d[:n][valid], cfg.duplicate_decimals)
+            valid[valid_idx[~unique]] = False
         idx = np.where(valid)[0]
-        pts_all.append(pts_3d[idx])
-        uv_all.append(uv[idx])
-        conf_all.append(conf[idx])
+        pts_all.append(pts_3d[:n][idx])
+        uv_all.append(uv[:n][idx])
+        conf_all.append(conf[:n][idx])
         frame_all.append(np.full(idx.shape, frame.frame_idx, dtype=np.int64))
         kp_all.append(idx.astype(np.int64))
     if not pts_all:
@@ -273,6 +313,10 @@ def solve_camera_extrinsics_from_frames(
     if corr.pts_3d.shape[0] < cfg.min_total_correspondences:
         result.failure_reason = "insufficient_points"
         return result
+    coverage_failure = _coverage_failure(corr, cfg)
+    if coverage_failure is not None:
+        result.failure_reason = coverage_failure
+        return result
 
     pnp = solve_robust_stacked_pnp(corr, cfg)
     result.K = corr.K
@@ -305,6 +349,8 @@ def solve_camera_extrinsics_from_frames(
         per_frame_mask_iou=diagnostics["per_frame_mask_iou"],
         rasterized_masks=diagnostics["rasterized_masks"],
         overlays=diagnostics["overlays"],
+        solver=pnp.solver,
+        subset_keypoint_indices=pnp.subset_link_indices,
     )
 
 
@@ -312,17 +358,32 @@ def solve_robust_stacked_pnp(
     correspondences: MultiFrameCorrespondences, cfg: SessionCalibrationConfig
 ) -> RobustStackedPnPResult:
     pts = np.asarray(correspondences.pts_3d, dtype=np.float64)
-    uv = np.asarray(correspondences.uv_px, dtype=np.float64)
-    K = np.asarray(correspondences.K, dtype=np.float64)
     if pts.shape[0] < cfg.min_total_correspondences:
         return _robust_fail("insufficient_points", pts.shape[0])
 
-    ransac = _solve_pnp_ransac(pts, uv, K, cfg)
-    if ransac is None:
+    if cfg.subset_search and cfg.use_best_subset:
+        subset = _solve_subset_pnp(correspondences, cfg)
+        if subset is not None and subset.success:
+            return subset
+
+    return _solve_full_pnp(correspondences, cfg)
+
+
+def _solve_full_pnp(corr: MultiFrameCorrespondences, cfg: SessionCalibrationConfig) -> RobustStackedPnPResult:
+    pts = np.asarray(corr.pts_3d, dtype=np.float64)
+    uv = np.asarray(corr.uv_px, dtype=np.float64)
+    K = np.asarray(corr.K, dtype=np.float64)
+    solved = _solve_pnp_ransac(pts, uv, K, cfg) if cfg.use_ransac else _solve_sqpnp_then_iterative(pts, uv, K)
+    if solved is None:
         return _robust_fail("failed_pnp", pts.shape[0])
-    rvec, tvec, inliers = ransac
-    if int(inliers.sum()) < cfg.min_total_inliers:
-        return _robust_fail("insufficient_inliers", pts.shape[0], inliers)
+    if cfg.use_ransac:
+        rvec, tvec, inliers = solved
+        solver = "RANSAC+SQPNP"
+        if int(inliers.sum()) < cfg.min_total_inliers:
+            return _robust_fail("insufficient_inliers", pts.shape[0], inliers)
+    else:
+        rvec, tvec, solver = solved
+        inliers = np.ones(pts.shape[0], dtype=bool)
 
     prev = inliers.copy()
     for _ in range(max(cfg.max_refine_iters, 1)):
@@ -333,7 +394,7 @@ def solve_robust_stacked_pnp(
         w2c = _w2c_from_rvec_tvec(rvec, tvec)
         errs = _reprojection_errors(w2c, pts, uv, K)
         keep = errs <= cfg.reproj_threshold_px
-        keep = _drop_bad_frames(keep, errs, correspondences, cfg)
+        keep = _drop_bad_frames(keep, errs, corr, cfg)
         if int(keep.sum()) < cfg.min_total_inliers:
             return RobustStackedPnPResult(False, "insufficient_inliers", None, keep, errs)
         if np.array_equal(keep, prev):
@@ -345,8 +406,20 @@ def solve_robust_stacked_pnp(
     w2c = _w2c_from_rvec_tvec(rvec, tvec)
     errs = _reprojection_errors(w2c, pts, uv, K)
     if float(np.mean(errs[inliers])) > cfg.reproj_threshold_px:
-        return RobustStackedPnPResult(False, "excessive_reprojection_error", None, inliers, errs)
-    return RobustStackedPnPResult(True, None, w2c, inliers, errs)
+        return RobustStackedPnPResult(False, "excessive_reprojection_error", None, inliers, errs, solver)
+    return RobustStackedPnPResult(True, None, w2c, inliers, errs, solver)
+
+
+def _solve_subset_pnp(corr: MultiFrameCorrespondences, cfg: SessionCalibrationConfig) -> RobustStackedPnPResult | None:
+    subset = _best_link_subset(corr, cfg)
+    if subset is None:
+        return None
+    keep = np.isin(corr.kp_idx, np.asarray(subset, dtype=np.int64))
+    solved = _solve_sqpnp_then_iterative(corr.pts_3d[keep], corr.uv_px[keep], corr.K)
+    if solved is None:
+        return None
+    rvec, tvec, solver = solved
+    return _score_pnp_solution(rvec, tvec, solver, corr.pts_3d, corr.uv_px, corr.K, corr, cfg, subset)
 
 
 def _solve_pnp_ransac(
@@ -372,6 +445,30 @@ def _solve_pnp_ransac(
     return rvec, tvec, inliers
 
 
+def _solve_sqpnp_then_iterative(
+    pts: np.ndarray, uv: np.ndarray, K: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, str] | None:
+    if pts.shape[0] < 4:
+        return None
+    try:
+        ok, rvec, tvec = cv2.solvePnP(
+            pts.astype(np.float32),
+            uv.astype(np.float32),
+            K.astype(np.float32),
+            None,
+            flags=cv2.SOLVEPNP_SQPNP,
+        )
+    except cv2.error:
+        return None
+    if not ok:
+        return None
+    refined = _refine_pnp(pts, uv, K, rvec, tvec)
+    if refined is None:
+        return rvec, tvec, "SQPNP"
+    rvec, tvec = refined
+    return rvec, tvec, "SQPNP+ITERATIVE"
+
+
 def _refine_pnp(
     pts: np.ndarray, uv: np.ndarray, K: np.ndarray, rvec: np.ndarray, tvec: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray] | None:
@@ -389,6 +486,61 @@ def _refine_pnp(
     except cv2.error:
         return None
     return (rvec, tvec) if ok else None
+
+
+def _score_pnp_solution(
+    rvec: np.ndarray,
+    tvec: np.ndarray,
+    solver: str,
+    pts: np.ndarray,
+    uv: np.ndarray,
+    K: np.ndarray,
+    corr: MultiFrameCorrespondences,
+    cfg: SessionCalibrationConfig,
+    subset: tuple[int, ...] | None = None,
+) -> RobustStackedPnPResult:
+    w2c = _w2c_from_rvec_tvec(rvec, tvec)
+    errs = _reprojection_errors(w2c, pts, uv, K)
+    keep = errs <= cfg.reproj_threshold_px
+    keep = _drop_bad_frames(keep, errs, corr, cfg)
+    if int(keep.sum()) < cfg.min_total_inliers:
+        return RobustStackedPnPResult(False, "insufficient_inliers", None, keep, errs, solver, subset)
+    if float(np.mean(errs[keep])) > cfg.reproj_threshold_px:
+        return RobustStackedPnPResult(False, "excessive_reprojection_error", None, keep, errs, solver, subset)
+    return RobustStackedPnPResult(True, None, w2c, keep, errs, solver, subset)
+
+
+def _best_link_subset(corr: MultiFrameCorrespondences, cfg: SessionCalibrationConfig) -> tuple[int, ...] | None:
+    active = sorted(int(index) for index in np.unique(corr.kp_idx))
+    if len(active) < cfg.subset_min_links:
+        return None
+    max_links = cfg.subset_max_links if cfg.subset_max_links is not None else len(active)
+    max_links = min(max_links, len(active))
+    ranked: list[tuple[float, float, float, int, tuple[int, ...]]] = []
+    for size in range(cfg.subset_min_links, max_links + 1):
+        for subset in combinations(active, size):
+            keep = np.isin(corr.kp_idx, np.asarray(subset, dtype=np.int64))
+            if int(keep.sum()) < cfg.subset_min_points:
+                continue
+            solved = _solve_sqpnp_then_iterative(corr.pts_3d[keep], corr.uv_px[keep], corr.K)
+            if solved is None:
+                continue
+            rvec, tvec, _ = solved
+            w2c = _w2c_from_rvec_tvec(rvec, tvec)
+            errs = _reprojection_errors(w2c, corr.pts_3d[keep], corr.uv_px[keep], corr.K)
+            ranked.append(
+                (
+                    float(np.median(errs)),
+                    float(np.mean(errs)),
+                    float(np.sqrt(np.mean(errs**2))),
+                    -int(keep.sum()),
+                    subset,
+                )
+            )
+    if not ranked:
+        return None
+    ranked.sort()
+    return ranked[0][4]
 
 
 def score_camera_calibration(
@@ -479,10 +631,42 @@ def _valid_keypoints(frame: FramePrediction, cfg: SessionCalibrationConfig) -> n
     conf = np.asarray(frame.keypoints_conf, dtype=np.float64)
     valid = np.isfinite(uv).all(axis=-1) & np.isfinite(conf) & (conf >= cfg.keypoint_conf_threshold)
     valid &= uv[:, 0] > KP_MISSING_VALUE * 0.5
-    if frame.image is not None:
+    if cfg.require_keypoints_in_bounds and frame.image is not None:
         h, w = np.asarray(frame.image).shape[:2]
         valid &= (uv[:, 0] >= 0.0) & (uv[:, 0] < w) & (uv[:, 1] >= 0.0) & (uv[:, 1] < h)
     return valid
+
+
+def _fk_keypoints(joints: np.ndarray, cfg: SessionCalibrationConfig) -> np.ndarray:
+    if cfg.keypoint_links is None:
+        return fk_keypoints(joints)
+
+    from crossformer.utils.callbacks.rast import _poses_to_mats
+    from crossformer.utils.callbacks.synth_viz import _get_robot_mesh
+
+    robot = _get_robot_mesh()
+    q = np.zeros((1, robot.actuated), dtype=np.float32)
+    q[0, :7] = joints
+    poses = robot._fk(jnp.asarray(q))
+    mats = np.asarray(_poses_to_mats(poses))[0]
+    pts = []
+    for link in cfg.keypoint_links:
+        if link not in robot.link_index:
+            raise ValueError(f"calibration keypoint link {link!r} is not in robot model")
+        pts.append(mats[robot.link_index[link], :3, 3])
+    return np.stack(pts, axis=0).astype(np.float64)
+
+
+def _unique_object_mask(pts: np.ndarray, decimals: int) -> np.ndarray:
+    seen = set()
+    keep = np.zeros(len(pts), dtype=bool)
+    for i, xyz in enumerate(np.round(pts, decimals=decimals)):
+        key = tuple(float(v) for v in xyz)
+        if key in seen:
+            continue
+        seen.add(key)
+        keep[i] = True
+    return keep
 
 
 def _frame_score(frame: FramePrediction, cfg: SessionCalibrationConfig) -> float:
@@ -515,7 +699,30 @@ def _selection_score(
         if both.any():
             uv_divs.append(float(np.linalg.norm(uv[both] - np.asarray(s.keypoints_px)[both], axis=-1).mean()))
     uv_div = min(uv_divs) if uv_divs else 0.0
-    return reliability + cfg.diversity_weight_q * q_div + cfg.diversity_weight_uv * uv_div
+    selected_valid = np.zeros_like(valid)
+    for s in selected:
+        selected_valid |= _valid_keypoints(s, cfg)[: len(valid)]
+    new_kps = int(np.sum(valid & ~selected_valid))
+    return (
+        reliability + cfg.diversity_weight_q * q_div + cfg.diversity_weight_uv * uv_div + cfg.coverage_weight * new_kps
+    )
+
+
+def _coverage_failure(corr: MultiFrameCorrespondences, cfg: SessionCalibrationConfig) -> str | None:
+    if corr.kp_idx.size == 0:
+        return "insufficient_keypoint_coverage"
+    counts = np.bincount(corr.kp_idx.astype(np.int64))
+    active = counts[counts > 0]
+    if active.size < cfg.min_distinct_keypoints:
+        return "insufficient_keypoint_coverage"
+    well_supported = int(np.sum(counts >= cfg.min_points_per_keypoint))
+    if well_supported < cfg.min_well_supported_keypoints:
+        return "insufficient_keypoint_support"
+    if active.size >= 2:
+        top2_fraction = float(np.sort(active)[-2:].sum() / active.sum())
+        if top2_fraction > cfg.max_top2_keypoint_fraction:
+            return "degenerate_keypoint_distribution"
+    return None
 
 
 def _drop_bad_frames(

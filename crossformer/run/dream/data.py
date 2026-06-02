@@ -24,7 +24,8 @@ from crossformer.utils.callbacks.synth_viz import fk_keypoints
 from crossformer.utils.rig import K_for_size, load_w2c, render_robot_mask
 
 from .augment import _maybe_apply_grain_imaug
-from .config import Config, SOURCE_REAL, SOURCE_SYNTH
+from .config import Config
+from .constants import SOURCE_REAL, SOURCE_SYNTH
 
 
 def _resize_cover(img: Image.Image, target_w: int, target_h: int) -> Image.Image:

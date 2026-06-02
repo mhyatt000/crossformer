@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
 
 import jax
@@ -10,7 +11,6 @@ import orbax.checkpoint as ocp
 
 from crossformer.data.arec.arec import ArrayRecordBuilder, unpack_record
 from crossformer.data.geometry import denormalize_kp2d
-from crossformer.run.dream.config import Config
 from crossformer.run.dream.metrics import extract_keypoints
 from crossformer.run.dream.modeling import _image_to_float, make_model, net_out_size
 from crossformer.run.dream.session_calibration import (
@@ -23,6 +23,27 @@ from crossformer.run.dream.train_steps import (
     prepare_pred_mask,
 )
 from crossformer.utils.rig import K_for_size
+
+
+@dataclass
+class DreamInferConfig:
+    seed: int = 0
+    net_in_size: tuple[int, int] = (400, 400)
+    image_c: int = 3
+    num_keypoints: int = 10
+    encoder: str = "vgg"
+    variant: str = "full"
+    decoder: str = "dpt"
+    tips_variant: str = "tips_v2_b14"
+    tips_checkpoint: Path | None = None
+    tips_trainable: bool = False
+    deconv_decoder: bool | None = None
+    full_output: bool | None = None
+    skip_connections: bool = False
+    n_stages: int = 1
+    internalize_spatial_softmax: bool = False
+    learned_beta: bool = True
+    initial_beta: float = 1.0
 
 
 class MultiArrayRecordSource:
@@ -62,7 +83,7 @@ def load_params(path: Path, target_params, step: int | None):
     return mngr.restore(step, args=ocp.args.StandardRestore(abstract))
 
 
-def make_predict_fn(cfg: Config, ckpt: Path, step: int | None):
+def make_predict_fn(cfg: DreamInferConfig, ckpt: Path, step: int | None):
     out_h, out_w = net_out_size(cfg)
     model = make_model(cfg, cfg.num_keypoints)
 
@@ -193,12 +214,25 @@ def cam_value(sample: dict, key: str, cam: str, default=None):
     return val
 
 
+def sample_camera_index(sample: dict, cam: str, n: int) -> int:
+    info = sample.get("info", {})
+    keys = np.asarray(info.get("image_keys", []), dtype=str).reshape(-1)
+    matches = [i for i, key in enumerate(keys[:n]) if key == cam or f".{cam}." in key or key.startswith(f"{cam}.")]
+    if len(matches) == 1:
+        return int(matches[0])
+    if len(matches) > 1:
+        raise KeyError(f"ambiguous camera key {cam!r}; matches {[keys[i] for i in matches]}")
+    if n == 1:
+        return 0
+    raise KeyError(f"camera {cam!r} not found in image_keys={keys.tolist()}")
+
+
 def sample_image(sample: dict, cam: str) -> np.ndarray:
     img = cam_value(sample, "image", cam)
     if img is None:
         raise KeyError(f"missing image for camera {cam}")
     img = np.asarray(img)
-    return img[0] if img.ndim == 4 else img
+    return img[sample_camera_index(sample, cam, img.shape[0])] if img.ndim == 4 else img
 
 
 def sample_mask(sample: dict, cam: str) -> np.ndarray | None:
@@ -208,7 +242,7 @@ def sample_mask(sample: dict, cam: str) -> np.ndarray | None:
     if mask is None:
         return None
     mask = np.asarray(mask)
-    return mask[0] if mask.ndim == 3 else mask
+    return mask[sample_camera_index(sample, cam, mask.shape[0])] if mask.ndim == 3 else mask
 
 
 def sample_q(sample: dict, q_radians: bool) -> np.ndarray:
@@ -234,7 +268,7 @@ def sample_K(sample: dict, cam: str, image: np.ndarray, focal_px: float) -> np.n
     if K is not None:
         K = np.asarray(K, dtype=np.float32)
         if K.ndim == 3:
-            K = K[0]
+            K = K[sample_camera_index(sample, cam, K.shape[0])]
         return K
     h, w = image.shape[:2]
     return K_for_size(h, w, f=focal_px).astype(np.float32)
@@ -289,6 +323,7 @@ def save_result(path: Path, result):
     out = {}
     for cam, res in result.camera_results.items():
         out[f"{cam}_success"] = np.asarray(res.success)
+        out[f"{cam}_failure_reason"] = np.asarray("" if res.failure_reason is None else res.failure_reason)
         out[f"{cam}_w2c"] = res.w2c if res.w2c is not None else np.full((4, 4), np.nan)
         out[f"{cam}_K"] = res.K if res.K is not None else np.full((3, 3), np.nan)
         out[f"{cam}_mean_reproj_px"] = np.asarray(res.mean_reproj_px)
@@ -296,6 +331,11 @@ def save_result(path: Path, result):
         out[f"{cam}_num_inlier_points"] = np.asarray(res.num_inlier_points)
         out[f"{cam}_used_frame_indices"] = np.asarray(res.used_frame_indices, dtype=np.int64)
         out[f"{cam}_rejected_frame_indices"] = np.asarray(res.rejected_frame_indices, dtype=np.int64)
+        out[f"{cam}_solver"] = np.asarray("" if res.solver is None else res.solver)
+        out[f"{cam}_subset_keypoint_indices"] = np.asarray(
+            [] if res.subset_keypoint_indices is None else res.subset_keypoint_indices,
+            dtype=np.int64,
+        )
 
     for k, v in result.summary.items():
         out[k.replace("/", "__")] = np.asarray(v)
@@ -335,7 +375,7 @@ def main():
     p.add_argument("--max-selected-frames", type=int, default=64)
     args = p.parse_args()
 
-    dream_cfg = Config(
+    dream_cfg = DreamInferConfig(
         net_in_size=(args.net_h, args.net_w),
         num_keypoints=args.num_keypoints,
         encoder=args.encoder,

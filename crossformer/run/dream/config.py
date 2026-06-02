@@ -6,7 +6,6 @@ from pathlib import Path
 from flax import struct
 from flax.training.train_state import TrainState
 import jax
-import numpy as np
 import optax
 
 import crossformer.cn as cn
@@ -14,15 +13,17 @@ from crossformer.cn.base import default
 from crossformer.cn.dataset.mix import Arec
 from crossformer.utils.train_utils import create_optimizer
 
-KP_CONF_THRESHOLD = 0.03
-KP_SMOOTH_SIGMA = 1.0
-KP_SMOOTH_RADIUS = 2
-KP_PEAK_THRESHOLD = 0.01
-KP_PEAK_AMBIGUITY_GAP = 0.25
-KP_MISSING_VALUE = -999.999
-ADD_THRESHOLDS_MM = np.linspace(0.0, 100.0, 100, dtype=np.float32)
-SOURCE_SYNTH = np.uint8(0)
-SOURCE_REAL = np.uint8(1)
+from .constants import (  # noqa: F401
+    ADD_THRESHOLDS_MM,
+    KP_CONF_THRESHOLD,
+    KP_MISSING_VALUE,
+    KP_PEAK_AMBIGUITY_GAP,
+    KP_PEAK_THRESHOLD,
+    KP_SMOOTH_RADIUS,
+    KP_SMOOTH_SIGMA,
+    SOURCE_REAL,
+    SOURCE_SYNTH,
+)
 
 
 @dataclass

@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 from fnmatch import fnmatch
+from typing import TYPE_CHECKING
 
 from flax.core import freeze, unfreeze
 import jax
 import jax.numpy as jnp
 import numpy as np
+from rich.table import Table
 from tips.scenic.utils import checkpoint as tips_checkpoint
 
 from crossformer.model.dream import DreamTIPS, DreamVGG
 from crossformer.model.load import resolve_checkpoint_path
 
-from .config import Config
+if TYPE_CHECKING:
+    from .config import Config
 
 
 def net_out_size(cfg: Config) -> tuple[int, int]:
