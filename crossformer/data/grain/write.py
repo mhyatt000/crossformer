@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 from tqdm import tqdm
 
+from crossformer.data.arec.arec import ArrayRecordBuilder
 from crossformer.data.grain.utils import traj_len
 
 
@@ -54,7 +55,7 @@ class BuildMGR:
 
         self.builder.prepare(fn)
 
-    def progress(total: int):
+    def progress(self, total: int):
         """a mappable progress bar. example usage: ds.map(cfg.progress(total=1000))"""
         bar = tqdm(total=total, desc="Building dataset")
 
@@ -62,10 +63,12 @@ class BuildMGR:
             bar.update(1)
             return x
 
-    def yield_from_ds(ds) -> Callable[Iterator]:
+        return build_progress
+
+    def yield_from_ds(self, ds) -> Callable[Iterator]:
         """a helper to yield from a dataset. example usage: cfg.build(cfg.yield_from_ds(ds))"""
 
-        def yield_from(ds) -> Iterator[dict]:
+        def yield_from() -> Iterator[dict]:
             yield from ds
 
-        return yield_from(ds)
+        return yield_from  # returns generator object
