@@ -145,21 +145,27 @@ def do_registration(x: dict, roboreg: ClientLike, cfg: MyBuildMGR):
     # pick_best_w2c
     # filter_dr_frames
 
-    w2c_sam = roboreg.step(x)
-    # expects images, joints,  masks, intrinsics and HT initial and ht_is_cv_w2c
+    for i, (img, mask, extr) in enumerate(zip(x.image, x.seg, x.extr.w2c)):
+        if not x.mask.extr.w2c[i]:  # skip if DREAM's w2c is invalid
+            print(f"skipping registration for frame {i} due to invalid DREAM w2c")
+            continue
 
-    x["extr"]["w2c_sam"] = w2c_sam
-    payload = {
-        "images": x.image,
-        "joints": x.proprio.joints[0],
-        "masks": x.seg,  # or x.mask.obs.seg if we want to use seg validity
-        "intrinsics": make_intr(fx=cfg.fxy, fy=cfg.fxy, w=cfg.image_size, h=cfg.image_size),
-        "HT": x.extr.w2c,
-        "ht_is_cv_w2c": True,
-        "mode": "dr",  # Literal['icp', 'dr', 'both']
-    }
-    out = roboreg.step(payload)
-    print(spec(out))
+        mask = mask.reshape(*img.shape[:2])[None].astype(int) * 255
+        payload = {
+            "images": img[None],
+            "joints": x.proprio.joints[0][None],
+            "mask": mask,
+            "intrinsics": make_intr(fx=cfg.fxy, fy=cfg.fxy, w=img.shape[1], h=img.shape[0]),
+            "HT": extr,
+            "ht_is_cv_w2c": True,
+            "mode": "dr",  # Literal['icp', 'dr', 'both']
+        }
+        print(spec(payload))
+        print(payload["intrinsics"])
+        print(mask.mean(), mask.dtype, mask.max(), mask.min())
+        out = roboreg.step(payload)
+        print(spec(out))
+
     quit()
     return x
 
