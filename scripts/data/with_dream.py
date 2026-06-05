@@ -15,7 +15,8 @@ from webpolicy.client import Client
 
 from crossformer.cn.base import default
 from crossformer.cn.dataset.mix import Arec
-from crossformer.data.grain.write import add_episode_id, add_step_id, add_traj_len, BuildMGR, init_info
+from crossformer.data.grain.datasets import EpisodeArrayRecordSource, stack
+from crossformer.data.grain.write import BuildMGR
 from crossformer.utils.spec import spec
 
 
@@ -53,6 +54,7 @@ def make_intr(fx, fy, w, h):
 @dataclass
 class MyBuildMGR(BuildMGR):
     take: int | None = None  # debug. take n steps
+    n: int = 32  # number of frames to use for registration
 
     image_size: int = 200  # Square size for SAM, Dream, and DR
     fxy: float = 515.0  # Focal length for DR depth-to-3D conversion
@@ -106,7 +108,7 @@ from crossformer.utils.autobox import Box
 def do_segmentation(x: dict, sam: ClientLike):
     """Run SAM segmentation on all images"""
     seg = [sam.step(im) for im in x["image"]]
-    seg = jax.tree.map(lambda *xs: np.stack(xs), *seg)  # check all seg outputs have same shape
+    seg = stack(seg)  # check all seg outputs have same shape
 
     # some masks are not valid and have shape (0,*) but this is handled in part by the client wrapper
     x["seg"] = seg["seg"]
@@ -124,7 +126,7 @@ def do_dream(x: dict, dream: ClientLike, cfg: MyBuildMGR):
     payload = {
         "image": x.image,  # expects list of images
         "K": K,  # camera intrinsics for depth-to-3D conversion
-        "q": x.proprio.joints[0],  # robot joint angles
+        "q": x.proprio.joints,  # robot joint angles
         "type": "image",
         "calibrate": True,  # ???
     }
@@ -139,34 +141,67 @@ def do_dream(x: dict, dream: ClientLike, cfg: MyBuildMGR):
     return x
 
 
-def do_registration(x: dict, roboreg: ClientLike, cfg: MyBuildMGR):
+def batch_registration(x: dict, roboreg: ClientLike, cfg: MyBuildMGR):
     # TODO filter out bad SAM masks according to cfg.mask_area before registration
 
     # pick_best_w2c
     # filter_dr_frames
 
-    for i, (img, mask, extr) in enumerate(zip(x.image, x.seg, x.extr.w2c)):
-        if not x.mask.extr.w2c[i]:  # skip if DREAM's w2c is invalid
+    for i in range(x.image.shape[1]):  # loop over views in T,V,HWC
+        img, seg, extr = x.image[:, i], x.seg[:, i], x.extr.w2c[:, i]
+
+        if not x.mask.extr.w2c[:, i].any():  # skip if DREAM's w2c is invalid
             print(f"skipping registration for frame {i} due to invalid DREAM w2c")
             continue
+        else:
+            valid = x.mask.extr.w2c[:, i]
+            img, seg, extr, joints = img[valid], seg[valid], extr[valid], x.proprio.joints[valid]
 
-        mask = mask.reshape(*img.shape[:2])[None].astype(int) * 255
+        # use T,HW not T,HW1
+        T, H, W, _C = img.shape
+        seg = seg.reshape(T, H, W).astype(int) * 255
+
         payload = {
-            "images": img[None],
-            "joints": x.proprio.joints[0][None],
-            "mask": mask,
-            "intrinsics": make_intr(fx=cfg.fxy, fy=cfg.fxy, w=img.shape[1], h=img.shape[0]),
-            "HT": extr,
+            "images": img,
+            "joints": joints,
+            "mask": seg,
+            "intrinsics": make_intr(fx=cfg.fxy, fy=cfg.fxy, w=W, h=H),
+            "HT": extr[0],
             "ht_is_cv_w2c": True,
             "mode": "dr",  # Literal['icp', 'dr', 'both']
         }
-        print(spec(payload))
+        # print(spec(payload))
         print(payload["intrinsics"])
-        print(mask.mean(), mask.dtype, mask.max(), mask.min())
-        out = roboreg.step(payload)
+        # print(seg.mean(), seg.dtype, seg.max(), seg.min())
+        out = Box(roboreg.step(payload))
         print(spec(out))
+        print(out.HT)
+        print(out.iou)
 
-    quit()
+    return {"w2c": out.HT, "iou": out.iou}
+
+
+def select_registration_frames(x: dict, n: int = 32) -> list[dict]:
+    """Select episode frames for calibration, preserving the camera axis."""
+    t = len(x["info"]["id"]["episode"])
+    k = min(n, t)
+    idx = np.linspace(0, t - 1, k, dtype=np.int32)
+    print(idx)
+    return [jax.tree.map(lambda y: y[i], x) for i in idx]
+
+
+def calibrate_extr(x, sam, dream, roboreg, cfg):
+    reg = select_registration_frames(x, n=cfg.n)
+    reg = [do_segmentation(reg, sam) for reg in tqdm(reg, desc="SAM segmentation")]
+    reg = [do_dream(reg, dream, cfg) for reg in tqdm(reg, desc="DREAM calibration")]
+    print(spec(reg))
+    reg = Box(stack([r.dict for r in reg]))
+    print(spec(reg.dict))
+    registration = batch_registration(reg, roboreg, cfg)
+
+    t = len(x["info"]["id"]["episode"])
+    x["extr"]["w2c"] = np.repeat(w2c[None], t, axis=0)
+    x["mask"]["extr"]["w2c"] = np.full((t,), valid_w2c(w2c))
     return x
 
 
@@ -175,9 +210,11 @@ def main(cfg: MyBuildMGR):
     roboreg = Client(host=cfg.reg.host, port=cfg.reg.port)
     dream = Client(host=cfg.dream.host, port=cfg.dream.port)
 
-    ds = grain.MapDataset.source(cfg.mix.source)
+    eps = EpisodeArrayRecordSource.from_mix(cfg.mix)
+    ds = grain.MapDataset.source(eps)
 
-    ds = ds.map(init_info).map(add_traj_len).map(add_step_id).map_with_index(add_episode_id)
+    # these already have eid
+    # ds = ds.map(init_info).map(add_traj_len).map(add_step_id).map_with_index(add_episode_id)
 
     # materialize to compute total steps for progress bar
     # total, n = sum([x["info"]["len"][0] for x in tqdm(ds, desc="compute total")]), len(ds)
@@ -191,9 +228,11 @@ def main(cfg: MyBuildMGR):
     # force clients runs serially
     ds = ThreadPrefetchIterDataset(ds, prefetch_buffer_size=1)
 
-    ds = ds.map(partial(do_segmentation, sam=sam))
-    ds = ds.map(partial(do_dream, dream=dream, cfg=cfg))
-    ds = ds.map(partial(do_registration, roboreg=roboreg, cfg=cfg)) if cfg.dr else ds
+    ds = ds.map(partial(calibrate_extr, sam=sam, dream=dream, roboreg=roboreg, cfg=cfg))
+
+    # ds = ds.map(partial(do_segmentation, sam=sam))
+    # ds = ds.map(partial(do_dream, dream=dream, cfg=cfg))
+    # ds = ds.map(partial(do_registration, roboreg=roboreg, cfg=cfg)) if cfg.dr else ds
 
     # ds = FlatMapIterDataset(ds, transform=flatmap.UnpackFlatMap(key="info.len", use_np=True))
 

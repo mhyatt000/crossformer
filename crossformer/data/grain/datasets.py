@@ -115,10 +115,15 @@ class MultiArrayRecordSource:
         idxs = list(range(i, end))
         pro_recs = [unpack_record(b) for b in self._pro.__getitems__(idxs)]
 
+        info = {"info": pro_recs[0].pop("info")}  # dont stack infos across episodes
+        info = jax.tree.map(lambda y: y[0].reshape(-1), info)
+        for p in pro_recs:
+            p.pop("info") if "info" in p else 0
+
         # stack proprio leaves: (W, ...) per field
         pro_stacked = jax.tree.map(lambda *xs: np.stack(xs), *pro_recs)
 
-        out = {**img_rec, **pro_stacked}
+        out = {**img_rec, **pro_stacked} | info
 
         if self._goal:
             max_offset = self._n - 1 - i
@@ -130,6 +135,115 @@ class MultiArrayRecordSource:
 
     def __getitems__(self, indices: Sequence[int]) -> list[dict]:
         return [self[i] for i in indices]
+
+
+def scalar(x):
+    return int(np.asarray(x).reshape(-1)[0])
+
+
+def stack(xs):
+    return jax.tree.map(lambda *ys: np.stack(ys), *xs)
+
+
+def strip_info(xs):
+    out = []
+    for x in xs:
+        x = dict(x)
+        x.pop("info", None)
+        out.append(x)
+    return out
+
+
+def decode(x):
+    return unpack_record(x) if isinstance(x, bytes) else x
+
+
+def decode_many(src, idxs: Sequence[int]):
+    if hasattr(src, "__getitems__"):
+        return [decode(x) for x in src.__getitems__(list(idxs))]
+    return [decode(src[i]) for i in idxs]
+
+
+class EpisodeArrayRecordSource:
+    def __init__(self, img_src, pro_src=None, *, max_index: int | None = None):
+        self.img_src = img_src
+        self.pro_src = pro_src or img_src
+        assert len(self.img_src) == len(self.pro_src), "image and proprio sources must align"
+        self.max_index = max_index
+        self.n_steps = len(self.pro_src)
+        self.starts, self.ends, self.eids = self._seek_episodes()
+        self.eid_map = {eid: (start, end) for start, end, eid in zip(self.starts, self.ends, self.eids)}
+
+    @classmethod
+    def from_mix(cls, mix, *, max_index: int | None = None):
+        builder = mix.builder
+        meta = builder.meta
+        writers = meta.get("writers", {})
+        if {"image", "proprio"}.issubset(writers):
+            builder.writers = builder._normalize_writers(writers)
+            builder.default_writer = "data" if "data" in builder.writers else next(iter(builder.writers))
+            return cls(builder.get_source("image"), builder.get_source("proprio"), max_index=max_index)
+        return cls(builder.source, max_index=max_index)
+
+    def _step(self, i):
+        return decode(self.pro_src[i])
+
+    def _seek_episodes(self):
+        starts = []
+        ends = []
+        eids = []
+        i = 0
+        stop = self.n_steps if self.max_index is None else min(self.max_index, self.n_steps)
+        while i < stop:
+            x = self._step(i)
+            start = i
+            starts.append(i)
+            info = x["info"]
+            eid = scalar(info["id"]["episode"])
+            eids.append(eid)
+            if "len" in info:
+                n = scalar(info["len"])
+                i += max(n, 1)
+                ends.append(min(i, stop))
+                continue
+            i += 1
+            while i < stop and scalar(self._step(i)["info"]["id"]["episode"]) == eid:
+                i += 1
+            ends.append(i)
+            assert ends[-1] > start
+
+        return starts, ends, eids
+
+    def __len__(self):
+        return len(self.starts)
+
+    def meta(self, ep_i):
+        start = self.starts[ep_i]
+        end = self.ends[ep_i]
+        return {"start": start, "end": end, "eid": self.eids[ep_i], "records": end - start}
+
+    def _pack(self, imgs, pros):
+        info = stack([p["info"] for p in pros])
+        return {**stack(strip_info(imgs)), **stack(strip_info(pros)), "info": info}
+
+    def __getitem__(self, ep_i):
+        return self.__getitems__([ep_i])[0]
+
+    def __getitems__(self, ep_indices: Sequence[int]):
+        if not ep_indices:
+            return []
+        ranges = [(self.starts[i], self.ends[i]) for i in ep_indices]
+        idxs = [j for start, end in ranges for j in range(start, end)]
+        sizes = [end - start for start, end in ranges]
+        cuts = np.cumsum([0, *sizes]).tolist()
+
+        if self.img_src is not self.pro_src:
+            imgs = decode_many(self.img_src, idxs)
+            pros = decode_many(self.pro_src, idxs)
+            return [self._pack(imgs[cuts[i] : cuts[i + 1]], pros[cuts[i] : cuts[i + 1]]) for i in range(len(sizes))]
+
+        xs = decode_many(self.pro_src, idxs)
+        return [stack(xs[cuts[i] : cuts[i + 1]]) for i in range(len(sizes))]
 
 
 def _postprocess_episode(items: Sequence[dict[str, Any]], device=None, steps=True) -> Sequence[dict[str, jnp.Array]]:
