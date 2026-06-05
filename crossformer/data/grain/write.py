@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 from tqdm import tqdm
 
+from crossformer.data.arec.arec import ArrayRecordBuilder
 from crossformer.data.grain.utils import traj_len
 
 

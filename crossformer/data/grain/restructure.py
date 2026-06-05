@@ -160,3 +160,63 @@ def restructure_xarm_dream(step: dict, *, name: str, lang_key: str | None = None
             "cam_extr": np.asarray(step.get("camera", {}).get("extr", {}).get("w2c", [])),
         },
     }
+
+
+def restructure_mano_percam(step: dict, *, name: str, lang_key: str | None = None) -> dict:
+    """Restructure a single-step human (MANO) record for HUMAN_SINGLE.
+
+    Raw per-step schema (from make_dset; the three camera views are grouped
+    together per frame):
+        observation.{high,low,side}            (480, 640, 3) uint8   images
+        observation.kp3d_cam.{high,low,side}   (21, 3) float64       hand kp, per-cam frame
+        observation.kp2d.{high,low,side}       (21, 2) float64
+        observation.visible.{high,low,side}    bool                  hand detected?
+        info.id.{episode,step}, info.len
+
+    Each camera was lifted independently (single-view PnP, no cross-view
+    fusing), so each view's kp3d lives in *that camera's own frame* — the three
+    palm positions for one instant disagree. We therefore pick ONE camera at
+    random and take its image AND its palm together, keeping the (image,
+    position) pair self-consistent. HUMAN_SINGLE = (CART_POS,): the palm
+    keypoint (joint 0) is the cart_pos (DOFs ee_x/y/z, shared with the robot
+    end-effector). The frame is filed under image slot "low" so the rename
+    table (pipelines.py: image.low -> image_primary) routes it into the same
+    tokenizer the robot's main camera uses.
+    """
+    obs = step["observation"]
+    info = step.get("info", {})
+
+    # the three views are grouped in storage; pick one at random per sample
+    cams = list(obs["kp3d_cam"].keys())
+    rng = np.random.default_rng()
+    cam = cams[rng.integers(len(cams))]
+
+    img = np.asarray(obs[cam])  # (480, 640, 3) uint8
+    kp3d = np.asarray(obs["kp3d_cam"][cam], dtype=np.float32)  # (21, 3) cam frame
+    palm = kp3d[0]  # (3,) joint 0 = wrist/palm → cart_pos (ee_x/y/z)
+    vis = bool(np.asarray(obs["visible"][cam]))
+
+    # horizon=1: action == proprio (model predicts current state)
+    proprio = {"position": palm}  # (3,)
+    action = {"position": palm[None]}  # (1, 3)
+
+    # no hand in this view → mask the position DOFs out of the loss
+    act_mask = {"position": np.full(3, vis, dtype=bool)}
+
+    sid = np.array(info.get("id", {}).get("step", 0)).reshape(-1)
+    eid = np.array(info.get("id", {}).get("episode", 0)).reshape(-1)
+    info = info | {"id": {"step": sid, "episode": eid}}
+
+    return {
+        "observation": {
+            "image": {"low": img},
+            "proprio": proprio,
+            "timestep": sid,
+        },
+        "task": {},
+        "action": action,
+        "mask": {"act": act_mask},
+        "dataset_name": str2np(name, length=32),
+        "language.embedding": np.zeros((512,), dtype=np.float32),
+        "info": info | {"dataset_name": str2np(name, length=32)},
+    }

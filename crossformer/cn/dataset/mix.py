@@ -175,11 +175,16 @@ class MultiDataSource(DataSource):
 _ = (TFDS(name="xgym_duck_single", head=Head.SINGLE, embodiment=SINGLE),)
 
 XGYM = [
-    Arec(name="xgym_lift_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.7", branch="main"),
+    Arec(name="xgym_lift_single", head=Head.SINGLE, embodiment=SINGLE, version="0.0.1", branch="main"),
+]
+
+# Registered for action.py's xgym_specs lookups; kept out of XGYM because their cache dirs
+# are empty on this machine and XGYM_WEIGHTS would eagerly call .source on every entry.
+_ = (
     Arec(name="xgym_stack_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.5", branch="main"),
     Arec(name="xgym_sweep_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.6", branch="main"),
     Arec(name="sweep_mano", head=Head.MANO, embodiment=HUMAN_SINGLE, version="0.0.2", branch="to_step"),
-]
+)
 XGYM_WEIGHTS = [len(x.source) for x in XGYM]  # size weighted rn, not uniform
 XGYM_WEIGHTS = [w / sum(XGYM_WEIGHTS) for w in XGYM_WEIGHTS]
 
@@ -195,6 +200,18 @@ NEW = [
     ),
 ]
 
+HUMAN = [
+    Arec(
+        name="lift1_mano",
+        head=Head.MANO,
+        embodiment=HUMAN_SINGLE,
+        version="0.0.1",
+        branch="main",
+        chunk=1,
+        restructure=ModuleSpec.create("crossformer.data.grain.restructure:restructure_mano_percam"),
+    ),
+]
+
 # multi source
 MultiDataSource(
     name="xgym",
@@ -202,9 +219,10 @@ MultiDataSource(
     weights=XGYM_WEIGHTS,
 )
 
-sweep = [DataSource.REGISTRY["xgym_sweep_single"], DataSource.REGISTRY["sweep_mano"]]
-MultiDataSource(
-    name="xgym_sweep",
-    data=sweep,
-    weights=[1.0] * len(sweep),
-)
+# disabled along with the XGYM entries above — registry lookups would KeyError
+# sweep = [DataSource.REGISTRY["xgym_sweep_single"], DataSource.REGISTRY["sweep_mano"]]
+# MultiDataSource(
+#     name="xgym_sweep",
+#     data=sweep,
+#     weights=[1.0] * len(sweep),
+# )

@@ -18,7 +18,7 @@ from crossformer.data.grain.map import flatmap
 from crossformer.data.grain.write import add_episode_id, add_step_id, add_traj_len, BuildMGR, init_info
 
 
-@dataclass
+@dataclass(kw_only=True)
 class MyBuildMGR(BuildMGR):
     prep: PrepConfig
 
@@ -26,8 +26,8 @@ class MyBuildMGR(BuildMGR):
     version: str
     shard_size: int = 1000
 
-    fn: Callable = field(init=False)
-    builder: ArrayRecordBuilder = field(init=False)
+    fn: Callable = field(init=False, default=None)
+    builder: ArrayRecordBuilder = field(init=False, default=None)
 
     take: int | None = None  # debug. take n steps
 
@@ -57,8 +57,7 @@ def main(cfg: MyBuildMGR):
     # _extract = partial(extract_kp3d_ep, client=client)
     ds = ds.map(lambda x: x | {"observation": _extract(x["observation"])})
 
-    ds = ds.map(cfg.progress(total=total))
-    cfg.build(cfg.yield_from_ds(ds))
+    cfg.build(lambda: tqdm(ds, desc="building"))
 
 
 if __name__ == "__main__":
