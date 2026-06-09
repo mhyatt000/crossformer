@@ -533,6 +533,15 @@ _XARM_DREAM_IMG = ImageObs(primary="image")
 _XARM_DREAM_PROPRIO = ProprioObs(key="proprio", dim=8)  # joints(7) + gripper(1)
 
 xgym_lift = Dataset("xgym_lift_single", SINGLE, SourceType.TFDS, images=_XGYM_IMG, proprio=_XGYM_PROPRIO)
+
+# Dated lift recordings (pickup rig), AREC multisource. Same schema/fingerprint
+# (6b13789e43e54856) as the retired xgym_lift_single, provenance now in the name.
+xgym_lift_0507a = Dataset("xgym_lift_2026-05-07_1119_single", SINGLE, SourceType.AREC,
+                          images=_XGYM_IMG, proprio=_XGYM_PROPRIO, version="0.0.1", branch="main")
+xgym_lift_0507b = Dataset("xgym_lift_2026-05-07_1313_single", SINGLE, SourceType.AREC,
+                          images=_XGYM_IMG, proprio=_XGYM_PROPRIO, version="0.0.1", branch="main")
+xgym_lift_0525 = Dataset("xgym_lift_2026-05-25_1213_single", SINGLE, SourceType.AREC,
+                         images=_XGYM_IMG, proprio=_XGYM_PROPRIO, version="0.0.1", branch="main")
 xgym_duck = Dataset("xgym_duck_single", SINGLE, SourceType.TFDS, images=_XGYM_IMG, proprio=_XGYM_PROPRIO)
 xgym_stack = Dataset("xgym_stack_single", SINGLE, SourceType.TFDS, images=_XGYM_IMG, proprio=_XGYM_PROPRIO)
 xgym_sweep = Dataset(
@@ -584,7 +593,7 @@ lift1_mano = Dataset(
     SourceType.AREC,
     images=_MANO_IMG,
     proprio=_MANO_PROPRIO,
-    version="0.0.1",
+    version="0.0.2",  # multisource rebuild; see scripts/make_dset.py
     branch="main",
 )
 

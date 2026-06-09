@@ -159,7 +159,16 @@ def make_source_by_mix(
             x["language_embedding"] = np.zeros((512,), dtype=np.float32)
         return x
 
-    if isinstance(mix.source, MultiArrayRecordSource):
+    if isinstance(mix.source, MultiArrayRecordSource) and getattr(mix, "restructure", None) is not None:
+        # human multisource: MultiArrayRecordSource already windowed, stacked,
+        # and decoded the records (so NO unpack_record here). The restructure
+        # picks a camera per-sample and emits the (H,3) palm action + per-step
+        # visibility mask.
+        base_fn = ModuleSpec.instantiate(mix.restructure)
+        r = partial(base_fn, name=mix.name, lang_key=None)
+        ds = grain.MapDataset.source(mix.source).seed(42).map(r)
+
+    elif isinstance(mix.source, MultiArrayRecordSource):
         ds = (
             grain.MapDataset.source(mix.source)
             .seed(42)
@@ -346,8 +355,10 @@ class GrainDataFactory:
         self.stats[dconfig.name] = stats
         return ds
 
-    def pad_and_mix(self, dsets: list[GrainDataLoader]) -> GrainDataLoader:
+    def pad_and_mix(self, dsets: list[GrainDataLoader], weights: list[float] | None = None) -> GrainDataLoader:
         """pad datasets to same keys and mix them by weight"""
+        if weights is None:
+            weights = [1.0] * len(dsets)
         log.debug("mixing %d datasets", len(dsets))
 
         samples = [next(iter(ds)) for ds in dsets]
@@ -379,7 +390,7 @@ class GrainDataFactory:
                 assert not _d.get("changed"), ("mismatched shape on the same key", {"changed": _d["changed"]})
             # print(spec(a))
 
-        ds = grain.MapDataset.mix(dsets, weights=[1.0] * len(dsets))
+        ds = grain.MapDataset.mix(dsets, weights=weights)
         return ds
 
     def default_sharding(self):
@@ -417,7 +428,8 @@ class GrainDataFactory:
         log.debug("data mix: %s", cfg.data.mix.value)
         mix = cfg.data.mix.value.flatten()
         log.debug("flattened mix: %s", mix)
-        mix = [Arec.from_name(m[0]) for m in mix]  # m[1] is weights
+        weights = [w for _, w in mix]
+        mix = [Arec.from_name(name) for name, _ in mix]
         log.debug("arec sources: %s", mix)
 
         tfconfig = make_tfconfig(cfg)
@@ -438,7 +450,7 @@ class GrainDataFactory:
         # then interleave them
         else:
             dsets = [self.source2ds(dc, cfg, dataset=m, max_a=max_a) for (_, dc), m in zip(sources, mix)]
-            ds = self.pad_and_mix(dsets)
+            ds = self.pad_and_mix(dsets, weights=weights)
 
         ds = ds.seed(cfg.seed)
         if self.shuffle:

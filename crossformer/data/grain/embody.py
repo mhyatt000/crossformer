@@ -289,6 +289,17 @@ def embody_transform(
         shuffle_slot=shuffle_slot,
         valid_mask_dict=valid_mask_dict,
     )
+    # Per-timestep validity (human visibility / episode boundary), carried via
+    # mask.step_valid from the restructure. EVERY dataset emits act.valid so
+    # pad_and_mix sees a shared key — robot has no step_valid, so it defaults to
+    # all-True, which reduces chunk_steps to a plain arange downstream (no-op).
+    step_valid = sample.get("mask", {}).pop("step_valid", None)
+    horizon = np.asarray(block["act.base"]).shape[0]
+    block["act.valid"] = (
+        np.asarray(step_valid, dtype=bool).reshape(horizon)
+        if step_valid is not None
+        else np.ones(horizon, dtype=bool)
+    )
     block["act.embody"] = _encode_name(embodiment.name)
     sample.update(block)
     return sample
