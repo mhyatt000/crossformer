@@ -175,7 +175,7 @@ class MultiDataSource(DataSource):
 _ = (TFDS(name="xgym_duck_single", head=Head.SINGLE, embodiment=SINGLE),)
 
 XGYM = [
-    Arec(name="xgym_lift_single", head=Head.SINGLE, embodiment=SINGLE, version="0.0.1", branch="main"),
+    Arec(name="xgym_lift_single", head=Head.SINGLE, embodiment=SINGLE, version="0.0.1", branch="main", chunk=50),
 ]
 
 # Registered for action.py's xgym_specs lookups; kept out of XGYM because their cache dirs
@@ -212,32 +212,15 @@ HUMAN = [
     ),
 ]
 
-# robot + human co-train (PoC). Both leaf arecs are registered above; make()
-# builds each source independently — xgym_lift_single takes the multisource
-# branch, lift1_mano the restructure branch — within the same mix.
+# robot + human co-train (50/50). Robot is the single compounding
+# xgym_lift_single bucket — every lift recording piled into one arec via
+# `from_zarr --paths <session dirs...> --task lift` (mhyatt's one-store
+# convention; the version grows as recordings are added). Human is lift1_mano.
+# Each source builds independently within the mix: xgym_lift_single takes the
+# multisource branch, lift1_mano the restructure branch.
 MultiDataSource(
-    name="lift_robot_human",
+    name="lift_human",
     data=[XGYM[0], HUMAN[0]],  # xgym_lift_single, lift1_mano
-    weights=[0.8, 0.2],        # robot-heavy: human set is small + noisier
-)
-
-# 3 dated lift arecs replace the untraceable xgym_lift_single in training.
-# Same schema/fingerprint as xgym_lift_single, but provenance is in the name.
-LIFT = [
-    Arec(name="xgym_lift_2026-05-07_1119_single", head=Head.SINGLE, embodiment=SINGLE, version="0.0.1", branch="main", chunk=50),
-    Arec(name="xgym_lift_2026-05-07_1313_single", head=Head.SINGLE, embodiment=SINGLE, version="0.0.1", branch="main", chunk=50),
-    Arec(name="xgym_lift_2026-05-25_1213_single", head=Head.SINGLE, embodiment=SINGLE, version="0.0.1", branch="main", chunk=50),
-]
-LIFT_WEIGHTS = [len(a.source) for a in LIFT]  # size-weighted within robot
-LIFT_WEIGHTS = [w / sum(LIFT_WEIGHTS) for w in LIFT_WEIGHTS]
-
-# inner: 3 robot sets proportional to record count
-lift_robot = MultiDataSource(name="lift_robot3", data=LIFT, weights=LIFT_WEIGHTS)
-
-# outer: 50/50 robot vs human
-MultiDataSource(
-    name="lift3_human",
-    data=[lift_robot, HUMAN[0]],  # robot group + lift1_mano
     weights=[0.5, 0.5],
 )
 
