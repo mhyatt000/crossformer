@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import random
+import re
 from typing import Any, Iterator, Literal
 
 import cv2
@@ -24,6 +25,19 @@ from crossformer.utils.spec import spec
 from crossformer.utils.tree import flat, unflat
 
 
+def _next_version(name: str) -> str:
+    """Next patch version under ~/.cache/arrayrecords/<name>/, or 0.0.1 if empty."""
+    root = Path("~/.cache/arrayrecords").expanduser() / name
+    if not root.exists():
+        return "0.0.1"
+    versions = [v.name for v in root.iterdir() if v.is_dir()]
+    if not versions:
+        return "0.0.1"
+    latest = max(versions, key=lambda v: tuple(int(p) for p in v.split(".") if p.isdigit()))
+    major, minor, patch = latest.split(".")
+    return f"{major}.{minor}.{int(patch) + 1}"
+
+
 @dataclass
 class Config:
     path: Path
@@ -39,13 +53,28 @@ class Config:
     shard_size: int = 1000
     builder: ArrayRecordBuilder = field(init=False)
 
-    name: str = "zarr_steps"
-    version: str = "0.0.1"
+    # Output naming follows the xgym_<task>_single convention. --task is
+    # required; --name overrides only if explicitly set. Version is auto-
+    # bumped to the next patch when left blank, so each new recording lands
+    # in its own version dir under the shared task bucket.
+    task: str = tyro.MISSING
+    name: str = ""
+    version: str = ""
     branch: str = "main"
     writer: Literal["source", "multisource"] = "multisource"
     writers: WriterSpec = field(init=False)
 
+    # Thread count for grain-native parallel step reads. zarr I/O and
+    # cv2.imdecode both release the GIL, so a threadpool gives real
+    # parallelism with no process-spawn or pickle overhead. Tune up to
+    # ~allocated_cpus.
+    num_workers: int = 8
+
     def __post_init__(self) -> None:
+        if not self.name:
+            self.name = f"xgym_{self.task}_single"
+        if not self.version:
+            self.version = _next_version(self.name)
         self.writers = make_writers(self.writer)
         print(self)
 
@@ -88,6 +117,8 @@ class StepInfo:
 
 
 META_KEYS = {"format", "stamp_ns"}
+
+EPISODE_KEY_RE = re.compile(r"(?:.*_)?episode_(\d+)$")
 
 
 class ZarrLoader:
@@ -181,9 +212,9 @@ class ZarrLoader:
         keys = sorted(self.root.keys())
         if not keys:
             raise ValueError(f"empty zarr dataset: {self.path}")
-        bad = [k for k in keys if not self._is_episode_group(k)]
+        bad = [k for k in keys if not EPISODE_KEY_RE.match(k)]
         if bad:
-            raise ValueError(f"root keys must contain steps/topics groups; got {bad}")
+            raise ValueError(f"root keys must end with episode_<digits>; got {bad}")
         return tuple(keys)
 
     def _is_episode_group(self, key: str) -> bool:
@@ -205,6 +236,7 @@ class ZarrLoader:
         for episode_idx, ep_key in enumerate(self._episode_keys):
             ep = self.root[ep_key]
             n_steps = int(ep["steps"]["timestamp_ns"].shape[0])
+            episode_idx = int(EPISODE_KEY_RE.match(ep_key).group(1))
             lengths = self._topic_field_lengths(ep["topics"])
             min_len = min([n_steps, *lengths.values()])
             if self.missing == "error":
@@ -455,8 +487,29 @@ def main(cfg: Config) -> None:
             print(spec(ds[i]))
         return
 
-    ckpt = list(tqdm(ds, total=len(ds)))
+    # Grain-native threaded materialization: parallel step reads/decodes via
+    # a thread pool per episode. cv2.imdecode + zarr I/O release the GIL, so
+    # threads give real parallelism without process/pickle overhead. Outer
+    # source iterates episodes; inner source is a threaded read over that
+    # episode's step ids, then stacked into a single dict-of-arrays.
+    def _step_ids(ep: EpisodeInfo) -> list[int]:
+        return list(range(ep.start_idx, ep.start_idx + ep.n_valid))
+
+    def _read_step(global_idx: int) -> dict[str, Any]:
+        return loader._get_step(loader._steps[global_idx], global_idx)
+
+    read_opts = grain.ReadOptions(num_threads=cfg.num_workers, prefetch_buffer_size=300)
+
+    eps_ds = grain.MapDataset.source(loader._episodes)
+    eps_ds = eps_ds.map(_step_ids).map(
+        lambda sids: grain.MapDataset.source(sids).map(_read_step).to_iter_dataset(read_opts)
+    )
+    eps_ds = eps_ds.map(lambda it: jax.tree.map(lambda *xs: np.stack(xs), *list(it)))
+    eps_ds = eps_ds.map(lambda x: standardize(x, threshold=cfg.threshold))
+
+    ckpt = list(tqdm(eps_ds, total=loader.n_episodes, desc="materialize (threaded)"))
     remaining_after_missing = sum(ep.n_valid for ep in loader._episodes)
+
     n_step = sum(len(x["info"]["id"]["step"]) for x in tqdm(ckpt, total=len(ckpt)))
     noop_filtered = remaining_after_missing - n_step
     print(f"noop_filtered={noop_filtered}")
