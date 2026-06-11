@@ -55,11 +55,11 @@ def npstr2np(arr: np.ndarray) -> np.ndarray:
 
 def str2jax(s: str, device=None, length: int | None = None) -> jax.Array:
     """Encode a string as uint8 bytes, optionally zero-padded to a fixed length."""
-    return jnp.array(str2np(s, length=length), device=_resolve_device(device) or cpu())
+    return jnp.array(str2np(s, length=length), device=_resolve_device(device) or jax.devices("cpu")[0])
 
 
 def npstr2jax(arr: np.ndarray, device=None) -> jax.Array:
-    return jnp.array(npstr2np(arr), device=_resolve_device(device) or cpu())
+    return jnp.array(npstr2np(arr), device=_resolve_device(device) or jax.devices("cpu")[0])
 
 
 def jax2str(x: jax.Array) -> str:

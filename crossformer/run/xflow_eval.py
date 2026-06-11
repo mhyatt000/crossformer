@@ -8,6 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from crossformer.embody import DOF
+from crossformer.model.components.heads.dof import CHUNK_PAD
 from crossformer.run.train_step import lookup_guide
 from crossformer.utils.callbacks.viz import ActionBatchDenormalizer
 import wandb
@@ -41,7 +42,15 @@ def extract_bundled_actions(batch, max_h):
     bsz = actions.shape[0]
     horizon = actions.shape[2]
     dof_ids = batch["act"]["id"]
-    chunk_steps = jnp.tile(jnp.arange(horizon, dtype=jnp.float32)[None], (bsz, 1))
+    base_steps = jnp.arange(horizon, dtype=jnp.float32)[None]
+    # act.valid (B, H) marks real timesteps; invalid steps get CHUNK_PAD so
+    # build_query_mask drops them from the loss. Robot is all-True -> arange.
+    valid = batch["act"].get("valid")
+    if valid is not None:
+        valid = jnp.asarray(valid).reshape(bsz, horizon)
+        chunk_steps = jnp.where(valid > 0, base_steps, CHUNK_PAD)
+    else:
+        chunk_steps = jnp.tile(base_steps, (bsz, 1))
     return actions, dof_ids, chunk_steps
 
 
@@ -120,6 +129,8 @@ class XFlowEvalCallbacks:
     eval_frames: int
     use_guidance: bool
     guide_keys: tuple[str, ...]
+    synth_viz_cb: Any = None
+    synth_viz_every: int = 0
 
 
 @dataclass

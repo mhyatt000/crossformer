@@ -575,6 +575,19 @@ xarm_dream = Dataset(
     branch="main",
 )
 
+# Per-step human (MANO) arec built by scripts/make_dset.py. Palm xyz only
+# (HUMAN_SINGLE); restructure picks one camera view at random — see
+# restructure_mano_percam.
+lift1_mano = Dataset(
+    "lift1_mano",
+    HUMAN_SINGLE,
+    SourceType.AREC,
+    images=_MANO_IMG,
+    proprio=_MANO_PROPRIO,
+    version="0.0.2",  # multisource rebuild; see scripts/make_dset.py
+    branch="main",
+)
+
 # ---------------------------------------------------------------------------
 # Mix catalog
 # ---------------------------------------------------------------------------

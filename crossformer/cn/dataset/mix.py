@@ -175,12 +175,31 @@ class MultiDataSource(DataSource):
 _ = (TFDS(name="xgym_duck_single", head=Head.SINGLE, embodiment=SINGLE),)
 
 XGYM = [
-    Arec(name="xgym_lift_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.7", branch="main"),
+    Arec(name="xgym_lift_single", head=Head.SINGLE, embodiment=SINGLE, version="0.0.1", branch="main", chunk=50),
+]
+
+# Registered for action.py's xgym_specs lookups; kept out of XGYM because their cache dirs
+# are empty on this machine and XGYM_WEIGHTS would eagerly call .source on every entry.
+_ = (
     Arec(name="xgym_stack_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.5", branch="main"),
     Arec(name="xgym_sweep_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.6", branch="main"),
     Arec(name="sweep_mano", head=Head.MANO, embodiment=HUMAN_SINGLE, version="0.0.2", branch="to_step"),
-]
-XGYM_WEIGHTS = [len(x.source) for x in XGYM]  # size weighted rn, not uniform
+)
+def _arec_len(a: Arec) -> int:
+    """Record count for size-weighting; 1 if the arec isn't built yet.
+
+    mix.py is imported by from_zarr -- the very builder that *creates*
+    xgym_lift_single -- so a not-yet-built source must not crash the import
+    (chicken-and-egg). Falls back to a uniform weight of 1 until it exists.
+    """
+    try:
+        return len(a.source)
+    except FileNotFoundError:
+        log.warning("arec %r not built yet; using weight 1 for size-weighting", a.name)
+        return 1
+
+
+XGYM_WEIGHTS = [_arec_len(x) for x in XGYM]  # size weighted rn, not uniform
 XGYM_WEIGHTS = [w / sum(XGYM_WEIGHTS) for w in XGYM_WEIGHTS]
 
 NEW = [
@@ -195,6 +214,30 @@ NEW = [
     ),
 ]
 
+HUMAN = [
+    Arec(
+        name="lift1_mano",
+        head=Head.MANO,
+        embodiment=HUMAN_SINGLE,
+        version="0.0.2",  # multisource rebuild: image + proprio writers (all cams)
+        branch="main",
+        chunk=50,  # horizon must match the robot
+        restructure=ModuleSpec.create("crossformer.data.grain.restructure:restructure_mano_window"),
+    ),
+]
+
+# robot + human co-train (50/50). Robot is the single compounding
+# xgym_lift_single bucket — every lift recording piled into one arec via
+# `from_zarr --paths <session dirs...> --task lift` (mhyatt's one-store
+# convention; the version grows as recordings are added). Human is lift1_mano.
+# Each source builds independently within the mix: xgym_lift_single takes the
+# multisource branch, lift1_mano the restructure branch.
+MultiDataSource(
+    name="lift_human",
+    data=[XGYM[0], HUMAN[0]],  # xgym_lift_single, lift1_mano
+    weights=[0.5, 0.5],
+)
+
 # multi source
 MultiDataSource(
     name="xgym",
@@ -202,9 +245,10 @@ MultiDataSource(
     weights=XGYM_WEIGHTS,
 )
 
-sweep = [DataSource.REGISTRY["xgym_sweep_single"], DataSource.REGISTRY["sweep_mano"]]
-MultiDataSource(
-    name="xgym_sweep",
-    data=sweep,
-    weights=[1.0] * len(sweep),
-)
+# disabled along with the XGYM entries above — registry lookups would KeyError
+# sweep = [DataSource.REGISTRY["xgym_sweep_single"], DataSource.REGISTRY["sweep_mano"]]
+# MultiDataSource(
+#     name="xgym_sweep",
+#     data=sweep,
+#     weights=[1.0] * len(sweep),
+# )

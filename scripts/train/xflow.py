@@ -212,7 +212,6 @@ def main(cfg: Config):
         shard_dino(replicated_sharding, model_id=cfg.model.vision.dino_model_id)
         print("  dino: state replicated across devices")
 
-    max_h = cfg.horizon
     run = cfg.wandb.initialize(cfg)
 
     # Load data
@@ -266,8 +265,13 @@ def main(cfg: Config):
     if cfg.use_guidance:
         guide_example = lookup_guide(example_batch, cfg.guide_keys)
 
-    # Get max_a from the bundled action shape
+    # Infer max_a AND max_h from the real batch so the model matches the data
+    # horizon (the mix's chunk) exactly. cfg.horizon can no longer silently
+    # disagree with the loader (which caused the 50-vs-20 rearrange crash).
     max_a = example_batch["act"]["id"].shape[-1]
+    max_h = example_batch["act"]["base"].shape[1]
+    if max_h != cfg.horizon:
+        print(f"  [horizon] using data horizon={max_h}; cfg.horizon={cfg.horizon} ignored")
     print(f"  max_h={max_h}  max_a={max_a}")
     print(f"  act.base shape: {example_batch['act']['base'].shape}")
     print(f"  act.id   shape: {example_batch['act']['id'].shape}")
