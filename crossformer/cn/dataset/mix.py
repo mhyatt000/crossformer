@@ -185,7 +185,21 @@ _ = (
     Arec(name="xgym_sweep_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.6", branch="main"),
     Arec(name="sweep_mano", head=Head.MANO, embodiment=HUMAN_SINGLE, version="0.0.2", branch="to_step"),
 )
-XGYM_WEIGHTS = [len(x.source) for x in XGYM]  # size weighted rn, not uniform
+def _arec_len(a: Arec) -> int:
+    """Record count for size-weighting; 1 if the arec isn't built yet.
+
+    mix.py is imported by from_zarr -- the very builder that *creates*
+    xgym_lift_single -- so a not-yet-built source must not crash the import
+    (chicken-and-egg). Falls back to a uniform weight of 1 until it exists.
+    """
+    try:
+        return len(a.source)
+    except FileNotFoundError:
+        log.warning("arec %r not built yet; using weight 1 for size-weighting", a.name)
+        return 1
+
+
+XGYM_WEIGHTS = [_arec_len(x) for x in XGYM]  # size weighted rn, not uniform
 XGYM_WEIGHTS = [w / sum(XGYM_WEIGHTS) for w in XGYM_WEIGHTS]
 
 NEW = [
