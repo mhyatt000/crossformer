@@ -262,6 +262,8 @@ def compatibility(tree: dict):
     tree = rekey(tree, inp=side, out=[k.replace("image.side", "image_side") for k in side])
     worm = fnmatch.filter(tree.keys(), "*image.worm*")
     tree = rekey(tree, inp=worm, out=[k.replace("image.worm", "image_primary") for k in worm])
+    primary = fnmatch.filter(tree.keys(), "*image.primary*")
+    tree = rekey(tree, inp=primary, out=[k.replace("image.primary", "image_primary") for k in primary])
     low = fnmatch.filter(tree.keys(), "*image.low*")
     tree = rekey(tree, inp=low, out=[k.replace("image.low", "image_primary") for k in low])
     over = fnmatch.filter(tree.keys(), "*image.over*")
@@ -269,8 +271,10 @@ def compatibility(tree: dict):
     wrist = fnmatch.filter(tree.keys(), "*image.wrist*")
     tree = rekey(tree, inp=wrist, out=[k.replace("image.wrist", "image_left_wrist") for k in wrist])
 
-    # pad_mask_dict = fnmatch.filter(tree.keys(), "*pad_mask_dict.image*")
-    # tree = rekey(tree, inp=pad_mask_dict, out=[k.replace("pad_mask_dict.image", "pad_mask_dict") for k in pad_mask_dict])
+    pad_mask_dict = fnmatch.filter(tree.keys(), "*pad_mask_dict.image*")
+    tree = rekey(
+        tree, inp=pad_mask_dict, out=[k.replace("pad_mask_dict.image.", "pad_mask_dict.image_") for k in pad_mask_dict]
+    )
 
     overhead = list(fnmatch.filter(tree.keys(), "*overhead*"))
     tree = drop(tree, overhead)
@@ -282,6 +286,8 @@ def compatibility(tree: dict):
     # LANG
     language = fnmatch.filter(tree.keys(), "*language*")
     tree = rekey(tree, inp=language, out=[k.replace("language.embedding", "language_instruction") for k in language])
+    obs_language = list(fnmatch.filter(tree.keys(), "observation.language*"))
+    tree = drop(tree, obs_language)
 
     # PROPRIO
     proprio = fnmatch.filter(tree.keys(), "*proprio.*")
@@ -292,6 +298,10 @@ def compatibility(tree: dict):
     # tree = drop(tree, noprop)
 
     tree = unflat(tree)
+    obs = tree.get("observation", {})
+    pmd = obs.get("pad_mask_dict")
+    if pmd is not None and "image_primary" in obs and "image_primary" not in pmd:
+        pmd["image_primary"] = np.ones(obs["image_primary"].shape[:2], dtype=bool)
     return tree
 
 

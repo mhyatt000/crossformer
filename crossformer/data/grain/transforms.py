@@ -125,6 +125,53 @@ def batch_fn(xs: list[dict[Any]]):
     return tree
 
 
+def _first_leaf(tree):
+    if isinstance(tree, dict):
+        return _first_leaf(next(iter(tree.values())))
+    return _ensure_array(tree)
+
+
+def _chunk_action_leaf(action, *, n: int, action_horizon: int, history_indices: np.ndarray) -> np.ndarray:
+    action = _ensure_array(action)
+    if action.ndim == 1:
+        action = action[None]
+    if action.ndim == 2:
+        action_indices = np.arange(n)[:, None] + np.arange(action_horizon)[None, :]
+        action_indices = np.minimum(action_indices, n - 1)
+        action = action[action_indices]
+    else:
+        if action.shape[1] < action_horizon:
+            raise ValueError(
+                f"Pre-chunked action does not have enough horizon to satisfy requested action_horizon={action_horizon}."
+            )
+        action = action[:, :action_horizon]
+    return action[history_indices]
+
+
+def _chunk_action_tree(actions, *, n: int, action_horizon: int, history_indices: np.ndarray):
+    chunk = partial(_chunk_action_leaf, n=n, action_horizon=action_horizon, history_indices=history_indices)
+    if isinstance(actions, dict):
+        return jax.tree.map(chunk, actions)
+    return chunk(actions)
+
+
+def _action_pad_mask(actions, action_pad_mask, task_completed):
+    task_mask = ~task_completed[:, :, :, None]
+    if action_pad_mask is None and isinstance(actions, dict):
+        action_pad_mask = jax.tree.map(lambda a: np.ones_like(a, dtype=bool), actions)
+    elif action_pad_mask is None:
+        action_pad_mask = np.ones((*actions.shape[:-1], actions.shape[-1]), dtype=bool)
+    elif not isinstance(action_pad_mask, dict):
+        if action_pad_mask.ndim == 2:
+            action_pad_mask = action_pad_mask[:, None, None, :]
+        elif action_pad_mask.ndim == 3:
+            action_pad_mask = action_pad_mask[:, None, :, :]
+
+    if isinstance(action_pad_mask, dict):
+        return jax.tree.map(lambda m: np.logical_and(m, task_mask), action_pad_mask)
+    return np.logical_and(action_pad_mask, task_mask)
+
+
 def chunk_action_and_observation(
     traj: Trajectory,
     *,
@@ -135,7 +182,7 @@ def chunk_action_and_observation(
     """Chunks observations into histories and actions into windows."""
 
     actions = traj["action"]
-    n = actions.shape[0]
+    n = _first_leaf(actions).shape[0]
 
     def arange(*args, **kwargs):
         return np.arange(*args, **kwargs)
@@ -155,18 +202,7 @@ def chunk_action_and_observation(
     chunked_obs["timestep_pad_mask"] = timestep_pad_mask
     traj["observation"] = chunked_obs
 
-    if actions.ndim == 2:
-        action_indices = arange(n)[:, None] + arange(action_horizon)[None, :]
-        action_indices = np.minimum(action_indices, n - 1)
-        actions = actions[action_indices]
-    else:
-        if actions.shape[1] < action_horizon:
-            raise ValueError(
-                f"Pre-chunked action does not have enough horizon to satisfy requested action_horizon={action_horizon}."
-            )
-        actions = actions[:, :action_horizon]
-
-    actions = actions[history_indices]
+    actions = _chunk_action_tree(actions, n=n, action_horizon=action_horizon, history_indices=history_indices)
     traj["action"] = actions
     # pprint(spec({'action': actions}))
 
@@ -181,20 +217,8 @@ def chunk_action_and_observation(
     relative_goal = goal_timestep[:, None, None] - (t - (window_size + 1) + w + h)
     traj["observation"]["task_completed"] = relative_goal <= 0
 
-    action_pad_mask = traj.get("action_pad_mask")
-    # pprint(spec({'action_pad_mask': action_pad_mask}))
-    if action_pad_mask is None:
-        action_pad_mask = np.ones((*actions.shape[:-1], actions.shape[-1]), dtype=bool)
-    else:
-        action_pad_mask = action_pad_mask
-        if action_pad_mask.ndim == 2:
-            action_pad_mask = action_pad_mask[:, None, None, :]
-        elif action_pad_mask.ndim == 3:
-            action_pad_mask = action_pad_mask[:, None, :, :]
-
-    traj["action_pad_mask"] = np.logical_and(
-        action_pad_mask,
-        ~traj["observation"]["task_completed"][:, :, :, None],
+    traj["action_pad_mask"] = _action_pad_mask(
+        actions, traj.get("action_pad_mask"), traj["observation"]["task_completed"]
     )
     return traj
 

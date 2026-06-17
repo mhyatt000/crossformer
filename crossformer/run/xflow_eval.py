@@ -34,19 +34,41 @@ def flatten_obs(obs, obs_keys):
 
 def extract_bundled_actions(batch, max_h):
     """Extract bundled actions from grain embody pipeline."""
-    del max_h
     actions = batch["act"]["base"]
     if actions.ndim == 3:
         actions = actions[:, None, :, :]
-    bsz = actions.shape[0]
+    if actions.ndim != 4:
+        raise ValueError(f"Expected act.base ndim 3 or 4, got {actions.shape}")
+
     horizon = actions.shape[2]
+    if max_h and horizon != max_h:
+        if horizon > max_h:
+            actions = actions[:, :, :max_h]
+        elif horizon == 1:
+            actions = jnp.repeat(actions, max_h, axis=2)
+        else:
+            pad = jnp.repeat(actions[:, :, -1:], max_h - horizon, axis=2)
+            actions = jnp.concatenate([actions, pad], axis=2)
+        horizon = actions.shape[2]
+
+    bsz = actions.shape[0]
     dof_ids = batch["act"]["id"]
     chunk_steps = jnp.tile(jnp.arange(horizon, dtype=jnp.float32)[None], (bsz, 1))
     return actions, dof_ids, chunk_steps
 
 
-def adapt_canonical_batch(act, flow, dof_id_to_idx):
-    """Map bundled slot actions to a canonical DOF order."""
+def _match_np_horizon(x: np.ndarray, horizon: int) -> np.ndarray:
+    if x.shape[2] == horizon:
+        return x
+    if x.shape[2] > horizon:
+        return x[:, :, :horizon]
+    if x.shape[2] == 1:
+        return np.repeat(x, horizon, axis=2)
+    pad = np.repeat(x[:, :, -1:], horizon - x.shape[2], axis=2)
+    return np.concatenate([x, pad], axis=2)
+
+
+def _canonical_inputs(act, flow) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     base = np.asarray(act["base"], dtype=np.float32)
     dof_ids = np.asarray(act["id"])
     flow = np.asarray(flow, dtype=np.float32)
@@ -60,7 +82,13 @@ def adapt_canonical_batch(act, flow, dof_id_to_idx):
         raise ValueError(f"Expected act.id ndim 2, got {dof_ids.shape}")
     if base.shape[0] != dof_ids.shape[0] or flow.shape[1] != dof_ids.shape[0]:
         raise ValueError(f"Batch mismatch: base={base.shape} flow={flow.shape} dof_ids={dof_ids.shape}")
+    base = _match_np_horizon(base, flow.shape[3])
+    return base, flow, dof_ids
 
+
+def adapt_canonical_batch(act, flow, dof_id_to_idx):
+    """Map bundled slot actions to a canonical DOF order."""
+    base, flow, dof_ids = _canonical_inputs(act, flow)
     keep = []
     out_dim = len(dof_id_to_idx)
     base_joint = np.zeros((*base.shape[:-1], out_dim), dtype=np.float32)
@@ -113,9 +141,11 @@ class XFlowEvalCallbacks:
     viz_cb: Any
     rast_cb: Any
     val_mse_cb: Any
+    synth_viz_cb: Any
     wandb_log: Callable[..., None]
     hist_every: int
     viz_every: int
+    synth_viz_every: int
     val_every: int
     eval_frames: int
     use_guidance: bool
@@ -198,10 +228,10 @@ class XFlowEvalLoop:
     ) -> dict[str, Any]:
         obs = batch["observation"]
         task = batch.get("task", {"pad_mask_dict": {}})
-        _, dof_ids, chunk_steps = extract_bundled_actions(batch, max_h=0)
         guide_input = lookup_guide(batch, self.callbacks.guide_keys) if self.callbacks.use_guidance else None
 
         bound = model.module.bind({"params": params})
+        _, dof_ids, chunk_steps = extract_bundled_actions(batch, bound.heads["action"].max_horizon)
         transformer_outputs = bound.crossformer_transformer(
             obs,
             task,
@@ -268,22 +298,13 @@ class XFlowEvalLoop:
             ds_names = self.callbacks.chunk_cb.denorm.decode_dataset_names(
                 jax.device_get(batch["info"]["dataset_name"]),
             )
-            kept = np.asarray(rast_keep, dtype=np.int32)
-            n_take = min(frames_left, len(kept))
-            for local_idx in range(n_take):
-                ds_name = ds_names[int(kept[local_idx])]
-                chunk = rast_batch["predict"][-1, local_idx]
-                if chunk.ndim == 3:
-                    chunk = chunk[0]
-                chunk = denorm_canonical(chunk, self.callbacks.chunk_cb.denorm, ds_name, np.asarray(RAST_IDS))
-                traj_frames = self.callbacks.rast_cb.render_trajectory(chunk)
-                if per_cam is None:
-                    per_cam = [[] for _ in range(len(traj_frames))]
-                for ci, frame in enumerate(traj_frames):
-                    per_cam[ci].append(frame)
-                frames_left -= 1
-                if frames_left <= 0:
-                    break
+            per_cam, frames_left = self._append_rast_frames(
+                per_cam,
+                rast_batch,
+                rast_keep,
+                ds_names,
+                frames_left,
+            )
 
         if per_cam is None:
             return {}
@@ -294,12 +315,28 @@ class XFlowEvalLoop:
             out[f"rast/cam_{ci}"] = wandb.Video(np.moveaxis(video, -1, 1), fps=fps)
         return out
 
+    def _append_rast_frames(self, per_cam, rast_batch, rast_keep, ds_names, frames_left):
+        kept = np.asarray(rast_keep, dtype=np.int32)
+        for local_idx in range(min(frames_left, len(kept))):
+            ds_name = ds_names[int(kept[local_idx])]
+            chunk = rast_batch["predict"][-1, local_idx]
+            if chunk.ndim == 3:
+                chunk = chunk[0]
+            chunk = denorm_canonical(chunk, self.callbacks.chunk_cb.denorm, ds_name, np.asarray(RAST_IDS))
+            traj_frames = self.callbacks.rast_cb.render_trajectory(chunk)
+            if per_cam is None:
+                per_cam = [[] for _ in range(len(traj_frames))]
+            for ci, frame in enumerate(traj_frames):
+                per_cam[ci].append(frame)
+            frames_left -= 1
+        return per_cam, frames_left
+
     def _predict_flow(self, model, params, batch) -> np.ndarray:
         obs = batch["observation"]
         task = batch.get("task", {"pad_mask_dict": {}})
-        _, dof_ids, chunk_steps = extract_bundled_actions(batch, max_h=0)
         guide_input = lookup_guide(batch, self.callbacks.guide_keys) if self.callbacks.use_guidance else None
         bound = model.module.bind({"params": params})
+        _, dof_ids, chunk_steps = extract_bundled_actions(batch, bound.heads["action"].max_horizon)
         transformer_outputs = bound.crossformer_transformer(
             obs,
             task,
