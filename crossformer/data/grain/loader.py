@@ -33,6 +33,7 @@ from crossformer.data.grain.pipelines import (
     GrainDataLoader,
     TransformConfig,
 )
+from crossformer.data.grain.restructure import has_usable_keypoints
 from crossformer.data.grain.util.remap import _remap_lang, rekey
 from crossformer.utils.peace_and_quiet import (
     _set_worker_jax_cpu_env,
@@ -195,6 +196,7 @@ def make_source_by_mix(
             .map(drop_str)  # TODO refactor to drop_type(typ=str)
         )
 
+    ds = ds.filter(has_usable_keypoints)
     dsit = iter(ds)
     example = next(dsit)
 
