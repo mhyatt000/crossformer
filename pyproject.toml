@@ -7,9 +7,11 @@ module-root = ""
 
 [tool.uv.extra-build-dependencies]
 crossformer = ["uv_build"]
+nvdiffrast = [{ requirement = "torch", match-runtime = true }, "ninja"]
 
 [tool.uv]
 override-dependencies = [
+    "xarm-python-sdk @ git+https://github.com/mhyatt000/xArm-Python-SDK@0fb7f2a",
     # "tensorflow>=2.15.0",
     # "tensorflow<=2.18.0",
     # "typeguard>=4.0.0", # compatibility with tensorflow-addons
@@ -85,6 +87,7 @@ dependencies = [
     # "nvdiffrast",
     "nvdiffrast>=0.4.0",
     "zarr>=3.1.6",
+    "xarm-python-sdk>=1.17.3",
     "jax-bonsai",
     "fsspec>=2025.12.0",
     "filelock>=3.20.1",
@@ -107,6 +110,7 @@ dev = [
 webpolicy = { git = "https://github.com/mhyatt000/webpolicy" }
 pyroki = { git = "https://github.com/chungmin99/pyroki", rev = "2272d0ab8bf74026a2c8530b6b6174f3b19dcb97" }
 xclients = { git = "https://github.com/mhyatt000/xclients" , rev = '638c1db'}
+xarm-python-sdk = { git = "https://github.com/mhyatt000/xArm-Python-SDK", rev = "0fb7f2a" }
 jaxtyping = { git = "https://github.com/patrick-kidger/jaxtyping" }
 nvdiffrast = { git = "https://github.com/NVlabs/nvdiffrast.git" }
 jax-bonsai = { git = "https://github.com/jax-ml/bonsai" }
