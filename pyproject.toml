@@ -7,7 +7,10 @@ module-root = ""
 
 [tool.uv.extra-build-dependencies]
 crossformer = ["uv_build"]
-nvdiffrast = ["torch", "ninja"]
+nvdiffrast = [
+      { requirement = "torch", match-runtime = true },
+      "ninja",
+  ]
 
 [tool.uv]
 override-dependencies = [
@@ -23,6 +26,7 @@ override-dependencies = [
     "jaxtyping>=0.3.4",
     "numpy>=2.0",
     "protobuf>=5.28.3",  # diffren pins <4 (stale workaround); jax path doesn't import protobuf
+    "flax==0.12.2", # override jax-bonsai
 ]
 # reinstall-package = ["crossformer"] # ensure package is reinstalled in editable mode
 
