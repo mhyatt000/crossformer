@@ -7,7 +7,7 @@ module-root = ""
 
 [tool.uv.extra-build-dependencies]
 crossformer = ["uv_build"]
-nvdiffrast = [{ requirement = "torch", match-runtime = true }, "ninja"]
+nvdiffrast = ["torch", "ninja"]
 
 [tool.uv]
 override-dependencies = [
@@ -18,7 +18,7 @@ override-dependencies = [
     # "numpy", # compatibility with tf
     # "jax[cuda12]>=0.4.0", # compatibility with tf
     "jaxlib>=0.8,<0.9",
-    "jax[cuda12]>=0.8,<0.9",
+    "jax[cuda13]>=0.8,<0.9",
     "jax-dataclasses>=1.6.3",  # 1.6.2 uses removed jit kwarg `abstracted_axes`
     "jaxtyping>=0.3.4",
     "numpy>=2.0",
@@ -66,6 +66,7 @@ dependencies = [
     "python-box>=7.3.2",
     "augmax>=0.4.1",
     "more-itertools>=10.8.0",
+    "torch>=2.0",
     "torch2jax>=0.1.0",
     "pyroki",
     "jaxlie>=1.5.0",
@@ -80,7 +81,7 @@ dependencies = [
     "pyright>=1.1.408",
     "beartype>=0.22.9",
     "structlog>=25.5.0",
-    "jax[cuda12]>=0.8,<0.9",
+    "jax[cuda13]>=0.8,<0.9",
     "jaxlib>=0.8,<0.9",
     "dm-pix>=0.4.4",
     "pcax>=0.1.0",
@@ -116,6 +117,12 @@ nvdiffrast = { git = "https://github.com/NVlabs/nvdiffrast.git" }
 jax-bonsai = { git = "https://github.com/jax-ml/bonsai" }
 tips = { git = "https://github.com/mhyatt000/tips" }
 scenic = { git = "https://github.com/google-research/scenic" }
+torch = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
 
 [tool.pyright]
 typeCheckingMode = "basic"
