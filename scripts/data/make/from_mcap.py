@@ -2,35 +2,70 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import cv2
 import grain
+from grain._src.python.dataset.transformations.flatmap import FlatMapIterDataset
 import jax
 import numpy as np
 from rich import print
+from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 import tyro
 
+from crossformer.data.arec.arec import ArrayRecordBuilder, WriterSpec
 from crossformer.data.grain.loader import _apply_fd_limit
+from crossformer.data.grain.map import flatmap
+from crossformer.data.grain.write import BuildMGR
 from crossformer.data.mcap import McapLoader
+from crossformer.data.utils.trajectory import scan_noop
 from crossformer.utils.spec import diff, SimpleSpec, spec
 from crossformer.utils.tree import flat
 
 
+def make_writers(writer: Literal["source", "multisource"]) -> WriterSpec:
+    if writer == "source":
+        return {"data": ["*"]}
+    return {
+        "image": (["images"], {"options": "group_size:1"}),
+        "proprio": (["proprio", "info"], {"options": "group_size:32"}),
+    }
+
+
 @dataclass
-class Config:
+class MyBuildMGR(BuildMGR):
     path: Path
+    mode: Literal["preview", "build"] = "preview"
     preview: int | None = None  # n preview
     recursive: bool = True
     max_messages_per_topic: int | None = None
     read_threads: int = 32
     prefetch_buffer_size: int = 32
+    threshold: float = 1e-3
 
     verbose: bool = False
     vbar: bool = False  # show message-level progress bars
 
     mp: int = 4
     mp_buf: int = 4  # per worker buffer size
+
+    branch: str = "main"
+    writer: Literal["source", "multisource"] = "multisource"
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+
+    def build(self, fn) -> None:
+        print(self)
+        builder: ArrayRecordBuilder = ArrayRecordBuilder(
+            name=self.name,
+            version=self.version,
+            branch=self.branch,
+            shard_size=self.shard_size,
+            writers=make_writers(self.writer),
+        )
+        builder.prepare(fn)
 
 
 def first_spec_match():
@@ -57,46 +92,150 @@ def _constant(x, name: str):
     return x[0].item()
 
 
-def map_topic_payloads(tree: dict) -> dict:
-    """Replace known topic payloads with their useful data."""
-    out = {}
-    for key, value in tree.items():
-        if not isinstance(value, dict):
-            out[key] = value
-            continue
+def _raw_images(value: dict) -> np.ndarray:
+    data = value["data"]
+    h = _constant(data["height"], "height")
+    w = _constant(data["width"], "width")
+    step = _constant(data["step"], "step")
+    if step % w:
+        raise ValueError(f"RawImage step={step} is not divisible by width={w}")
+    c = step // w
+    images = data["data"]
+    if images.shape[1] != h * step:
+        raise ValueError(f"RawImage data width={images.shape[1]} does not match height x step={h * step}")
+    images = images.reshape(len(images), h, w, c)
+    if c == 2:
+        images = np.stack([cv2.cvtColor(image, cv2.COLOR_YUV2RGB_YUY2) for image in images])
+    return images
 
-        schema = value.get("schema")
-        if schema == "foxglove.JointStates":
-            out[key] = value["data"]["joints"]["position"]
-            continue
-        if schema == "foxglove.Pose":
-            out[key] = value["data"]
-            continue
-        if schema == "xclients.Gripper":
-            out[key] = value["data"]["norm"]
-            continue
-        if schema != "foxglove.RawImage":
-            out[key] = map_topic_payloads(value)
-            continue
 
-        data = value["data"]
-        h = _constant(data["height"], "height")
-        w = _constant(data["width"], "width")
-        step = _constant(data["step"], "step")
-        if step % w:
-            raise ValueError(f"RawImage step={step} is not divisible by width={w}")
-        c = step // w
-        images = data["data"]
-        if images.shape[1] != h * step:
-            raise ValueError(f"RawImage data width={images.shape[1]} does not match height x step={h * step}")
-        images = images.reshape(len(images), h, w, c)
-        if c == 2:
-            images = np.stack([cv2.cvtColor(image, cv2.COLOR_YUV2RGB_YUY2) for image in images])
-        out[key] = images
+def truncate_to_shortest_topic(tree: dict) -> dict:
+    """Truncate every topic to the shortest topic length."""
+    topics = tree["topics"]
+    if not topics:
+        raise ValueError("episode has no topics")
+    lengths = {key: len(value["log_time"]) for key, value in topics.items()}
+    n = min(lengths.values())
+    if not n:
+        raise ValueError(f"episode has an empty topic: {lengths}")
+
+    out = dict(tree)
+    out["topics"] = {
+        key: jax.tree.map(
+            lambda x: x[:n] if isinstance(x, np.ndarray) and x.ndim else x,
+            value,
+        )
+        for key, value in topics.items()
+    }
     return out
 
 
-def main(cfg: Config) -> None:
+def _pose(value: dict) -> tuple[np.ndarray, np.ndarray]:
+    data = value["data"]
+    position = np.stack([data["position"][key] for key in ("x", "y", "z")], axis=-1)
+    quaternion = np.stack([data["orientation"][key] for key in ("x", "y", "z", "w")], axis=-1)
+    position = (position / 1e3).astype(np.float32)
+    orientation = Rotation.from_quat(quaternion).as_euler("xyz").astype(np.float32)
+    return position, orientation
+
+
+def map_topic_payloads(tree: dict) -> dict:
+    """Group known MCAP topics into images and proprio."""
+    images = []
+    proprio = {}
+    other = {}
+    for key, value in tree["topics"].items():
+        schema = value["schema"]
+        if schema == "foxglove.JointStates":
+            proprio["joints"] = value["data"]["joints"]["position"]
+            continue
+        if schema == "foxglove.Pose":
+            proprio["position"], proprio["orientation"] = _pose(value)
+            continue
+        if schema == "xclients.Gripper":
+            proprio["gripper"] = np.asarray(value["data"]["norm"], dtype=np.float32)[:, None]
+            continue
+        if schema == "foxglove.RawImage":
+            images.append(_raw_images(value))
+            continue
+        other[key] = value
+
+    if not images:
+        raise ValueError("episode has no RawImage topics")
+    shapes = {image.shape for image in images}
+    if len(shapes) != 1:
+        raise ValueError(f"RawImage topics must share shape, got {sorted(shapes)}")
+
+    out = {key: value for key, value in tree.items() if key != "topics"}
+    out["images"] = np.stack(images, axis=1)
+    out["proprio"] = proprio
+    if other:
+        out["topics"] = other
+    return out
+
+
+def filter_noops(tree: dict, threshold: float = 1e-3) -> dict:
+    """Remove steps that are no-ops in both Cartesian and joint space."""
+    proprio = tree["proprio"]
+    gripper = proprio["gripper"]
+    pos = np.concatenate((proprio["position"], gripper), axis=-1)
+    jpos = np.concatenate((proprio["joints"], gripper), axis=-1)
+    mask = np.logical_and(
+        ~np.asarray(scan_noop(pos, threshold=threshold)),
+        ~np.asarray(scan_noop(jpos, threshold=threshold)),
+    )
+    n = len(mask)
+    print(f"mask | keep={sum(mask)} / total={n}")
+    return jax.tree.map(
+        lambda x: x[mask] if isinstance(x, np.ndarray) and x.ndim and len(x) == n else x,
+        tree,
+    )
+
+
+def add_episode_info(ds):
+    """Add contiguous IDs after filtering."""
+    global_step = 0
+    episode = 0
+
+    def add(tree: dict) -> dict:
+        nonlocal episode, global_step
+        n = len(tree["images"])
+        step = np.arange(n, dtype=np.int64)
+        info = tree["info"]
+        info.pop("episode", None)
+        info.pop("path", None)
+        info["id"] = {
+            "episode": np.full(n, episode, dtype=np.int64),
+            "step": step,
+            "global": step + global_step,
+        }
+        info["len"] = np.full(n, n, dtype=np.int64)
+        global_step += n
+        episode += 1
+        return tree
+
+    return ds.map(add)
+
+
+def make_dataset(loader: McapLoader, cfg: MyBuildMGR, stop: int | None = None):
+    ds = loader.iter_dataset(
+        read_threads=cfg.read_threads,
+        prefetch_buffer_size=min(cfg.prefetch_buffer_size, stop or len(loader)),
+        stop=stop,
+        show_message_progress=cfg.vbar,
+    )
+    ds = ds.map(truncate_to_shortest_topic)
+    ds = ds.map(map_topic_payloads)
+    ds = ds.map(lambda x: filter_noops(x, threshold=cfg.threshold))
+
+    lim = _apply_fd_limit(512**2)
+    ds = ds.mp_prefetch(
+        grain.MultiprocessingOptions(num_workers=cfg.mp, per_worker_buffer_size=cfg.mp_buf),
+    )
+    return add_episode_info(ds)
+
+
+def main(cfg: MyBuildMGR) -> None:
     loader = McapLoader(
         cfg.path,
         recursive=cfg.recursive,
@@ -105,26 +244,25 @@ def main(cfg: Config) -> None:
     print(f"Root: {loader.path}")
     print(f"n_episodes={len(loader)}")
 
-    n = max(0, min(cfg.preview, len(loader))) if cfg.preview else len(loader)
-    ds = loader.iter_dataset(
-        read_threads=cfg.read_threads,
-        prefetch_buffer_size=min(cfg.prefetch_buffer_size, n),
-        stop=n,
-        show_message_progress=cfg.vbar,
-    )
-    ds = ds.map(map_topic_payloads)
+    if cfg.mode == "preview":
+        n = len(loader) if cfg.preview in (None, -1) else min(cfg.preview, len(loader))
+        ds = make_dataset(loader, cfg, stop=n)
+        for i, x in enumerate(tqdm(ds, total=n, desc="Loading episodes", position=0)):
+            if cfg.verbose:
+                print(f"\n[bold]episode={i}[/bold]")
+            print(spec(x))
+        return
 
-    lim = _apply_fd_limit(512**2)
-    ds = ds.mp_prefetch(
-        grain.MultiprocessingOptions(num_workers=cfg.mp, per_worker_buffer_size=cfg.mp_buf),
+    total = sum(
+        int(x["info"]["len"][0]) for x in tqdm(make_dataset(loader, cfg), total=len(loader), desc="Counting steps")
     )
-    # ds = ds.map(first_spec_match())
+    print(f"total_steps={total}")
 
-    for i, x in enumerate(tqdm(ds, total=n, desc="Loading episodes", position=0)):
-        if cfg.verbose:
-            print(f"\n[bold]episode={i}[/bold]")
-        print(spec(x))
+    ds = make_dataset(loader, cfg)
+    ds = FlatMapIterDataset(ds, transform=flatmap.UnpackFlatMap(key="info.len", use_np=True))
+    ds = ds.map(cfg.progress(total))
+    cfg.build(cfg.yield_from_ds(ds))
 
 
 if __name__ == "__main__":
-    main(tyro.cli(Config))
+    main(tyro.cli(MyBuildMGR))
