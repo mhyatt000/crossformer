@@ -22,7 +22,7 @@ class ModelPolicy(BasePolicy):
     """Inference policy that loads a checkpoint and runs the xflow forward pass.
 
     Expects preprocessed batches with observation, task, and timestep_pad_mask.
-    DOF ids (j0..j6 + gripper) and chunk steps (arange 20) are hardcoded.
+    DOF ids (j0..j6 + gripper) are hardcoded.
     """
 
     # j0..j6 + gripper — the 8 DOFs used for arm+gripper inference
@@ -36,7 +36,6 @@ class ModelPolicy(BasePolicy):
         DOF["j6"],
         DOF["gripper"],
     )
-    _DEFAULT_CHUNK_STEPS: tuple[float, ...] = tuple(float(i) for i in range(20))
 
     def __init__(
         self,
@@ -47,12 +46,16 @@ class ModelPolicy(BasePolicy):
         guide_keys: tuple[str, ...] = ("action.position", "action.orientation"),
         use_guidance: bool = True,
         flow_steps: int | None = None,
+        horizon: int | None = None,
     ):
         self.model: CrossFormerModel = CrossFormerModel.load_pretrained(path, step=step)
         self.params = self.model.params
         self.head_name = head_name
         self.model.module.heads[head_name].flow_steps = (
             flow_steps if flow_steps is not None else self.model.heads[head_name].flow_steps
+        )
+        self.model.module.heads[head_name].max_horizon = (
+            horizon if horizon is not None else self.model.heads[head_name].max_horizon
         )
         self.guide_keys = guide_keys
         self.use_guidance = use_guidance
@@ -61,9 +64,10 @@ class ModelPolicy(BasePolicy):
         module = self.model.module
         head = module.bind({"params": self.params}).heads[head_name]
         self._dof_ids_1 = jnp.asarray(pad_dof_ids(self._DEFAULT_DOF_IDS, head.max_dofs))[None]  # (1, max_dofs)
-        self._chunk_steps_1 = jnp.asarray(
-            pad_chunk_steps(self._DEFAULT_CHUNK_STEPS, head.max_horizon), dtype=jnp.float32
-        )[None]  # (1, max_horizon)
+        chunk_steps = tuple(float(i) for i in range(head.max_horizon))
+        self._chunk_steps_1 = jnp.asarray(pad_chunk_steps(chunk_steps, head.max_horizon), dtype=jnp.float32)[
+            None
+        ]  # (1, max_horizon)
 
         @partial(jax.jit, static_argnames=("accumulate",))
         def _jit_step(params, obs, task, timestep_pad_mask, dof_ids, chunk_steps, guide_input, rng, accumulate=False):

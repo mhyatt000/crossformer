@@ -48,11 +48,13 @@ class Config(cn.Train):
     path: Path = tyro.MISSING
     step: int | None = None
     log_level: Literal["debug", "info", "warning", "error"] = "info"
+
+    use_guidance: bool = False
     guide_keys: tuple[str, ...] = ("action.position", "action.orientation")
+
     eval_frames: int = 64
     wandb: Wandb = default(Wandb(project="crossformer-server-viz"))
     rast: RastConfig = default(RastConfig())
-    use_guidance: bool = False
     host: str = "0.0.0.0"
     port: int | None = None
 
@@ -60,15 +62,34 @@ class Config(cn.Train):
     head_name: str = "action"
     mse_batches: int = 8
     replay_skip: int = 0
+    replay_take: float = 0.0
+    use_replay: bool = False
+    horizon: int = 20
 
 
 class ReplayObsWrapper(BasePolicy):
     """Use the next raw dataset batch as model input, ignoring request observations."""
 
-    def __init__(self, policy, ds_iter, *, skip: int = 0):
+    def __init__(self, policy, ds_iter, wandb_cfg: Wandb, *, skip: int = 0, take: float = 0.0):
+        if not 0.0 <= take < 1.0:
+            raise ValueError(f"replay take must satisfy 0 <= take < 1, got {take}")
         self.policy = policy
-        self.ds_iter = ds_iter
+        n = len(ds_iter)
+        if hasattr(ds_iter, "to_iter_dataset"):
+            ds_iter = ds_iter.to_iter_dataset(grain.ReadOptions(num_threads=4))
+        self.ds_iter = iter(ds_iter)
         self.skip = skip
+        self.take = take
+        self.wandb = wandb_cfg
+        self._log_step = 0
+        self._seek_to_take(n)
+
+    def _seek_to_take(self, n: int) -> None:
+        if self.take == 0.0:
+            return
+        start = int(n * self.take)
+        for _ in range(start):
+            next(self.ds_iter)
 
     def reset(self, payload: dict | None = None) -> dict | None:
         inner = getattr(self.policy, "inner", None)
@@ -79,6 +100,25 @@ class ReplayObsWrapper(BasePolicy):
     def warmup(self, *, accumulate: bool = False) -> dict:
         return self.step({}, accumulate=accumulate)
 
+    def _log_images(self, payload: dict, raw: dict) -> None:
+        log = {}
+        for source, tree in (("payload", payload), ("raw", raw)):
+            obs = tree.get("observation", {}) if isinstance(tree, dict) else {}
+            for key, val in flat(obs).items():
+                if "image" not in key or "mask" in key:
+                    continue
+                arr = np.asarray(val)
+                while arr.ndim > 3:
+                    arr = arr[0]
+                if arr.ndim != 3 or arr.shape[-1] not in (1, 3, 4):
+                    continue
+                if arr.dtype != np.uint8:
+                    arr = (arr * 255 if arr.max() <= 1.5 else arr).clip(0, 255).astype(np.uint8)
+                log[f"{source}/{key}"] = wandb.Image(arr)
+        if log:
+            self.wandb.log(log, step=self._log_step)
+            self._log_step += 1
+
     def step(self, payload: dict, **kwargs) -> dict:
         print()
         print(spec(payload))
@@ -87,10 +127,13 @@ class ReplayObsWrapper(BasePolicy):
         del raw["info"]
         print(spec(raw))
         print()
+        self._log_images(payload, raw)
         if "observation" in payload:
             ezvaldiff(raw, payload)
             raw["observation"]["proprio"] = payload["observation"]["proprio"]
-            raw["observation"]["image"] = payload["observation"]["image"]
+            # raw["observation"]["image"]['side'] = payload["observation"]["image"]['side']
+            # raw["observation"]["image"]['low'] = payload["observation"]["image"]['low']
+            # raw["observation"]["image"] = payload["observation"]["image"]
         for _ in range(self.skip):
             next(self.ds_iter)
         preprocessed = self.policy.preprocess_batch(raw)
@@ -292,6 +335,7 @@ def main(cfg: Config) -> None:
         guide_keys=cfg.guide_keys,
         use_guidance=cfg.use_guidance,
         flow_steps=cfg.flow_steps,
+        horizon=cfg.horizon,
     )
     policy = ActionDenormWrapper(policy, loader_full.statistics[arec.name], embodiment=arec.embodiment)
     policy = GrainlikeWrapper(
@@ -299,7 +343,9 @@ def main(cfg: Config) -> None:
         dataset_name=arec.name,
         embodiment=arec.embodiment,
         max_a=max_a,
-        stats=loader_full.statistics[arec.name],
+        stats=policy.unwrapped().model.dataset_statistics[
+            arec.name
+        ],  # use model stats not arec stats.. in case updated
         proprio_keys=proprio_keys,
         skip_norm_keys=cfg.data.transform.skip_norm_keys,
         resize_to=64,
@@ -336,9 +382,15 @@ def main(cfg: Config) -> None:
 
     # --- optional server ---
     if cfg.port is not None:
-        # policy = ReplayObsWrapper(policy,
-        # iter(make_source_by_mix(arec, cfg)[0].batch(1).to_iter_dataset(grain.ReadOptions(num_threads=4))) ,
-        # skip=cfg.replay_skip)
+        if cfg.use_replay:
+            replay_ds = make_source_by_mix(arec, cfg)[0].batch(1)
+            policy = ReplayObsWrapper(
+                policy,
+                replay_ds,
+                cfg.wandb,
+                skip=cfg.replay_skip,
+                take=cfg.replay_take,
+            )
         print(Rule("warmup"))
         policy.warmup()
         print(Rule(f"serving on {cfg.host}:{cfg.port}"))

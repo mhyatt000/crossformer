@@ -23,7 +23,7 @@ from crossformer.data.grain.pipelines import add_mask, compatibility, drop_str
 from crossformer.data.grain.util.remap import rekey
 from crossformer.embody import Embodiment
 from crossformer.run.wrappers import PolicyWrapper
-from crossformer.utils.jax_utils import str2jax
+from crossformer.utils.jax_utils import str2np
 from crossformer.utils.tree import drop, flat
 
 
@@ -68,7 +68,9 @@ class GrainlikeWrapper(PolicyWrapper):
         self.dataset_name = dataset_name
         self.embodiment = embodiment
         self.max_a = max_a
-        self.stats = stats
+        self.stats = (
+            stats if isinstance(stats, metadata.DatasetStatistics) else metadata.DatasetStatistics.from_json(stats)
+        )
         self.proprio_keys = proprio_keys
         self.skip_norm_keys = skip_norm_keys
         self.resize_to = resize_to
@@ -159,7 +161,7 @@ class GrainlikeWrapper(PolicyWrapper):
         # 10. add_head_action_mask (doesn't read action — only needs obs.timestep + dataset name)
         x = transforms.add_head_action_mask(x, name=self.dataset_name)
 
-        # 11. mix_precompatibility (crop, resize 224, rename worm->low, overhead->over)
+        # 11. mix_precompatibility (resize 224, rename worm->low, overhead->over)
         x = mix_precompatibility(x)
 
         # 12. unsqueeze proprio horizon
@@ -176,7 +178,7 @@ class GrainlikeWrapper(PolicyWrapper):
             )
 
         # 14. add_mask
-        x = add_mask(x)
+        x = add_mask(x, train=False)
 
         # 15. convert to numpy float32
         x = jax.tree.map(
@@ -214,8 +216,8 @@ class GrainlikeWrapper(PolicyWrapper):
         x["task"] = task
 
         # add dataset_name
-        x["dataset_name"] = str2jax(self.dataset_name)
-        x["info"]["dataset_name"] = str2jax(self.dataset_name)
+        x["dataset_name"] = jnp.asarray(str2np(self.dataset_name, length=32))
+        x["info"]["dataset_name"] = jnp.asarray(str2np(self.dataset_name, length=32))
 
         out = {
             "observation": x["observation"],
