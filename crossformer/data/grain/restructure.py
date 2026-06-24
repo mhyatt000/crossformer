@@ -9,6 +9,77 @@ import numpy as np
 
 from crossformer.utils.jax_utils import str2np
 
+ACTION_KEYS = ("joints", "gripper", "position", "orientation")
+LOWDIM_PROPRIO_KEYS = ACTION_KEYS
+KP_KEYS = ("kp3dc_robot", "kp3dw_robot")
+
+
+def has_usable_keypoints(x: dict) -> bool:
+    """False only when keypoint masks exist and all are empty."""
+    masks = x.get("mask", {}).get("proprio", {})
+    kp_masks = [np.asarray(masks[k]) for k in KP_KEYS if k in masks]
+    if "kp3dc_robot" in masks:
+        return bool(_valid_camera_mask(x).any())
+    return True if not kp_masks else any(bool(m.any()) for m in kp_masks)
+
+
+def _take_keys(x: dict, keys: tuple[str, ...]) -> dict:
+    return {k: x[k] for k in keys if k in x}
+
+
+def _as_action_tree(x: dict) -> dict:
+    return {k: np.asarray(v).reshape(1, -1) for k, v in _take_keys(x, ACTION_KEYS).items()}
+
+
+def _valid_camera_mask(x: dict) -> np.ndarray:
+    masks = x.get("mask", {})
+    proprio = masks.get("proprio", {})
+    cam = np.asarray(proprio.get("kp3dc_robot", []), dtype=bool)
+    if cam.ndim >= 2:
+        valid = cam.reshape(cam.shape[0], -1).any(axis=-1)
+    else:
+        image = np.asarray(x.get("image", []))
+        valid = np.ones(image.shape[:1], dtype=bool)
+
+    extr = masks.get("extr", {})
+    if "w2c" in extr:
+        valid = np.logical_and(valid, np.asarray(extr["w2c"], dtype=bool))
+    return valid
+
+
+def _select_primary_image(x: dict) -> None:
+    image = x.get("image")
+    if image is None:
+        return
+    image = np.asarray(image)
+    if image.ndim != 4:
+        return
+    valid = _valid_camera_mask(x)
+    idx = int(np.flatnonzero(valid)[0])
+    x["image"] = {"primary": image[idx]}
+
+
+def _wrap_observation_record(x: dict) -> dict:
+    """Wrap flat ARec observations into the trajectory schema."""
+    x = dict(x)
+    info = x.pop("info")
+    info = dict(info)
+    info.pop("reg", None)
+    action = x.pop("action", None)
+    _select_primary_image(x)
+    x.pop("extr", None)
+    x.pop("mask", None)
+    if "proprio" in x:
+        proprio = x["proprio"]
+        x["proprio"] = _take_keys(proprio, LOWDIM_PROPRIO_KEYS)
+        if action is None:
+            action = _as_action_tree(proprio)
+    return {
+        "observation": x,
+        "action": action,
+        "info": info,
+    }
+
 
 def _restructure_trajectory(
     step: dict,
@@ -16,6 +87,8 @@ def _restructure_trajectory(
     name: str,
     lang_key: str | None = None,
 ) -> dict:
+    if "observation" not in step:
+        step = _wrap_observation_record(step)
     info = step["info"]
     if "id" in info:
         info = info | info["id"]  # flatten id into info for backward compatibility

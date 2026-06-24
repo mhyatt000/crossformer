@@ -190,7 +190,11 @@ class RastConfig:
     invert_gripper: bool = True
 
     def create(self) -> RastCallback | None:
-        if self.urdf is None:
+        if self.urdf is None or not self.urdf.exists():
+            return None
+        if self.mesh_dir is not None and not self.mesh_dir.exists():
+            return None
+        if self.cams and not all(p.exists() for p in self.cams):
             return None
         return RastCallback(
             urdf=self.urdf,

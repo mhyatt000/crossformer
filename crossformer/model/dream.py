@@ -7,6 +7,7 @@ from tips.scenic.configs import tips_model_config
 from tips.scenic.models import tips, vit
 
 from crossformer.model.components.dpt import DPTConfig, DPTHead
+from crossformer.utils.spatial.solve import rotation_6d_to_matrix
 
 VGG19_BLOCKS = (
     (64, 2),
@@ -107,6 +108,45 @@ class MaskHead(nn.Module):
         return jax.nn.sigmoid(logits)
 
 
+def extrinsics_to_w2c(extr: jax.Array) -> jax.Array:
+    R = rotation_6d_to_matrix(extr[..., 3:9])
+    t = extr[..., 0:3]
+    eye = jnp.broadcast_to(jnp.eye(4, dtype=extr.dtype), (*extr.shape[:-1], 4, 4))
+    eye = eye.at[..., :3, :3].set(R)
+    eye = eye.at[..., :3, 3].set(t)
+    return eye
+
+
+def _identity_extrinsics_bias(_key, shape, dtype=jnp.float32):
+    bias = jnp.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0], dtype=dtype)
+    return jnp.broadcast_to(bias, shape)
+
+
+class ExtrinsicsHead(nn.Module):
+    hidden_dim: int = 256
+    q_dim: int = 64
+    depth: int = 2
+
+    @nn.compact
+    def __call__(self, x, q):
+        x = jnp.mean(x, axis=(1, 2))
+
+        q = q.astype(x.dtype)
+        q_joint = q[..., :7] / 180.0
+        q_extra = q[..., 7:]
+        q = jnp.concatenate([q_joint, q_extra], axis=-1)
+
+        q = nn.Dense(self.q_dim, name="q_proj")(q)
+        q = nn.relu(q)
+
+        x = jnp.concatenate([x, q], axis=-1)
+        for i in range(self.depth):
+            x = nn.Dense(self.hidden_dim, name=f"fc{i + 1}")(x)
+            x = nn.relu(x)
+
+        return nn.Dense(9, bias_init=_identity_extrinsics_bias, name="out")(x)
+
+
 class SoftArgmaxPavlo(nn.Module):
     num_keypoints: int
     learned_beta: bool = True
@@ -141,6 +181,7 @@ class DreamHourglass(nn.Module):
     internalize_spatial_softmax: bool = False
     learned_beta: bool = True
     initial_beta: float = 1.0
+    predict_extrinsics: bool = False
 
     def setup(self):
         if self.output_scale not in {"quarter", "half", "full"}:
@@ -213,26 +254,35 @@ class DreamHourglass(nn.Module):
         stages.append(("dpt_decoder", x))
         return x
 
-    @nn.compact
-    def __call__(self, x):
-        stages = []
-        enc = self._encoder(x, stages)
+    def _decoder(self, enc, stages):
         if self.decoder == "dpt":
-            x = self._dpt_decoder(enc, stages)
-        elif self.decoder == "deconv" or self.deconv_decoder:
-            x = self._deconv_decoder(enc, stages)
-        else:
-            x = self._upsample_decoder(enc, stages)
+            return self._dpt_decoder(enc, stages)
+        if self.decoder == "deconv" or self.deconv_decoder:
+            return self._deconv_decoder(enc, stages)
+        return self._upsample_decoder(enc, stages)
 
-        heatmaps = HeatmapHead(self.num_keypoints, name="heads_0")(x)
-        stages.append(("heatmaps", heatmaps))
-        mask = MaskHead(name="mask_head")(x) if self.decoder == "dpt" else None
+    def _extrinsics(self, x, q, stages):
+        if not self.predict_extrinsics:
+            return None
+        if q is None:
+            raise ValueError("q is required when predict_extrinsics=True")
+        extrinsics = ExtrinsicsHead(name="extrinsics_head")(x, q)
+        stages.append(("extrinsics", extrinsics))
+        return extrinsics
+
+    def _pack_output(self, heatmaps, mask, extrinsics):
+        if mask is None and extrinsics is None:
+            return heatmaps
+
+        out = {"heatmaps": heatmaps}
         if mask is not None:
-            stages.append(("mask", mask))
-        if not self.internalize_spatial_softmax:
-            out = {"heatmaps": heatmaps, "mask": mask} if mask is not None else heatmaps
-            return out, tuple((name, arr.shape) for name, arr in stages)
+            out["mask"] = mask
+        if extrinsics is not None:
+            out["extrinsics"] = extrinsics
+            out["w2c"] = extrinsics_to_w2c(extrinsics)
+        return out
 
+    def _pack_softmax_output(self, heatmaps, mask, extrinsics, stages):
         keypoints = SoftArgmaxPavlo(
             self.num_keypoints,
             learned_beta=self.learned_beta,
@@ -243,6 +293,29 @@ class DreamHourglass(nn.Module):
         out = {"heatmaps": heatmaps, "keypoints": keypoints}
         if mask is not None:
             out["mask"] = mask
+        if extrinsics is not None:
+            out["extrinsics"] = extrinsics
+            out["w2c"] = extrinsics_to_w2c(extrinsics)
+        return out
+
+    @nn.compact
+    def __call__(self, x, q=None):
+        stages = []
+        enc = self._encoder(x, stages)
+        x = self._decoder(enc, stages)
+
+        heatmaps = HeatmapHead(self.num_keypoints, name="heads_0")(x)
+        stages.append(("heatmaps", heatmaps))
+        mask = MaskHead(name="mask_head")(x) if self.decoder == "dpt" else None
+        if mask is not None:
+            stages.append(("mask", mask))
+        extrinsics = self._extrinsics(x, q, stages)
+
+        if not self.internalize_spatial_softmax:
+            out = self._pack_output(heatmaps, mask, extrinsics)
+            return out, tuple((name, arr.shape) for name, arr in stages)
+
+        out = self._pack_softmax_output(heatmaps, mask, extrinsics, stages)
         return out, tuple((name, arr.shape) for name, arr in stages)
 
 
@@ -257,13 +330,14 @@ class DreamHourglassMultiStage(nn.Module):
     internalize_spatial_softmax: bool = False
     learned_beta: bool = True
     initial_beta: float = 1.0
+    predict_extrinsics: bool = False
 
     def setup(self):
         if not 1 <= self.n_stages <= 6:
             raise ValueError("DREAM supports 1 to 6 stages")
 
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x, q=None):
         outputs = []
         shapes = []
         stage_input = x
@@ -284,8 +358,9 @@ class DreamHourglassMultiStage(nn.Module):
                 internalize_spatial_softmax=self.internalize_spatial_softmax,
                 learned_beta=self.learned_beta,
                 initial_beta=self.initial_beta,
+                predict_extrinsics=self.predict_extrinsics,
                 name=f"stage{i + 1}",
-            )(stage_input)
+            )(stage_input, q=q)
             outputs.append(out)
             shapes.extend((f"stage{i + 1}/{name}", shape) for name, shape in stage_shapes)
             prev_heatmaps = out["heatmaps"] if isinstance(out, dict) else out
@@ -304,6 +379,7 @@ class DreamVGG(nn.Module):
     internalize_spatial_softmax: bool = False
     learned_beta: bool = True
     initial_beta: float = 1.0
+    predict_extrinsics: bool = False
 
     def setup(self):
         if self.variant not in {"quarter", "half", "full"}:
@@ -326,7 +402,7 @@ class DreamVGG(nn.Module):
         return decoder, deconv_decoder, full_output
 
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x, q=None):
         decoder, deconv_decoder, full_output = self._decoder_config()
         return DreamHourglassMultiStage(
             self.num_keypoints,
@@ -339,8 +415,9 @@ class DreamVGG(nn.Module):
             internalize_spatial_softmax=self.internalize_spatial_softmax,
             learned_beta=self.learned_beta,
             initial_beta=self.initial_beta,
+            predict_extrinsics=self.predict_extrinsics,
             name="dream",
-        )(x)
+        )(x, q=q)
 
 
 class DreamTIPS(nn.Module):
