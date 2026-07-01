@@ -19,6 +19,16 @@ select = [  # list of rule codes Ruff should check
     #
     "T10",  # flake8-debugger: breakpoint()/pdb/ipdb/etc.
     "T20",  # flake8-print: print()/pprint()
+    #
+    "ANN001", # missing type annotations
+    "ANN002", # missing *args
+    "ANN003", # missing **kwargs
+    "ANN201", # missing for public
+    "ANN202", # missing for private
+    "ANN204", # missing __magic__
+    "ANN205", # missing for static
+    "ANN206", # missing for class
+    # "ANN401", # disallow Any
 ]
 ignore = [ # exceptions to select
     "E741",   # ambiguous variable name (like l, O, I)
