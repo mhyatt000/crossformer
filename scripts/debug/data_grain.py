@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import gc
 import logging
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import grain
 import jax
@@ -51,7 +51,7 @@ def main(cfg: Config) -> None:
     replicated_sharding = NamedSharding(mesh, PartitionSpec())
 
     # @deprecate('let grain do it', strict=False)
-    def do_shard(batch):
+    def do_shard(batch: Any) -> Any:
         return multihost_utils.host_local_array_to_global_array(batch, mesh, PartitionSpec("batch"))
 
     if True:
@@ -98,7 +98,6 @@ def main(cfg: Config) -> None:
         if i % 1000 == 0:
             print(spec(x))
 
-    del x
     del batch
     del dsit
     del dataset  # threads arent daemon
