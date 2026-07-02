@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 import importlib
+from pathlib import Path
 from typing import Any, Hashable, Iterable, TypedDict
 
 import jax
@@ -215,6 +216,86 @@ class ModuleSpec(TypedDict):
             f"{', ' if spec['args'] and spec['kwargs'] else ''}"
             f"{', '.join(f'{k}={v}' for k, v in spec['kwargs'].items())})"
         )
+
+
+@dataclass
+class ModuleFile:
+    """Load ``ModuleSpec``s from a YAML file in one go.
+
+    A *spec entry* is a mapping that identifies a callable via either:
+      - ``module`` + ``name`` keys, or
+      - a ``_target_`` string of the form ``"pkg.module:Name"`` (split on ``:``).
+
+    Any remaining keys in that mapping become ``kwargs`` (inline style), while
+    explicit ``args`` / ``kwargs`` keys are honored if present.
+
+    ``load`` mirrors the shape of the document:
+      - if the top-level node is itself a spec entry, it returns a single
+        ``ModuleSpec``;
+      - otherwise it traverses the top-level dict/list and returns a matching
+        dict/list where any spec-like subentries are replaced by ``ModuleSpec``s
+        (non-spec leaves are passed through unchanged).
+
+    Example::
+
+        >>> ModuleFile.load("config/normalize.yaml")
+        {'kp3dc_robot': {'module': 'crossformer.data.grain.meta', 'name': 'TMPCLASS',
+                         'args': (), 'kwargs': {'agg': 0, 'mask': [...]}}, ...}
+    """
+
+    path: Path
+
+    @classmethod
+    def load(cls, path: str | Path) -> ModuleSpec | dict[Any, Any] | list[Any]:  # type: ignore[valid-type]
+        """Read ``path`` as YAML and build ``ModuleSpec``(s) from it."""
+        return cls(Path(path)).parse()
+
+    def read(self) -> Any:
+        import yaml
+
+        with open(self.path) as f:
+            return yaml.safe_load(f)
+
+    def parse(self) -> ModuleSpec | dict[Any, Any] | list[Any]:  # type: ignore[valid-type]
+        return self._parse(self.read())
+
+    @classmethod
+    def _parse(cls, node: Any) -> Any:
+        spec = cls._as_spec(node)
+        if spec is not None:
+            return spec
+        if isinstance(node, dict):
+            return {k: cls._parse(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [cls._parse(v) for v in node]
+        return node
+
+    @classmethod
+    def _as_spec(cls, node: Any) -> ModuleSpec | None:  # type: ignore[valid-type]
+        """Return a ``ModuleSpec`` if ``node`` is a spec mapping, else ``None``.
+
+        Nested spec mappings inside ``args``/``kwargs`` are resolved recursively,
+        so a spec's arguments may themselves be ``ModuleSpec``s.
+        """
+        if not isinstance(node, dict):
+            return None
+
+        d = dict(node)  # shallow copy — we pop identifying keys off it
+        if "_target_" in d:
+            target = d.pop("_target_")
+            assert isinstance(target, str) and target.count(":") == 1, (
+                f"_target_ must be a fully qualified 'module:name' string, got {target!r}"
+            )
+            module, name = target.split(":")
+        elif "module" in d and "name" in d:
+            module, name = d.pop("module"), d.pop("name")
+        else:
+            return None
+
+        args = tuple(cls._parse(a) for a in (d.pop("args", ()) or ()))
+        kwargs = {**(d.pop("kwargs", {}) or {}), **d}  # explicit kwargs + inline keys
+        kwargs = {k: cls._parse(v) for k, v in kwargs.items()}  # resolve nested specs
+        return ModuleSpec(module=module, name=name, args=args, kwargs=kwargs)
 
 
 def _infer_full_name(o: object):
