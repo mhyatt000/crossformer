@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import collections
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 import hashlib
@@ -12,7 +12,7 @@ import logging
 import os
 from pathlib import Path
 import threading
-from typing import Any, Generic, Iterable, Sequence, TypeVar
+from typing import Any, Generic, Iterable, overload, Sequence, TypeVar
 
 from array_record.python.array_record_data_source import ArrayRecordDataSource
 import grain
@@ -20,16 +20,17 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from rich.pretty import pprint
+from typing_extensions import override
 
 from crossformer.data.arec.arec import unpack_record
 from crossformer.data.grain.util.deco import logbar
 from crossformer.utils.jax_utils import npstr2jax, str2jax
 
 log = logging.getLogger(__name__)
-_cpu_device = None
+_cpu_device: jax.Device | None = None
 
 
-def _grain_cpu_device():
+def _grain_cpu_device() -> jax.Device:
     global _cpu_device
     if _cpu_device is None:
         _cpu_device = jax.devices("cpu")[0]
@@ -51,10 +52,10 @@ class _DecodedArrayRecord:
     def __len__(self) -> int:  # pragma: no cover - simple delegation
         return len(self._ds)
 
-    def __getitem__(self, index: int):  # pragma: no cover - simple delegation
+    def __getitem__(self, index: int) -> dict[str, Any]:  # pragma: no cover - simple delegation
         return unpack_record(self._ds[index])
 
-    def __getitems__(self, indices: Sequence[int]) -> list[dict]:
+    def __getitems__(self, indices: Sequence[int]) -> Sequence[Any]:
         if self._unpack:
             return [unpack_record(x) for x in self._ds.__getitems__(indices)]
         return self._ds.__getitems__(indices)
@@ -67,6 +68,13 @@ def _sample_goal_offset(rng: np.random.Generator, max_offset: int, decay: float 
         return 0
     k = min(int(rng.geometric(decay)), max_offset)
     return k
+
+
+def flatten_info_leaf(x: Any) -> np.ndarray:
+    arr = np.asarray(x)
+    if arr.ndim:
+        arr = arr[0]
+    return arr.reshape(-1)
 
 
 class MultiArrayRecordSource:
@@ -106,7 +114,7 @@ class MultiArrayRecordSource:
     def __len__(self) -> int:
         return self._n - self._chunk + 1
 
-    def __getitem__(self, i: int) -> dict:
+    def __getitem__(self, i: int) -> dict[str, Any]:
         # image: single step
         img_rec = unpack_record(self._img[i])
 
@@ -115,8 +123,7 @@ class MultiArrayRecordSource:
         idxs = list(range(i, end))
         pro_recs = [unpack_record(b) for b in self._pro.__getitems__(idxs)]
 
-        info = {"info": pro_recs[0].pop("info")}  # dont stack infos across episodes
-        info = jax.tree.map(lambda y: y[0].reshape(-1), info)
+        info = {"info": jax.tree.map(flatten_info_leaf, pro_recs[0].pop("info"))}  # dont stack infos across episodes
         for p in pro_recs:
             p.pop("info") if "info" in p else 0
 
@@ -133,20 +140,20 @@ class MultiArrayRecordSource:
 
         return out
 
-    def __getitems__(self, indices: Sequence[int]) -> list[dict]:
+    def __getitems__(self, indices: Sequence[int]) -> list[dict[str, Any]]:
         return [self[i] for i in indices]
 
 
-def scalar(x):
+def scalar(x: Any) -> int:
     return int(np.asarray(x).reshape(-1)[0])
 
 
-def stack(xs):
+def stack(xs: Sequence[Any]) -> Any:
     return jax.tree.map(lambda *ys: np.stack(ys), *xs)
 
 
-def strip_info(xs):
-    out = []
+def strip_info(xs: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
     for x in xs:
         x = dict(x)
         x.pop("info", None)
@@ -154,18 +161,18 @@ def strip_info(xs):
     return out
 
 
-def decode(x):
+def decode(x: Any) -> Any:
     return unpack_record(x) if isinstance(x, bytes) else x
 
 
-def decode_many(src, idxs: Sequence[int]):
+def decode_many(src: Any, idxs: Sequence[int]) -> list[Any]:
     if hasattr(src, "__getitems__"):
         return [decode(x) for x in src.__getitems__(list(idxs))]
     return [decode(src[i]) for i in idxs]
 
 
 class EpisodeArrayRecordSource:
-    def __init__(self, img_src, pro_src=None, *, max_index: int | None = None):
+    def __init__(self, img_src: Any, pro_src: Any = None, *, max_index: int | None = None) -> None:
         self.img_src = img_src
         self.pro_src = pro_src or img_src
         assert len(self.img_src) == len(self.pro_src), "image and proprio sources must align"
@@ -175,7 +182,7 @@ class EpisodeArrayRecordSource:
         self.eid_map = {eid: (start, end) for start, end, eid in zip(self.starts, self.ends, self.eids)}
 
     @classmethod
-    def from_mix(cls, mix, *, max_index: int | None = None):
+    def from_mix(cls, mix: Any, *, max_index: int | None = None) -> EpisodeArrayRecordSource:
         builder = mix.builder
         meta = builder.meta
         writers = meta.get("writers", {})
@@ -185,13 +192,13 @@ class EpisodeArrayRecordSource:
             return cls(builder.get_source("image"), builder.get_source("proprio"), max_index=max_index)
         return cls(builder.source, max_index=max_index)
 
-    def _step(self, i):
+    def _step(self, i: int) -> Any:
         return decode(self.pro_src[i])
 
-    def _seek_episodes(self):
-        starts = []
-        ends = []
-        eids = []
+    def _seek_episodes(self) -> tuple[list[int], list[int], list[int]]:
+        starts: list[int] = []
+        ends: list[int] = []
+        eids: list[int] = []
         i = 0
         stop = self.n_steps if self.max_index is None else min(self.max_index, self.n_steps)
         while i < stop:
@@ -214,22 +221,22 @@ class EpisodeArrayRecordSource:
 
         return starts, ends, eids
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.starts)
 
-    def meta(self, ep_i):
+    def meta(self, ep_i: int) -> dict[str, int]:
         start = self.starts[ep_i]
         end = self.ends[ep_i]
         return {"start": start, "end": end, "eid": self.eids[ep_i], "records": end - start}
 
-    def _pack(self, imgs, pros):
+    def _pack(self, imgs: Sequence[dict[str, Any]], pros: Sequence[dict[str, Any]]) -> dict[str, Any]:
         info = stack([p["info"] for p in pros])
         return {**stack(strip_info(imgs)), **stack(strip_info(pros)), "info": info}
 
-    def __getitem__(self, ep_i):
+    def __getitem__(self, ep_i: int) -> dict[str, Any]:
         return self.__getitems__([ep_i])[0]
 
-    def __getitems__(self, ep_indices: Sequence[int]):
+    def __getitems__(self, ep_indices: Sequence[int]) -> list[dict[str, Any]]:
         if not ep_indices:
             return []
         ranges = [(self.starts[i], self.ends[i]) for i in ep_indices]
@@ -246,7 +253,7 @@ class EpisodeArrayRecordSource:
         return [stack(xs[cuts[i] : cuts[i + 1]]) for i in range(len(sizes))]
 
 
-def _postprocess_episode(items: Sequence[dict[str, Any]], device=None, steps=True) -> Sequence[dict[str, jnp.Array]]:
+def _postprocess_episode(items: Sequence[dict[str, Any]], device: Any = None, steps: bool = True) -> Any:
     """postprocess msgpack-decoded episode data into jax arrays.
     unfortunately cannot jit this"""
 
@@ -257,30 +264,29 @@ def _postprocess_episode(items: Sequence[dict[str, Any]], device=None, steps=Tru
             return npstr2jax(x, device=device)
         return x
 
-    def stack_items(*xs):
+    def stack_items(*xs: Any) -> jax.Array:
         return jnp.stack(xs)
 
     items = jax.tree.map(maybe_str2jax, items)
     items = jax.tree.map(partial(jnp.array, device=device or _grain_cpu_device()), items)
     # we dont stack if it is stepwise
-    return items if not steps else jax.tree.map(stack_items, *_items)
+    return items if not steps else jax.tree.map(stack_items, *items)
 
 
 class EpisodeInfo:
-    def __init__(self, ds, mix, *, cache: bool = True, cache_dir: Path | None = None):
+    def __init__(self, ds: Any, mix: Any, *, cache: bool = True, cache_dir: Path | None = None) -> None:
         self.ds = ds
         self._cache_enabled = cache
         self.mix = mix
         self.shards = mix.get_shards()
         self._cache_dir = self._resolve_cache_dir(cache_dir)
-
-        # self._episode_indices = self.get_lengths()
+        self._episode_indices = self.get_lengths()
 
     def get_lengths(self) -> list[list[int]]:
         cached = self._load_cached_indices()
         return cached if cached else self.do_lengths()
 
-    def do_lengths(self):
+    def do_lengths(self) -> list[list[int]]:
         log.info("No cached episode indices found; grouping from scratch.")
 
         _bs = 1024
@@ -291,15 +297,16 @@ class EpisodeInfo:
         )
         mpit = iter(mpds)
 
-        lengths = collections.defaultdict(int)
+        lengths: collections.defaultdict[int, int] = collections.defaultdict(int)
         for x in logbar(mpit, desc="Computing episode lengths...", total=len(self.ds)):
             eid = int(x["episode_id"])
             sid = int(x["step_id"])
             lengths[eid] = max(lengths[eid], sid + 1)
 
-        self._store_cached_indices(lengths)
-        log.info(f"Cached idxs: {len(cached)}ep : {sum([len(x) for x in cached])}it")
-        return lengths
+        indices = [list(range(lengths[eid])) for eid in sorted(lengths)]
+        self._store_cached_indices(indices)
+        log.info(f"Cached idxs: {len(indices)}ep : {sum([len(x) for x in indices])}it")
+        return indices
 
     def _resolve_cache_dir(self, cache_dir: Path | None) -> Path:
         if cache_dir is not None:
@@ -326,14 +333,16 @@ class EpisodeInfo:
     @property
     def path(self) -> Path | None:
         key = self._cache_key()
+        if not self._cache_enabled or key is None:
+            return None
         d = self._cache_dir / self.mix.loc / str(key) / "episode_indices.json"
-        return None if not self._cache_enabled and key else d
+        return d
 
     def _load_cached_indices(self) -> list[list[int]] | None:
         path = self.path
         pprint(path)
         if path is None or not path.exists():
-            return
+            return None
         log.info(f"Loading cached episode indices from {path}")
         try:
             with path.open("r", encoding="utf-8") as handle:
@@ -358,24 +367,23 @@ class EpisodeInfo:
 
     @property
     def n_steps(self) -> int:
-        cached = self._load_cached_indices()
-        return sum([len(x) for x in cached])
+        return sum([len(x) for x in self._episode_indices])
 
     def lengths(self) -> list[int]:
         """Return the lengths of all records in the dataset."""
         return [len(idxs) for idxs in self._episode_indices]
 
-    def __iter__(self) -> Iterator[dict]:
-        self._i = 0
-        return self
+    def __iter__(self) -> Iterator[list[int]]:
+        return iter(self._episode_indices)
 
 
 T = TypeVar("T")
 
 
-def run_in_background(fn, /, *args, **kwargs) -> threading.Thread:
+def run_in_background(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> threading.Thread:
     t = threading.Thread(target=fn, args=args, kwargs=kwargs, daemon=True)
     t.start()
+    return t
 
 
 class CacheIter(Iterator[T], Generic[T]):
@@ -386,21 +394,21 @@ class CacheIter(Iterator[T], Generic[T]):
     - __iter__(): standard iterator protocol (returns self so caching applies during iteration).
     """
 
-    def __init__(self, parent):
+    def __init__(self, parent: Any) -> None:
         self._parent = parent
         self._cache: dict[int, T] = {}
         self._i = 0  # next index to assign for __next__-driven iteration
         self._pool = ThreadPoolExecutor(max_workers=16)
         self.preload()
 
-    def preload(self):
+    def preload(self) -> None:
         """Preload the entire parent into the cache in a background thread."""
         for i in range(len(self._parent)):
             _f = self._pool.submit(self.__getitem__, i)  # uses our __getitem__, which caches
 
     def __getitem__(self, idx: int) -> T:
-        if str(idx) in self._cache:
-            return self._cache[str(idx)]
+        if idx in self._cache:
+            return self._cache[idx]
         log.warning(f"CacheIter miss item {idx}")
         # Prefer direct delegation if the parent supports random access
         if hasattr(self._parent, "__getitem__"):
@@ -412,10 +420,12 @@ class CacheIter(Iterator[T], Generic[T]):
             _ = next(self)  # uses our __next__, which caches
         return self._cache[idx]
 
+    @override
     def __iter__(self) -> CacheIter[T]:
         # Return self so iteration goes through our __next__ and gets cached.
         return self
 
+    @override
     def __next__(self) -> T:
         val = next(self._parent)
         self._cache[self._i] = val
@@ -430,28 +440,38 @@ class CacheIter(Iterator[T], Generic[T]):
         return self._cache
 
 
-def drop(tree: dict, keys: list[str]) -> dict:
+def drop(tree: dict[str, Any], keys: list[str]) -> dict[str, Any]:
     return {k: v for k, v in tree.items() if k not in keys}
 
 
-class _DropKeyDataset(Sequence[dict]):
+class _DropKeyDataset(Sequence[dict[str, Any]]):
     """Dataset wrapper that filters observation keys."""
 
-    def __init__(self, dataset: Sequence[dict], drop_keys: Sequence[str] = ()):
+    def __init__(self, dataset: Sequence[dict[str, Any]], drop_keys: Sequence[str] = ()) -> None:
         self._dataset = dataset
         self._drop_keys = set(drop_keys)
 
+    @override
     def __len__(self) -> int:
         return len(self._dataset)
 
-    def __getitem__(self, index: int) -> dict:
+    @overload
+    def __getitem__(self, index: int) -> dict[str, Any]: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[dict[str, Any]]: ...
+
+    @override
+    def __getitem__(self, index: int | slice) -> dict[str, Any] | Sequence[dict[str, Any]]:
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(len(self)))]
         traj = self._dataset[index]
         if not self._drop_keys:
             return traj
         return _drop_observation_keys(traj, self._drop_keys)
 
 
-def _drop_observation_keys(traj: dict, drop_keys: set[str]) -> dict:
+def _drop_observation_keys(traj: dict[str, Any], drop_keys: set[str]) -> dict[str, Any]:
     obs = traj.get("observation")
     if not isinstance(obs, dict) or not drop_keys:
         return traj
