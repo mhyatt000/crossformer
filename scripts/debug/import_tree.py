@@ -13,8 +13,9 @@ PKG = ROOT / "crossformer"
 
 @dataclass
 class Config:
-    target: Annotated[str, tyro.conf.Positional] = "crossformer.data.grain.loader"
+    target: Annotated[str, tyro.conf.Positional]
     files: bool = False
+    depth: int | None = None
 
 
 def mod_to_paths(mod: str) -> list[Path]:
@@ -99,6 +100,7 @@ def print_tree(
     seen: set[Path] | None = None,
     active: tuple[Path, ...] = (),
     prefix: str = "",
+    depth: int | None = None,
 ) -> None:
     seen = set() if seen is None else seen
     label = rel(path)
@@ -110,19 +112,22 @@ def print_tree(
         return
     print(prefix + label)
     seen.add(path)
+    if depth == 0:
+        return
     deps = graph.get(path, [])
+    next_depth = None if depth is None else depth - 1
     for i, dep in enumerate(deps):
         branch = "└── " if i == len(deps) - 1 else "├── "
-        ext = "    " if i == len(deps) - 1 else "│   "
-        print_tree(dep, graph, seen, (*active, path), prefix + branch)
+        print_tree(dep, graph, seen, (*active, path), prefix + branch, next_depth)
 
 
 def main(cfg: Config) -> None:
     start = resolve_target(cfg.target)
     graph = build_graph(start)
-    print_tree(start, graph)
+    print_tree(start, graph, depth=cfg.depth)
     if not cfg.files:
         return
+    # Default mode prints only the deduplicated tree; --files appends the flat closure.
     print("\nFILES")
     for path in sorted(graph):
         print(rel(path))
