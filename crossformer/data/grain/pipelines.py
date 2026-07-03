@@ -7,34 +7,23 @@ from dataclasses import dataclass
 import fnmatch
 from functools import partial
 import logging
-from pathlib import Path
-from typing import Any, Sequence, TypeVar
+from typing import Any, Sequence, TypedDict
 
 import augmax
-import grain
-from grain._src.python import dataset as gd
-import grain.experimental as ge
-from grain.experimental import ThreadPrefetchIterDataset
 import grain.python as gp
 import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec
+import jaxtyping as jt
 import numpy as np
-from rich import print
-from rich.pretty import pprint
-from tqdm import tqdm
 
-from crossformer.cn.dataset.mix import Arec
 from crossformer.data.grain import builders, metadata, transforms
 from crossformer.data.grain.datasets import (
-    _postprocess_episode,
     drop,
-    EpisodeInfo,
-    unpack_record,
 )
-from crossformer.data.grain.transforms import batch_fn
-from crossformer.data.grain.util.remap import _remap_lang, rekey
+from crossformer.data.grain.util.remap import rekey
 from crossformer.utils.deco import deprecate
+from crossformer.utils.mytyping import DeprecatedError
 from crossformer.utils.spec import ModuleSpec, spec
 from crossformer.utils.tree import flat, unflat
 from crossformer.utils.tree.core import drop_fn
@@ -238,11 +227,6 @@ class TransformConfig:
     resize_interpolation: str = "bilinear"
 
 
-from typing import TypedDict
-
-import jaxtyping as jt
-
-
 class Batch(TypedDict, total=False):  # total=False makes extra keys allowed
     observation: jt.Float[jt.Array, "N 3"]
     action: jt.Array  # or Int[Array, "N"]
@@ -279,6 +263,9 @@ def compatibility(tree: dict):
     wrist = list(fnmatch.filter(tree.keys(), "*image_wrist*"))
     tree = rekey(tree, inp=wrist, out=[k.replace("image_wrist", "image_left_wrist") for k in wrist])
 
+    final = list(fnmatch.filter(tree.keys(), "*image.*"))  # image_a image_b image_c
+    tree = rekey(tree, inp=final, out=[k.replace("image.", "image_") for k in final])
+
     # LANG
     language = fnmatch.filter(tree.keys(), "*language*")
     tree = rekey(tree, inp=language, out=[k.replace("language.embedding", "language_instruction") for k in language])
@@ -296,6 +283,7 @@ def compatibility(tree: dict):
 
 
 def _infer_observation_mappings(tree: dict) -> tuple[dict, dict, dict, dict] | None:
+    raise DeprecatedError("jul 1 2026")
     obs = tree.get("observation", {})
     image_keys = set(obs.get("image", {}))
     depth_keys = set(obs.get("depth", {}))
@@ -303,25 +291,6 @@ def _infer_observation_mappings(tree: dict) -> tuple[dict, dict, dict, dict] | N
     proprio = {k: v.shape[-1] for k, v in spec(obs.get("proprio", {}), simple=False).items()}
     # proprio_keys, proprio_dims = zip(*proprio.items())
     return image_keys, depth_keys, proprio
-
-
-@dataclass
-class ArecReader:
-    path: Path  # path to arec files
-    mix: Any
-    ram_cache: bool = True
-
-
-T = TypeVar("T")
-S = TypeVar("S")
-
-
-def get_episode_lengths(path: Path) -> list[list[int]] | None:
-    import json
-
-    with path.open("r", encoding="utf-8") as handle:
-        payload = json.load(handle)
-    return [[int(idx) for idx in group] for group in payload]
 
 
 def get_task_ids(ds, lengths):
@@ -373,117 +342,6 @@ def get_task_goals(ds):
 
     ds = ds.map(make_goal)
     return ds
-
-
-def get_chunked_act(ds, a, o, chunk_fn):
-    _ds = ds  # pin _ds so we can index into it without closure issues
-
-    def make_chunk(x):
-        eid = x["info"]["id"]["episode_id"]
-        step_id = x["info"]["id"]["step_id"]
-        gid = x["info"]["id"]["global_id"]
-        chunk = [_ds[int(gid + i)] for i in range(a)]
-        action = batch_fn([a["action"] for a in chunk])
-        action_pad_mask = batch_fn([(c["info"]["id"]["episode_id"] == eid) for c in chunk])
-        x = x | {
-            "action": action,
-            "action_pad_mask": action_pad_mask,
-        }
-
-    ds = ds.map(make_chunk)
-    return ds
-
-
-def make_data_source(cfg: cn.Train) -> grain.MapDataset:
-    grain.config.update("py_debug_mode", log.isEnabledFor(logging.DEBUG))
-
-    mix = cfg.data.mix.value
-    print(mix, mix.name)
-    if not isinstance(mix, Arec):
-        mix = Arec.from_name(mix.name)
-
-    def exists(x: dict[Any] | None):
-        return x is not None
-
-    print(mix.source, len(mix.source))
-
-    epinfo = EpisodeInfo(mix.source, mix)
-
-    def pack_fn(xs):
-        xs = [unpack_record(x) for x in xs]
-        xs = _postprocess_episode(xs, steps=False)
-        return xs  # batch_fn(xs)
-
-    def sanity_check(traj: dict[jax.Array]) -> dict:
-        eid = traj["episode_id"][0]
-        same = jnp.all(traj["episode_id"] == eid)
-        assert same, f"Episode ID mismatch in episode {eid}"
-        return traj
-
-    def maybe_init_lang(x: dict):
-        if "language_instruction" not in x:
-            x["language_instruction"] = ""
-        if "language_embedding" not in x:
-            x["language_embedding"] = np.zeros((512,), dtype=np.float32)
-        return x
-
-    ds = (
-        grain.MapDataset.source(mix.source)
-        .seed(42)
-        .map(unpack_record)
-        .map(maybe_init_lang)
-        # .map(partial(_postprocess_episode, steps=False))
-        # .filter(exists)
-        .map(partial(drop, keys=["discount", "is_terminal", "reward", "is_first", "is_last"]))
-        .map(
-            partial(
-                rekey,
-                inp=["language_instruction", "language_embedding"],
-                out=["language.instruction", "language.embedding"],
-            )
-        )
-        .map(drop_str)
-        # .map(sanity_check)
-    )
-
-    dsit = iter(ds)
-    example = next(dsit)
-
-    # print(spec(example))
-
-    mappings = _infer_observation_mappings(example)
-    assert mappings, "Trajectory missing observation key"
-
-    lkey = "language.embedding"
-    language = example.get(lkey)
-    standardize_fn = partial(_remap_lang, k=lkey) if language is not None else None
-    keys = builders.Keys(
-        *mappings,
-        lkey if language is not None else None,
-    )
-
-    dataset_config = builders.GrainDatasetConfig(
-        name=mix.name,
-        source=ds,
-        episode_info=epinfo,
-        keys=keys,
-        standardize_fn=standardize_fn,
-        skip_norm_keys=cfg.data.transform.skip_norm_keys,
-        force_recompute_dataset_statistics=cfg.data.recompute,
-    )
-
-    traj_kwargs = cfg.data.traj.create(with_head_to_dataset=False)
-    traj_kwargs["window_size"] = cfg.window_size or traj_kwargs.get("window_size", 1)
-    log.warning("TODO move cfg.window_size to cfg.data")
-    traj_kwargs.pop("task_augment_strategy")
-    traj_kwargs.pop("task_augment_kwargs")
-    tfconfig = TransformConfig(
-        traj_transform_kwargs=traj_kwargs,
-        frame_transforms={},
-        resize_frames_to=64,
-        resize_frame_keys=None,
-    )
-    return ds, dataset_config, tfconfig
 
 
 def hwc2chw(img):
@@ -594,41 +452,26 @@ def get_frame_transform(
     return frame_transform_aug
 
 
-def sharding_put(
-    ds: grain.dataset.IterDataset,
-    shard_fn,
-    *,
-    cpu_buffer_size: int = 4,
-    device_buffer_size: int = 2,
-) -> grain.dataset.IterDataset:
-    """Moves the data to the given devices with prefetching.
-
-    Stage 1: A CPU-side prefetch buffer.
-    Stage 2: Per-device buffers for elements already transferred to the device.
-
-    Args:
-      ds: Dataset to prefetch.
-      device: same arguments as in jax.device_put.
-      cpu_buffer_size: Number of elements to prefetch on CPU.
-      device_buffer_size: Number of elements to prefetch per device.
-
-    Returns:
-      Dataset with the elements prefetched to the devices.
-    """
-    ds = ThreadPrefetchIterDataset(ds, prefetch_buffer_size=cpu_buffer_size)
-    # May raise ImportError if jax is not linked.
-
-    if device_buffer_size > 0:
-        ds = ds.map(lambda x: shard_fn(x))
-        ds = ThreadPrefetchIterDataset(ds, prefetch_buffer_size=device_buffer_size)
-    return ds
-
-
 def drop_str(x: dict):
     return drop_fn(x, lambda k, v: isinstance(v, str))
 
 
-def add_mask(x: dict):
+def add_horizon_mask(x: dict) -> dict:
+    """Add mask.horizon with shape (W, H)."""
+    sid = np.asarray(x["info"]["id"]["step"])
+    len = np.asarray(x["info"]["len"])
+    action = np.asarray(x["act.base"])
+
+    # Expect (*shape)
+    H, A = action.shape
+    h = np.arange(H, dtype=sid.dtype)
+    x.setdefault("mask", {})["horizon"] = (sid[..., None] + h < len[..., None]).astype(np.bool_)
+    return x
+
+
+def add_mask(x: dict, train=True):
+    x = add_horizon_mask(x) if train else x
+
     # flag = x["info"]["id"]["episode"] % 2  # 95% of data
     # merge — embody_transform may have already written mask.act
     x.setdefault("mask", {}).update(
@@ -643,124 +486,3 @@ def add_mask(x: dict):
     # bwd compatibility
     x["observation"]["timestep_pad_mask"] = x["mask"]["timestep_pad_mask"]
     return x
-
-
-def debug_dataset(ds, config, tracking: bool = True, n: int | float = 10):
-    if tracking:
-        options = ge.DatasetOptions(execution_tracking_mode=ge.ExecutionTrackingMode.STAGE_TIMING)
-        ds = ge.WithOptionsIterDataset(ds, options)
-
-    dsit = iter(ds)
-    x = next(dsit)
-    pprint(spec(x, simple=True))
-    del x
-
-    l = len(config.source) // config.batch_size
-    for _ in tqdm(range(int(n))):
-        x = next(dsit)
-        del x
-
-    if tracking:
-        summary = gd.dataset.get_execution_summary(dsit)  # must run on iterator
-        print(gd.stats.pretty_format_summary(summary))
-    quit()
-
-
-def make_single_dataset(
-    config: builders.GrainDatasetConfig,
-    *,
-    train: bool,
-    shard_fn: Callable,
-    tfconfig: TransformConfig | None = TransformConfig(),
-    shuffle_buffer_size: int | None = None,
-    drop_remainder: bool = True,
-    seed: int = 0,
-) -> GrainDataLoader:
-    """Builds a dataset of frames for a single dataset configuration.
-
-    When ``resize_frames_to`` is provided the image observations within each
-    frame are resized via :func:`transforms.resize_frame_images` before applying
-    any additional ``frame_transforms``.
-    """
-
-    log.warning("TODO see update notes")
-    # pack steps by episode_id
-    # it makes action/obs chunk easier and goal_idx
-    # try using a certain subsample length (500?) so that it can jit
-    # ds = PackByKeyMapDataset(base, episode_len=episode_len_dict)
-    # ds = ds.shuffle(seed=seed)           # shuffle episodes
-    # define FlatMapFnIterDataset. pass shuffle idx fn to the flat map for random order
-    # use grain.experimental.InterleaveIterDataset to interleave steps from different episodes
-    ### its not a true shuffle but better than window shuffle
-    ### and its deterministic and fast for IO & compute
-    # use windowshuffle after
-    # fix augmax to do image augmentations
-
-    with jax.default_device(_grain_cpu_device()):
-        # 1. Build the trajectory dataset
-        # 1.1. restructure keys
-        # 1.2. compute / load statistics
-        # 1.3. normalize with statistics and norm mask
-
-        ds, stats = builders.build_trajectory_dataset(config)
-
-        # 2. Apply trajectory transforms
-        # 2.1. filter no lang
-        # 2.2. maybe filter max action
-        # 2.3. add pad mask and head masks
-        # 2.4. seed
-        # 2.5. goal relabel
-        # 2.6. chunking and windowing
-        # 2.7. maybe other transforms
-
-        ds = apply_trajectory_transforms(ds, seed=seed, config=config)  # , **asdict(tfconfig))
-        ds = ds.map(drop_str)
-
-        # pprint(spec(next(iter(ds))))
-
-        # ds = flatmap.PrivilegedFlatMapMapDataset(ds, transform=flatmap.PackByEpisode(key="info.id.episode_id", use_np=True))
-        ds = ds.seed(42).shuffle()  # shuffle before iter
-
-        ds = ds.repeat() if train else ds  # repeat before iter ... repeat after shuffle
-        ds = (
-            # ds.map(add_mask)
-            ds.map(lambda x: jax.tree.map(lambda y: np.array(y), x)).to_iter_dataset(  # to numpy
-                grain.ReadOptions(num_threads=32)
-            )  # iter before batch so that procs do batching and doesnt impede read threads
-        )
-
-        ds = ds.batch(config.batch_size, drop_remainder=drop_remainder)  # , batch_fn=batch_fn)
-        ds = ds.mp_prefetch(grain.MultiprocessingOptions(num_workers=8, per_worker_buffer_size=10))
-        # ds = FlatMapIterDataset(ds, transform=flatmap.UnpackFlatMap(key="info.id.episode_id", use_np=True))
-
-        def unbatch(items):
-            for item in items:
-                print("u")
-                yield from item
-
-        # ds = ds.pipe(unbatch)
-        # ds = grain.experimental.WindowShuffleIterDataset(ds, window_size=10_00, seed=42)
-
-        # this is as good as it gets with grain
-        # now we need to move to jax arrays and shard to gpu
-        # lastly, do frame aug on gpu en-batch for speed
-
-        def np2jax(x):
-            dev = _grain_cpu_device()
-            return jax.tree.map(lambda y: jnp.array(y, device=dev), x)
-
-        ds.dataset_statistics = stats  # type: ignore[attr-defined]
-        #
-        # blocks mp prefetch so that final jax ops can be main proc
-        #
-        ds = ThreadPrefetchIterDataset(ds, prefetch_buffer_size=2)
-
-        ds = ds.map(np2jax)  # dont use jax+grain yet... buggy
-        ds = ds.map(shard_fn)
-        ds = do_frame_transforms(config, tfconfig, ds)
-        ds = ds.map(compatibility)
-
-        log.info("returning final dataset")
-
-        print("Dataset created... please be very patient while threads start up")
-        return GrainDataLoader(dataset=ds, statistics=stats, config=config)
