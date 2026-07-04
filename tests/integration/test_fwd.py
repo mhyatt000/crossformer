@@ -10,7 +10,7 @@ from crossformer.model.components.heads.xflow import XFlowHead
 from crossformer.model.components.tokenizers import LowdimObsTokenizer
 from crossformer.model.components.transformer import common_transformer_sizes
 from crossformer.model.crossformer_model import CrossFormerModel
-from crossformer.run.xflow_eval import extract_bundled_actions, flatten_obs
+from crossformer.utils.callbacks.base import extract_bundled_actions, flatten_obs
 
 pytestmark = pytest.mark.integration
 
@@ -103,7 +103,7 @@ def test_xflow_script_config_forward_smoke() -> None:
     assert outputs["readout_action"].tokens.shape[:2] == (2, 1)
     assert jnp.all(jnp.isfinite(outputs["readout_action"].tokens))
 
-    actions, dof_ids, chunk_steps = extract_bundled_actions(batch, max_h)
+    actions, dof_ids, chunk_steps, view_ids, _ = extract_bundled_actions(batch, max_h)
     pred = model.sample_actions(
         obs,
         batch["task"],
@@ -113,6 +113,7 @@ def test_xflow_script_config_forward_smoke() -> None:
         head_name="action",
         dof_ids=dof_ids,
         chunk_steps=chunk_steps,
+        view_ids=view_ids,
     )
 
     assert actions.shape == (2, 1, 4, 5)

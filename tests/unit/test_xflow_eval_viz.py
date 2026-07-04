@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from crossformer.run.xflow_eval import adapt_viz_batch, JOINT_IDS, POS_IDS
+from crossformer.utils.callbacks.adapt import adapt_viz_batch, JOINT_IDS, POS_IDS
 
 
 def test_adapt_viz_batch_splits_robot_and_human_tracks():

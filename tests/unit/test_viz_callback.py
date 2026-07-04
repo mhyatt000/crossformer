@@ -172,58 +172,57 @@ class TestRenderFrames:
         assert frames.shape[3] == 3
 
 
-# ── VizCallback.save ───────────────────────────────────────────
+# ── FlowPCACallback.save ───────────────────────────────────────────
 
 
-class TestVizCallbackSave:
+class TestFlowPCACallbackSave:
     def test_save_gif(self, tmp_path):
-        from crossformer.utils.callbacks.viz import VizCallback
+        from crossformer.utils.callbacks.viz import FlowPCACallback
 
-        cb = VizCallback()
+        cb = FlowPCACallback()
         frames = np.random.default_rng(0).integers(0, 255, (3, 48, 64, 3), dtype=np.uint8)
         out = cb.save(frames, tmp_path / "test.gif")
         assert out.exists()
         assert out.stat().st_size > 0
 
     def test_save_bad_ext(self, tmp_path):
-        from crossformer.utils.callbacks.viz import VizCallback
+        from crossformer.utils.callbacks.viz import FlowPCACallback
 
-        cb = VizCallback()
+        cb = FlowPCACallback()
         frames = np.zeros((2, 10, 10, 3), dtype=np.uint8)
         with pytest.raises(ValueError, match="Expected"):
             cb.save(frames, tmp_path / "test.png")
 
 
-# ── VizCallback selection helpers ──────────────────────────────
+# ── FlowPCACallback selection helpers ──────────────────────────────
 
 
-class TestVizCallbackSelect:
+class TestFlowPCACallbackSelect:
     def test_select_base_truncates(self):
-        from crossformer.utils.callbacks.viz import VizCallback
+        from crossformer.utils.callbacks.viz import FlowPCACallback
 
-        cb = VizCallback(joint_dim=7)
+        cb = FlowPCACallback(joint_dim=7)
         arr = np.zeros((4, 10))
         result = cb._select_base(arr)
         assert result.shape == (4, 7)
 
     def test_select_base_rejects_small_dim(self):
-        from crossformer.utils.callbacks.viz import VizCallback
+        from crossformer.utils.callbacks.viz import FlowPCACallback
 
-        cb = VizCallback(joint_dim=7)
+        cb = FlowPCACallback(joint_dim=7)
         arr = np.zeros((4, 3))
         with pytest.raises(ValueError, match="joint dim"):
             cb._select_base(arr)
 
     def test_select_flow_rejects_1d(self):
-        from crossformer.utils.callbacks.viz import VizCallback
+        from crossformer.utils.callbacks.viz import FlowPCACallback
 
-        cb = VizCallback()
+        cb = FlowPCACallback()
         with pytest.raises(ValueError, match="ndim"):
             cb._select_flow(np.zeros(5))
 
     def test_get_nested(self):
-        from crossformer.utils.callbacks.viz import VizCallback
+        from crossformer.utils.callbacks.base import getpath
 
-        cb = VizCallback()
         batch = {"a": {"b": {"c": 42}}}
-        assert cb._get(batch, ("a", "b", "c")) == 42
+        assert getpath(batch, ("a", "b", "c")) == 42

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Iterator
 
 import jax
 import jax.numpy as jnp
@@ -17,6 +18,9 @@ import torch
 import yourdfpy
 
 from crossformer.cn.base import default
+from crossformer.utils.callbacks.adapt import adapt_rast_batch, denorm_canonical, RAST_IDS
+from crossformer.utils.callbacks.base import EvalContext
+import wandb
 
 # ---------------------------------------------------------------------------
 # Geometry helpers
@@ -165,9 +169,18 @@ def _perspective(fovy_deg: float, aspect: float, znear: float, zfar: float) -> n
 
 
 @dataclass
-class RastConfig:
-    """Config for ``RastCallback``."""
+class RastCallback:
+    """Render URDF robot silhouettes from camera viewpoints.
 
+    Uses nvdiffrast for GPU-accelerated rasterization. As an eval callback it
+    streams extra eval batches until ``eval_frames`` predicted trajectories are
+    rendered, then logs one ghost-overlay video per camera.
+    """
+
+    name: str = "rast"
+    every: int = 5000
+    eval_frames: int = 64  # predicted trajectories to render per tick
+    fps: int = 10
     urdf: Path | None = Path("xarm7_standalone.urdf")
     cams: tuple[Path, ...] = default(
         (
@@ -188,49 +201,6 @@ class RastConfig:
     gripper_open: float = 1.0
     gripper_closed: float = 0.0
     invert_gripper: bool = True
-
-    def create(self) -> RastCallback | None:
-        if self.urdf is None:
-            return None
-        return RastCallback(
-            urdf=self.urdf,
-            cams=list(self.cams) if self.cams else None,
-            mesh_dir=self.mesh_dir,
-            width=self.width,
-            height=self.height,
-            fovy=self.fovy,
-            color=self.color,
-            bg=self.bg,
-            alpha=self.alpha,
-            joint_dim=self.joint_dim,
-            gripper_joint=self.gripper_joint,
-            gripper_open=self.gripper_open,
-            gripper_closed=self.gripper_closed,
-            invert_gripper=self.invert_gripper,
-        )
-
-
-@dataclass
-class RastCallback:
-    """Render URDF robot silhouettes from camera viewpoints.
-
-    Uses nvdiffrast for GPU-accelerated rasterization.
-    """
-
-    urdf: Path
-    cams: list[Path] | None = None
-    mesh_dir: Path | None = None
-    width: int = 256
-    height: int = 256
-    fovy: float = 45.0
-    color: tuple[float, float, float] = (0.2, 0.4, 0.9)
-    bg: tuple[float, float, float] = (1.0, 1.0, 1.0)
-    alpha: float = 0.6
-    joint_dim: int | None = None
-    gripper_joint: str = "drive_joint"
-    gripper_open: float = 1.0
-    gripper_closed: float = 0.0
-    invert_gripper: bool = True
     _robot: _RobotMesh | None = field(default=None, init=False, repr=False)
     _rasterizer: _GpuRasterizer | None = field(default=None, init=False, repr=False)
     _cam_mats: list[np.ndarray] = field(default_factory=list, init=False, repr=False)
@@ -239,6 +209,8 @@ class RastCallback:
     def _ensure_init(self) -> None:
         if self._robot is not None:
             return
+        if self.urdf is None:
+            raise ValueError("RastCallback.urdf is None — rendering is disabled")
         self._robot = _RobotMesh(self.urdf, self.mesh_dir)
         self._rasterizer = _GpuRasterizer(self._robot.faces)
         self._proj = _perspective(self.fovy, self.width / self.height, 0.01, 10.0)
@@ -289,7 +261,44 @@ class RastCallback:
         q = q[..., :dim]
         return self._map_gripper(q)
 
-    def __call__(self, joints: np.ndarray) -> list[np.ndarray]:
+    def __call__(self, ctx: EvalContext) -> dict[str, Any]:
+        """Stream eval batches and log one ghost-overlay video per camera."""
+        if self.urdf is None:
+            return {}
+        per_cam: list[list[np.ndarray]] | None = None
+        frames_left = self.eval_frames
+        for sub in ctx.stream(self.eval_frames):
+            if frames_left <= 0:
+                break
+            for chunk in self._pred_chunks(sub, frames_left):
+                traj_frames = self.render_trajectory(chunk)
+                if per_cam is None:
+                    per_cam = [[] for _ in range(len(traj_frames))]
+                for ci, frame in enumerate(traj_frames):
+                    per_cam[ci].append(frame)
+                frames_left -= 1
+
+        if per_cam is None:
+            return {}
+        return {
+            f"cam_{ci}": wandb.Video(np.moveaxis(np.stack(frames, axis=0), -1, 1), fps=self.fps)
+            for ci, frames in enumerate(per_cam)
+        }
+
+    def _pred_chunks(self, ctx: EvalContext, limit: int) -> Iterator[np.ndarray]:
+        """Yield denormalized canonical joint chunks predicted for one batch."""
+        rast_batch, keep = adapt_rast_batch(ctx.batch["act"], ctx.pred_flow)
+        if rast_batch is None:
+            return
+        kept = np.asarray(keep, dtype=np.int32)
+        for local_idx in range(min(limit, len(kept))):
+            ds_name = ctx.ds_names[int(kept[local_idx])]
+            chunk = rast_batch["predict"][-1, local_idx]
+            if chunk.ndim == 3:
+                chunk = chunk[0]
+            yield denorm_canonical(chunk, ctx.denorm, ds_name, np.asarray(RAST_IDS))
+
+    def render(self, joints: np.ndarray) -> list[np.ndarray]:
         """Render silhouettes for (B, A) or (B, H, A) joint configs."""
         self._ensure_init()
         robot = self._robot

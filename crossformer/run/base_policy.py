@@ -15,7 +15,7 @@ from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.run._wrappers import _resize
 from crossformer.run.train_step import lookup_guide
 from crossformer.run.wrappers import PolicyWrapper
-from crossformer.utils.callbacks.viz import ActionBatchDenormalizer
+from crossformer.utils.callbacks.denorm import ActionBatchDenormalizer
 
 
 class ModelPolicy(BasePolicy):

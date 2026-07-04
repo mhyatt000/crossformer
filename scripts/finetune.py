@@ -26,7 +26,7 @@ from crossformer.data.oxe.oxe_standardization_transforms import (
 )
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.utils.callbacks.inspect import InspectCallback
-from crossformer.utils.callbacks.viz import VizCallback
+from crossformer.utils.callbacks.viz import FlowPCACallback
 from crossformer.utils.deco import deprecate
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import ModuleSpec, spec
@@ -325,7 +325,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
     #
 
     log.info("val_callback disabled for now")
-    viz_cb = VizCallback(
+    viz_cb = FlowPCACallback(
         flow_key=("pred_flow",),
         base_key=("gt_action",),
     )
@@ -399,7 +399,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
                     gt_action = jax.device_get(batch["action"][flow_head_name])
                     gt_action = gt_action[..., :7]
 
-                    frames = viz_cb(
+                    frames = viz_cb.render(
                         {
                             "pred_flow": pred_flow,
                             "gt_action": gt_action,
@@ -415,7 +415,7 @@ def main(cfg: cn.Train) -> None:  # experiment or sweep
                     )
                     log.info("Successfully logged flow GIF to WandB!")
             except Exception as e:
-                log.exception(f"VizCallback failed at step {i}: {e}")
+                log.exception(f"FlowPCACallback failed at step {i}: {e}")
 
         if (i + 1) % cfg.save_interval == 0 and save_dir is not None:
             cfg.vprint("Saving checkpoint...")

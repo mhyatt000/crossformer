@@ -1,6 +1,6 @@
 """Compare grain_full vs grain_raw+GrainlikeWrapper with model inference + rast video.
 
-Loads a CrossFormerModel checkpoint, runs XFlowEvalLoop on both pipelines,
+Loads a CrossFormerModel checkpoint, runs eval rendering on both pipelines,
 and logs rast videos to wandb for visual comparison.
 """
 
@@ -34,8 +34,8 @@ from crossformer.data.grain.loader import GrainDataFactory, make_source_by_mix
 from crossformer.embody import MASK_ID
 from crossformer.run.base_policy import action_dict_to_slots, ActionDenormWrapper, ModelPolicy
 from crossformer.run.wrappers.grainlike import GrainlikeWrapper
-from crossformer.run.xflow_eval import adapt_rast_batch
-from crossformer.utils.callbacks.rast import RastConfig
+from crossformer.utils.callbacks.adapt import adapt_rast_batch
+from crossformer.utils.callbacks.rast import RastCallback
 from crossformer.utils.spec import ezdiff, ezvaldiff, spec
 from crossformer.utils.tree import flat
 import wandb
@@ -54,7 +54,7 @@ class Config(cn.Train):
 
     eval_frames: int = 64
     wandb: Wandb = default(Wandb(project="crossformer-server-viz"))
-    rast: RastConfig = default(RastConfig())
+    rast: RastCallback = default(RastCallback())
     host: str = "0.0.0.0"
     port: int | None = None
 
@@ -256,7 +256,7 @@ def print_action_mse_by_chunk_step(label: str, policy, ds_iter, n: int) -> None:
 
 def run_rast(label: str, ds_iter, cfg: Config, policy) -> None:
     """Render rast videos. policy must be an ActionDenormWrapper — flow is already denormed."""
-    rast_cb = cfg.rast.create()
+    rast_cb = cfg.rast
     per_cam: list[list[np.ndarray]] | None = None
     frames_left = cfg.eval_frames
 

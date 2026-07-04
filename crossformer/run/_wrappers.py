@@ -10,7 +10,7 @@ import numpy as np
 from webpolicy.base_policy import BasePolicy
 
 from crossformer.embody import DOF, MASK_ID
-from crossformer.utils.callbacks.viz import ActionBatchDenormalizer
+from crossformer.utils.callbacks.denorm import ActionBatchDenormalizer
 from crossformer.utils.tree.core import drop_fn
 
 # ---------------------------------------------------------------------------

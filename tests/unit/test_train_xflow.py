@@ -9,8 +9,9 @@ from crossformer.data.grain.metadata import ArrayStatistics, DatasetStatistics
 from crossformer.model.components.heads.xflow import XFlowHead
 from crossformer.model.components.tokenizers import LowdimObsTokenizer
 from crossformer.model.components.transformer import common_transformer_sizes
-from crossformer.run.xflow_eval import adapt_rast_batch, denorm_canonical, flatten_obs, JOINT_IDS, RAST_IDS
-from crossformer.utils.callbacks.viz import ActionBatchDenormalizer
+from crossformer.utils.callbacks.adapt import adapt_rast_batch, denorm_canonical, JOINT_IDS, RAST_IDS
+from crossformer.utils.callbacks.base import flatten_obs
+from crossformer.utils.callbacks.denorm import ActionBatchDenormalizer
 
 
 def _spec(cls: type[object], **kwargs: object) -> dict[str, Any]:

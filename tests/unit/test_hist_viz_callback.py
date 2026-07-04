@@ -5,7 +5,9 @@ import wandb
 
 from crossformer.data.grain.metadata import ArrayStatistics, DatasetStatistics
 from crossformer.embody import DOF
-from crossformer.utils.callbacks.viz import ActionBatchDenormalizer, HistVizCallback
+from crossformer.utils.callbacks.base import EvalContext
+from crossformer.utils.callbacks.denorm import ActionBatchDenormalizer
+from crossformer.utils.callbacks.hist import HistCallback
 from crossformer.utils.jax_utils import str2np
 
 
@@ -37,8 +39,8 @@ def _names(*xs: str) -> np.ndarray:
     return out
 
 
-def test_hist_viz_callback_unnormalizes_batch_and_flat_predict() -> None:
-    cb = HistVizCallback(
+def test_hist_callback_unnormalizes_batch_and_flat_predict() -> None:
+    denorm = ActionBatchDenormalizer(
         stats={
             "ds_joint": DatasetStatistics(
                 action={
@@ -81,18 +83,17 @@ def test_hist_viz_callback_unnormalizes_batch_and_flat_predict() -> None:
             "dataset_name": _names("ds_joint", "ds_pose"),
         },
     }
-    predict = {
-        "predict": np.array(
-            [
-                [[0.0, 1.0, 0.1]],
-                [[4.0, 5.0, 0.2]],
-            ],
-            dtype=np.float32,
-        )
-    }
+    # (B, W, H, A) prediction as ctx.pred would hold it
+    pred = np.array(
+        [
+            [[[0.0, 1.0, 0.1]]],
+            [[[4.0, 5.0, 0.2]]],
+        ],
+        dtype=np.float32,
+    )
 
-    batch_vals = cb.denorm.denormalize(batch["act"]["base"], batch["act"]["id"], ["ds_joint", "ds_pose"])
-    pred_vals = cb.denorm.denormalize(predict["predict"], batch["act"]["id"], ["ds_joint", "ds_pose"], horizon=1)
+    batch_vals = denorm.denormalize(batch["act"]["base"], batch["act"]["id"], ["ds_joint", "ds_pose"])
+    pred_vals = denorm.denormalize(pred.reshape(2, 1, -1), batch["act"]["id"], ["ds_joint", "ds_pose"], horizon=1)
 
     assert np.allclose(batch_vals["j0"], np.array([12.0], dtype=np.float32))
     assert np.allclose(batch_vals["j1"], np.array([15.0], dtype=np.float32))
@@ -106,7 +107,9 @@ def test_hist_viz_callback_unnormalizes_batch_and_flat_predict() -> None:
     assert np.allclose(pred_vals["ee_ry"], np.array([600.0], dtype=np.float32))
     assert np.allclose(pred_vals["gripper"], np.array([0.1, 0.2], dtype=np.float32))
 
-    out = cb(batch, predict)
+    ctx = EvalContext(model=None, params=None, rng=None, step=0, batch=batch, denorm=denorm)
+    ctx.__dict__["pred"] = pred  # pre-seed the cached property; no model needed
+    out = HistCallback()(ctx)
 
     assert isinstance(out["data"]["j0"], wandb.Histogram)
     assert isinstance(out["predict"]["ee_x"], wandb.Histogram)
