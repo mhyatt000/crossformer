@@ -1,0 +1,8 @@
+# TODO
+version: 2026.07.02
+/cam/*:
+  proto: fg.Image
+  shape: (480,640,3)
+/xgym/gripper:
+  proto: Gripper
+  shape: (1,)

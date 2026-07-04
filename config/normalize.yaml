@@ -1,0 +1,13 @@
+kp3dc_robot:
+  _target_: crossformer.data.grain.meta:TMPCLASS
+  agg: 0
+  mask: 
+  - proprio.kp3dc_robot
+  - state.w2c
+
+kp3dw_robot:
+  _target_: crossformer.data.grain.meta:TMPCLASS
+  agg: null
+
+kp3dw_robot:
+  _target_: crossformer.data.grain.meta:TMPCLASS # this is the same as no kwargs {}
