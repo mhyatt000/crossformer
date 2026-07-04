@@ -11,6 +11,7 @@ import resource
 from typing import Any, Protocol
 
 import cv2
+from crossformer.utils.mytyping import DeprecatedError
 import grain
 from grain.experimental import ThreadPrefetchIterDataset
 import numpy as np
@@ -25,6 +26,7 @@ from crossformer.data.grain.datasets import (
 from crossformer.data.grain.embody import embody_transform
 from crossformer.data.grain.pipelines import (
     _infer_observation_mappings,
+    add_horizon_mask,
     add_mask,
     apply_trajectory_transforms,
     compatibility,
@@ -145,10 +147,11 @@ def make_source_by_mix(
     mix: Arec | MultiDataSource,
     cfg: TrainLike,
 ) -> tuple[grain.Dataset, builders.GrainDatasetConfig]:
-    jax = import_jax_cpu_safe()
+
+    # jax = import_jax_cpu_safe()
     # TODO reduce config scope by only passing cfg.data ?
 
-    grain.config.update("py_debug_mode", log.isEnabledFor(logging.DEBUG))
+    # grain.config.update("py_debug_mode", log.isEnabledFor(logging.DEBUG))
 
     log.debug("mix source: %s (%d)", mix.name, len(mix.source))
 
@@ -159,7 +162,16 @@ def make_source_by_mix(
             x["language_embedding"] = np.zeros((512,), dtype=np.float32)
         return x
 
-    if isinstance(mix.source, MultiArrayRecordSource):
+    if hasattr(mix, "restructure") and mix.restructure is not None:
+        print('using custom restructure fn for mix', mix.name)
+        ds = grain.MapDataset.source(mix.source).seed(42)
+
+        base_fn = ModuleSpec.instantiate(mix.restructure)  # partial(restructure_fn)
+        r = partial(base_fn, name=mix.name, lang_key=None)
+        ds = ds.map(r)
+
+    elif isinstance(mix.source, MultiArrayRecordSource):
+        print('using MultiArrayRecordSource for mix', mix.name)
         ds = (
             grain.MapDataset.source(mix.source)
             .seed(42)
@@ -172,12 +184,8 @@ def make_source_by_mix(
             .map(lambda x: x | {"info": jax.tree.map(lambda y: y[0], x["info"])})
         )
 
-    elif hasattr(mix, "restructure") and mix.restructure is not None:
-        base_fn = ModuleSpec.instantiate(mix.restructure)  # partial(restructure_fn)
-        r = partial(base_fn, name=mix.name, lang_key=None)
-        ds = grain.MapDataset.source(mix.source).seed(42).map(unpack_record).map(r)
-
     else:
+        raise DeprecatedError('jul 1 2026')
         ds = (
             grain.MapDataset.source(mix.source)
             .seed(42)
@@ -200,22 +208,24 @@ def make_source_by_mix(
 
     # log.debug("example spec: %s", spec(example))
 
-    mappings = _infer_observation_mappings(example)
-    assert mappings, "Trajectory missing observation key"
+    if False:
+        raise DeprecatedError('jul 1 2026')
+        mappings = _infer_observation_mappings(example)
+        assert mappings, "Trajectory missing observation key"
 
-    lkey = "language.embedding"
-    language = example.get(lkey)
-    standardize_fn = partial(_remap_lang, k=lkey) if language is not None else None
-    keys = builders.Keys(
-        *mappings,
-        lkey if language is not None else None,
-    )
+        lkey = "language.embedding"
+        language = example.get(lkey)
+        standardize_fn = partial(_remap_lang, k=lkey) if language is not None else None
+        keys = builders.Keys(
+            *mappings,
+            lkey if language is not None else None,
+        )
 
     dataset_config = builders.GrainDatasetConfig(
         name=mix.name,
         source=ds,
-        keys=keys,
-        standardize_fn=standardize_fn,
+        keys=list(flat(example).keys()), # keys,
+        standardize_fn=None, # standardize_fn,
         restructure_fn=getattr(mix, "restructure", None),
         skip_norm_keys=cfg.data.transform.skip_norm_keys,
         force_recompute_dataset_statistics=cfg.data.recompute,
@@ -283,9 +293,17 @@ def make_single_dataset(
 def imresize(x, size=(64, 64)):
     import jax
 
-    x["observation"]["image"] = jax.tree.map(lambda y: cv2.resize(y, size), x["observation"]["image"])
-    # reshape WHC to win,WHC
-    x["observation"]["image"] = jax.tree.map(lambda y: y.reshape(-1, *y.shape[-3:]), x["observation"]["image"])
+    def _resize(y):
+        # cv2.resize only takes (H,W,C); preserve any leading axes:
+        #   (H,W,C) -> (1,H,W,C)  (bare frame gets a window dim)
+        #   (win,H,W,C) / (V,H,W,C) -> leading axis preserved
+        #   (V,win,H,W,C) -> both leading axes preserved
+        *lead, h, w, c = y.shape
+        flat = y.reshape(-1, h, w, c) if lead else y[None]
+        out = np.stack([cv2.resize(f, size) for f in flat])  # (N, *size, C)
+        return out if not lead else out.reshape(*lead, *out.shape[-3:])
+
+    x["observation"]["image"] = jax.tree.map(_resize, x["observation"]["image"])
     return x
 
 
@@ -316,7 +334,7 @@ class GrainDataFactory:
     mask_slot: bool = True  # mask body-part slots in embody_transform; disable for eval/debug
     shuffle_slot: bool = True  # shuffle body-part slot order in embody_transform; disable for eval/debug
     imaug: bool = True  # apply augmax image augmentations (channel shuffle)
-    rotate: bool = True  # apply augmax.Rotate((-15, 15), p=0.3); independent of imaug
+    rotate: bool = False  # apply augmax.Rotate((-15, 15), p=0.3); independent of imaug
     # final image size; controls both mix_precompatibility cv2.resize and augmax.Resize.
     # None disables both stages (image stays at native size, no center_crop).
     resize: int | tuple[int, int] | None = (64, 64)
@@ -340,6 +358,10 @@ class GrainDataFactory:
                 shuffle_slot=self.shuffle_slot,
             )
             ds = ds.map(embody_fn)
+            # Why resize here specifically:
+            # 1. Shrink early, before the expensive stages. smaller mp queue smaller gpu comm
+            # 2. Per-source normalization to a common size. before pad_and_mix — they must agree on shape to batch.
+            # 3. Establishes the window dim downstream code expects ((window, H, W, C)).
             if self.resize is not None:
                 ds = ds.map(partial(imresize, size=self.resize))
             log.debug("applied embody transform: %s (max_a=%d)", dconfig.name, max_a)
@@ -485,9 +507,12 @@ class GrainDataFactory:
         ds = ds.map(shard_fn)
         print("applied shard fn")
 
-        # quick hack with keys
+        # quick hack with keys: keys is a flat list during stats. Images are now a
+        # stacked (V,H,W,C) array (not a named-camera dict), so record a single
+        # "image" key; do_frame_transforms no longer reads this.
         dconfig = sources[0][1]
-        dconfig.keys.image = list(batch["observation"]["image"].keys())
+        img = batch["observation"]["image"]
+        dconfig.keys = builders.Keys(image=list(img.keys()) if isinstance(img, dict) else ["image"])
         ds = do_frame_transforms(dconfig, tfconfig, ds, imaug=self.imaug, rotate=self.rotate)
         ds = ds.map(compatibility)
 

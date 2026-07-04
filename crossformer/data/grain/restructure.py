@@ -4,9 +4,12 @@ Restructure raw trajectories into a unified format for training.
 
 from __future__ import annotations
 
+from rich import print
+from crossformer.utils.spec import spec
 import jax
 import numpy as np
 
+from crossformer.data.grain.datasets import flatten_info_leaf
 from crossformer.utils.jax_utils import str2np
 
 
@@ -42,6 +45,136 @@ def _restructure_trajectory(
     }
 
 
+def multiarray_transforms(x: dict) -> dict:
+    """Apply the standard MultiArrayRecord transforms to a single step.
+    we derrive proprio from the i=0 action and select i=0 info
+    """
+    x = x | {'action': x["proprio"].copy()}
+    x = x | {"proprio": jax.tree.map(lambda y: y[0], x["proprio"])}  # select first item from horizon
+    x = x | {"observation": {k: x.pop(k) for k in ["image", "proprio"]}}
+
+    x['info'] = info =  jax.tree.map(flatten_info_leaf, x["info"])
+    x['task'] = {}
+    x["observation"]["timestep"] = sid = info['id']['step']
+    return x
+
+def init_zero_lang(x: dict) -> dict:
+    """Initialize missing language embedding to zeros. noop for compatibility"""
+    x = x | {"language.embedding": np.zeros((512,), dtype=np.float32)}
+    return x
+
+def tag_name(x: dict, *, name: str) -> dict:
+    x["dataset_name"] = str2np(name, length=32)
+    return x
+
+
+# Every multiview leaf and the axis its camera-view (V) dimension lives on.
+# Observation tensors are single-step (V first); windowed tensors carry V after
+# the horizon axis.
+_VIEW_FIELDS: list[tuple[tuple[str, ...], int]] = [
+    (("observation", "image"), 0),
+    (("observation", "proprio", "kp3dc_robot"), 0),
+    (("action", "kp3dc_robot"), 1),
+    (("state", "extr", "w2c"), 1),
+    (("state", "intr", "K"), 1),
+    (("mask", "proprio", "kp3dc_robot"), 1),
+    (("mask", "state", "extr", "w2c"), 1),
+]
+
+
+def _get(tree: dict, path: tuple[str, ...]):
+    node = tree
+    for p in path:
+        if not isinstance(node, dict) or p not in node:
+            return None
+        node = node[p]
+    return node
+
+
+def _set(tree: dict, path: tuple[str, ...], value) -> None:
+    node = tree
+    for p in path[:-1]:
+        node = node[p]
+    node[path[-1]] = value
+
+
+def _valid_per_view(x: dict, V: int) -> np.ndarray:
+    """Per-view validity score in [0, 1] used to rank which views to keep."""
+    w2c = _get(x, ("mask", "state", "extr", "w2c"))  # (win, V) or (V,)
+    if w2c is None:
+        return np.ones(V, dtype=np.float64)  # no signal -> keep positional order
+    w2c = np.asarray(w2c, dtype=bool)
+    return w2c.reshape(-1, w2c.shape[-1]).mean(axis=0)  # fraction of valid steps per view
+
+
+def _take_pad(arr, idx: list[int], axis: int, n: int):
+    """Gather ``idx`` along ``axis`` then zero-pad that axis up to ``n``."""
+    arr = np.asarray(arr)
+    out = np.take(arr, idx, axis=axis)
+    pad = n - out.shape[axis]
+    if pad > 0:
+        width = [(0, 0)] * out.ndim
+        width[axis] = (0, pad)
+        out = np.pad(out, width)  # zeros -> False for bool masks
+    return out
+
+
+def fix_views(x: dict, n: int = 3) -> dict:
+    """Force the camera-view axis of every multiview tensor to exactly ``n``.
+
+    Views are ranked by validity (``mask.state.extr.w2c``); the most-valid ``n``
+    are kept when there are more, and the axis is zero-padded when there are
+    fewer. The *same* ordering is applied to every view-bearing tensor so
+    image <-> camera <-> keypoint alignment is preserved. Padded views land as
+    zeros, and their mask entries as ``False``, so they are excluded from loss
+    and from the normalization stats adapters.
+    """
+    # infer current V from the first present (array) view field
+    V = next(
+        (arr.shape[axis] for path, axis in _VIEW_FIELDS if isinstance(arr := _get(x, path), np.ndarray)),
+        None,
+    )
+    if V is None:
+        return x
+
+    order = np.argsort(-_valid_per_view(x, V), kind="stable")[:n].tolist()  # most-valid first
+
+    for path, axis in _VIEW_FIELDS:
+        arr = _get(x, path)
+        if isinstance(arr, np.ndarray):
+            _set(x, path, _take_pad(arr, order, axis, n))
+    # which of the n view slots hold a real camera vs zero-padding
+    x.setdefault("mask", {})["view"] = np.arange(n) < len(order)
+    return x
+
+
+def restructure_lift_058(x: dict, *, name: str, lang_key: str | None = None) -> dict:
+
+    x = multiarray_transforms(x)
+    x = init_zero_lang(x)
+    x = tag_name(x, name=name)
+    x['info'] = tag_name(x['info'], name=name)
+
+    # normalize the camera-view axis to a fixed count (validity-ranked, aligned
+    # across image/keypoints/extrinsics/masks). image stays a stacked (V,H,W,C)
+    # array -- the frame transform and tokenizer consume the V axis directly.
+    x = fix_views(x, n=3)
+    x["info"].pop("image_keys", None)
+    return x
+
+
+def restructure_lift_0513(x: dict, *, name: str, lang_key: str | None = None) -> dict:
+
+    def adapt_058_0513(y) -> dict:
+        """ 0.5.13 has differences"""
+        y['image']= y.pop('images')
+        return y
+
+    x = adapt_058_0513(x)
+    x = restructure_lift_058(x, name=name, lang_key=lang_key)
+    return x
+
+
 def _restructure_step_mano(x: dict, *, name: str, lang_key: str) -> dict:
     # PATCH from <0.5.5
     lang_key = "language"
@@ -63,6 +196,14 @@ def _restructure_step_mano(x: dict, *, name: str, lang_key: str) -> dict:
 
     x = jax.tree.map(lambda y: np.array(y), x)  # ensure numpy arrays
     return x
+
+
+def restructure_mano_0513(x: dict, *, name: str, lang_key: str | None = None) -> dict:
+
+    x = multiarray_transforms(x)
+    x = init_zero_lang(x)
+    x = tag_name(x, name=name)
+    x['info'] = tag_name(x['info'], name=name)
 
 
 def restructure_xarm_dream(step: dict, *, name: str, lang_key: str | None = None) -> dict:

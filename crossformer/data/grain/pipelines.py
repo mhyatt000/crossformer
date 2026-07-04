@@ -429,23 +429,23 @@ def get_frame_transform(
         chain_ops.append(augmax.Rotate((-15, 15), p=0.3))
     chain = augmax.Chain(*chain_ops)
 
-    v = jax.vmap
-    # slots = [(c, k) for c in ("observation", "task") for k in config.keys.image]
-    slots = [(c, k) for c in ("observation",) for k in config.keys.image]
-    d5chw = v(v(hwc2chw))
+    def augment(rng, im, f):
+        # im: (*X, H, W, C) -- flatten every leading dim (batch/window/view/...),
+        # augment each frame, then restore. -3: guards H/W changing (e.g. Resize).
+        *lead, h, w, c = im.shape
+        n = int(np.prod(lead)) if lead else 1
+        flat = im.reshape(n, h, w, c)
+        out = jax.vmap(f)(jax.random.split(rng, n), flat)  # (n, H', W', C)
+        return out.reshape(*lead, *out.shape[-3:])
 
     def parallelize_all_keys(rng, batch, f):
-        imgs = [batch[c]["image"][k] for (c, k) in slots]  # each (B,T,C,H,W)
-        if imgs[0].ndim == 4:  # in case no T
-            imgs = [jnp.expand_dims(x, axis=(1)) for x in imgs]
-
-        big = jnp.stack(imgs, axis=0)  # (N,B,T,C,H,W), N=8
-        N, B, T, *_ = big.shape
-        rngs = jax.random.split(rng, (N, B, T))
-        big_out = v(v(v(f)))(rngs, big)  # (N,B,T,C,H,W)
-
-        for i, (c, k) in enumerate(slots):  # scatter back
-            batch[c]["image"][k] = big_out[i]
+        img = batch["observation"]["image"]
+        if isinstance(img, dict):  # legacy named-camera dict: augment each view
+            for k in img:
+                rng, sub = jax.random.split(rng)
+                img[k] = augment(sub, img[k], f)
+        else:  # stacked (..., V, H, W, C): one tensor; augment() flattens the V axis
+            batch["observation"]["image"] = augment(rng, img, f)
         return batch
 
     frame_transform_aug = partial(parallelize_all_keys, f=chain)
