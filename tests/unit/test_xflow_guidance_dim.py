@@ -1,29 +1,31 @@
 from __future__ import annotations
 
-from pathlib import Path
-import sys
+from typing import Any
 
-ROOT = Path(__file__).resolve().parents[2]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from scripts.train.xflow import Config, make_model_config
+from crossformer.cn.model_factory import ModelFactory, Size, XFlow
 
 
-def test_make_model_config_wires_guidance_dims_for_detr():
-    cfg = Config(transformer_size="detr")
-    model_cfg = make_model_config(cfg, max_h=4, max_a=8, max_w=2, guide_dim=17)["model"]
-    head_kwargs = model_cfg["heads"]["xflow"]["kwargs"]
+def _model_cfg(size: Size, guide_dim: int) -> dict[str, Any]:
+    return ModelFactory(
+        size=size,
+        image_keys=(),
+        proprio_keys=(),
+        xflow=XFlow(use_guidance=True, guidance_input_dim=guide_dim),
+    ).create()["model"]
+
+
+def test_model_factory_wires_guidance_dims_for_detr() -> None:
+    model_cfg = _model_cfg(Size.DETR, guide_dim=17)
+    head_kwargs = model_cfg["heads"]["action"]["kwargs"]
 
     assert model_cfg["token_embedding_size"] == 512
     assert head_kwargs["guidance_embed_dim"] == model_cfg["token_embedding_size"]
     assert head_kwargs["guidance_input_dim"] == 17
 
 
-def test_make_model_config_wires_guidance_dims_for_dummy():
-    cfg = Config(transformer_size="dummy")
-    model_cfg = make_model_config(cfg, max_h=4, max_a=8, max_w=2, guide_dim=9)["model"]
-    head_kwargs = model_cfg["heads"]["xflow"]["kwargs"]
+def test_model_factory_wires_guidance_dims_for_dummy() -> None:
+    model_cfg = _model_cfg(Size.DUMMY, guide_dim=9)
+    head_kwargs = model_cfg["heads"]["action"]["kwargs"]
 
     assert model_cfg["token_embedding_size"] == 256
     assert head_kwargs["guidance_embed_dim"] == model_cfg["token_embedding_size"]

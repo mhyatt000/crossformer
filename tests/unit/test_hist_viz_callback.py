@@ -1,38 +1,43 @@
 from __future__ import annotations
 
 import numpy as np
+import wandb
 
 from crossformer.data.grain.metadata import ArrayStatistics, DatasetStatistics
 from crossformer.embody import DOF
 from crossformer.utils.callbacks.viz import ActionBatchDenormalizer, HistVizCallback
-from crossformer.utils.jax_utils import str2jax
-import wandb
+from crossformer.utils.jax_utils import str2np
 
 
-def _stats(mean, std, mask=None):
+def _stats(
+    mean: list[float] | np.ndarray,
+    std: list[float] | np.ndarray,
+    mask: list[bool] | np.ndarray | None = None,
+) -> ArrayStatistics:
     mean = np.asarray(mean, dtype=np.float32)
     std = np.asarray(std, dtype=np.float32)
     if mask is None:
         mask = np.ones_like(mean, dtype=bool)
-    return ArrayStatistics(
-        mean=mean,
-        std=std,
-        minimum=np.zeros_like(mean),
-        maximum=np.ones_like(mean),
-        mask=np.asarray(mask, dtype=bool),
-    )
+    kwargs = {
+        "mean": mean,
+        "std": std,
+        "minimum": np.zeros_like(mean),
+        "maximum": np.ones_like(mean),
+        "mask": np.asarray(mask, dtype=bool),
+    }
+    return ArrayStatistics(**kwargs)
 
 
 def _names(*xs: str) -> np.ndarray:
     width = max(len(x) for x in xs)
     out = np.zeros((len(xs), width), dtype=np.uint8)
     for i, x in enumerate(xs):
-        enc = np.array(str2jax(x))
+        enc = str2np(x)
         out[i, : len(enc)] = enc
     return out
 
 
-def test_hist_viz_callback_unnormalizes_batch_and_flat_predict():
+def test_hist_viz_callback_unnormalizes_batch_and_flat_predict() -> None:
     cb = HistVizCallback(
         stats={
             "ds_joint": DatasetStatistics(
@@ -107,7 +112,7 @@ def test_hist_viz_callback_unnormalizes_batch_and_flat_predict():
     assert isinstance(out["predict"]["ee_x"], wandb.Histogram)
 
 
-def test_action_batch_denormalizer_round_trip_denorm_norm_denorm():
+def test_action_batch_denormalizer_round_trip_denorm_norm_denorm() -> None:
     stats = {
         "ds_joint": DatasetStatistics(
             action={
