@@ -77,6 +77,15 @@ def flatten_info_leaf(x: Any) -> np.ndarray:
     return arr.reshape(-1)
 
 
+def pad_like(rec: dict[str, Any]) -> dict[str, Any]:
+    """Zero-filled record with the same structure/shapes as ``rec``."""
+    return jax.tree.map(lambda x: np.zeros_like(np.asarray(x)), rec)
+
+
+def _episode_id(rec: dict[str, Any]) -> Any:
+    return np.asarray(rec["info"]["id"]["episode"]).reshape(-1)[0]
+
+
 class MultiArrayRecordSource:
     """Joins an image source and a proprio source by step index.
 
@@ -123,6 +132,25 @@ class MultiArrayRecordSource:
         idxs = list(range(i, end))
         pro_recs = [unpack_record(b) for b in self._pro.__getitems__(idxs)]
 
+        # episode-aware: pad steps that belong to a different episode (or that
+        # run past the end of the dataset) so leaves stack cleanly into (W, ...)
+        first = pro_recs[0]
+        eid0 = _episode_id(first)
+        fixed: list[dict[str, Any]] = []
+        valid: list[bool] = []
+        for rec in pro_recs:
+            if _episode_id(rec) == eid0:
+                fixed.append(rec)
+                valid.append(True)
+            else:
+                fixed.append(pad_like(first))
+                valid.append(False)
+        # near end of dataset: fewer than chunk records available
+        while len(fixed) < self._chunk:
+            fixed.append(pad_like(first))
+            valid.append(False)
+        pro_recs = fixed
+
         info = {"info": jax.tree.map(flatten_info_leaf, pro_recs[0].pop("info"))}  # dont stack infos across episodes
         for p in pro_recs:
             p.pop("info") if "info" in p else 0
@@ -131,6 +159,8 @@ class MultiArrayRecordSource:
         pro_stacked = jax.tree.map(lambda *xs: np.stack(xs), *pro_recs)
 
         out = {**img_rec, **pro_stacked} | info
+        # (W,) True where step is real, False where padded — masks the prediction horizon
+        out.setdefault("mask", {})["horizon"] = np.asarray(valid, dtype=bool)
 
         if self._goal:
             max_offset = self._n - 1 - i
