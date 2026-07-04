@@ -32,6 +32,7 @@ from crossformer.run.xflow_eval import EvalLoop
 from crossformer.utils.callbacks.base import EvalContext
 from crossformer.utils.callbacks.denorm import ActionBatchDenormalizer
 from crossformer.utils.callbacks.hist import ChunkCallback, HistCallback
+from crossformer.utils.callbacks.kp3dc_viz import Kp3dcVizCallback
 from crossformer.utils.callbacks.rast import RastCallback
 from crossformer.utils.callbacks.viz import FlowPCACallback
 from crossformer.utils.jax_utils import str2np
@@ -55,6 +56,7 @@ class Config:
     chunks: ChunkCallback = default(ChunkCallback(every=1))
     viz: FlowPCACallback = default(FlowPCACallback(every=1, fps=4))
     rast: RastCallback = default(RastCallback(every=1, eval_frames=8))
+    kp3dc: Kp3dcVizCallback = default(Kp3dcVizCallback(every=1))
     wandb: cn.Wandb = default(cn.Wandb(project="crossformer-preflight", group="eval-smoke"))
 
 
@@ -83,7 +85,18 @@ class FakeLoader:
                 embodiment=self.cfg.embodiment,
             )
             batch["info"] = {"dataset_name": _names(*[DS_NAME] * self.cfg.batch_size)}
+            batch["state"] = self._fake_state(batch)
             yield batch
+
+    def _fake_state(self, batch: dict) -> dict:
+        """Synthetic intrinsics/extrinsics: fx=fy=20, cx=cy=32 -> 64x64 render."""
+        bsz, win, views = np.asarray(batch["observation"]["image"]).shape[:3]
+        K = np.array([[20.0, 0.0, 32.0], [0.0, 20.0, 32.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+        w2c = np.eye(4, dtype=np.float32)
+        return {
+            "intr": {"K": np.broadcast_to(K, (bsz, win, views, 3, 3)).copy()},
+            "extr": {"w2c": np.broadcast_to(w2c, (bsz, win, views, 4, 4)).copy()},
+        }
 
 
 @dataclass
@@ -129,7 +142,7 @@ def main(cfg: Config) -> None:
 
     loop = OracleEvalLoop(
         loader=FakeLoader(cfg),
-        callbacks=[cfg.hist, cfg.chunks, cfg.viz, cfg.rast],
+        callbacks=[cfg.hist, cfg.chunks, cfg.viz, cfg.rast, cfg.kp3dc],
         denorm=ActionBatchDenormalizer({DS_NAME: {"action": {}}}),
         wandb_log=log_and_record,
         flow_frames=cfg.flow_frames,

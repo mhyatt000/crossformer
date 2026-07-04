@@ -8,8 +8,12 @@ from typing import Any, Mapping
 import numpy as np
 
 from crossformer.data.grain.metadata import ArrayStatistics, DatasetStatistics
-from crossformer.embody import DOF, MASK_ID
+from crossformer.embody import DOF, KP3DC, MASK_ID
 from crossformer.utils.jax_utils import jax2str
+
+# kp_{link}_{x|y|z} -> flat index into the 42-dim kp3dc_robot stats block.
+# Per-view copies share DOF ids and stats; act.view picks the camera frame.
+_KP3DC_IDX = {name: i for i, name in enumerate(KP3DC.dof_names)}
 
 
 def dof_name(dof_id: int) -> str:
@@ -189,6 +193,8 @@ class ActionBatchDenormalizer:
             return ("joints", int(dof_name[1:])) if "joints" in stats else (None, 0)
         if dof_name == "gripper":
             return ("gripper", 0) if "gripper" in stats else (None, 0)
+        if dof_name in _KP3DC_IDX:
+            return ("kp3dc_robot", _KP3DC_IDX[dof_name]) if "kp3dc_robot" in stats else (None, 0)
 
         pos_idx = {"ee_x": 0, "ee_y": 1, "ee_z": 2}
         ori_idx = {"ee_rx": 0, "ee_ry": 1, "ee_rz": 2}

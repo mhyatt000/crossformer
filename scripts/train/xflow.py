@@ -31,6 +31,7 @@ from crossformer.cn.dataset import DataSourceE
 from crossformer.cn.dataset.dataset import Loader
 from crossformer.cn.model_factory import Vision
 from crossformer.data.grain.embody import decode_embody_name
+from crossformer.model.components.heads.loss_terms import load_loss_weights
 from crossformer.model.components.multiview import load_tips_params
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.run.train_step import lookup_guide, make_train_step
@@ -38,6 +39,7 @@ from crossformer.run.xflow_eval import EvalLoop
 from crossformer.utils.callbacks.base import extract_bundled_actions, flatten_obs
 from crossformer.utils.callbacks.denorm import ActionBatchDenormalizer
 from crossformer.utils.callbacks.hist import ChunkCallback, HistCallback
+from crossformer.utils.callbacks.kp3dc_viz import Kp3dcVizCallback
 from crossformer.utils.callbacks.rast import RastCallback
 from crossformer.utils.callbacks.save import SaveCallback
 from crossformer.utils.callbacks.synth_viz import SynthVizCallback
@@ -81,6 +83,7 @@ class Config:
     lr_schedule: str = "constant"  # constant | cosine | rsqrt
     clip_gradient: float | None = 1.0  # global gradient clipping (None to disable)
     frozen_keys: tuple[str, ...] = ()  # fnmatch patterns for frozen params
+    loss_weights: str | None = None  # per-DOF flow-loss weight yaml (config/loss-weights.yaml)
 
     # Token guidance
     use_guidance: bool = False  # enable guidance tokens
@@ -108,6 +111,7 @@ class Config:
     rast: RastCallback = default(RastCallback())
     val_mse: ValMSECallback = default(ValMSECallback())
     synth: SynthVizCallback = default(SynthVizCallback())
+    kp3dc: Kp3dcVizCallback = default(Kp3dcVizCallback())
 
     wandb: cn.Wandb = default(cn.Wandb())
 
@@ -398,7 +402,10 @@ def main(cfg: Config) -> None:
     print(f"  config: {model.config['optimizer']}")
     print(f"  tx: {tx}")
     state = TrainState.create(model=model, tx=tx, rng=train_rng)
-    train_step = make_train_step(model.module, lr_callable, param_norm_callable)
+    dof_weights = load_loss_weights(cfg.loss_weights) if cfg.loss_weights else None
+    if dof_weights is not None:
+        print(f"  loss_weights: {cfg.loss_weights} (non-unit dofs: {int((dof_weights != 1.0).sum())})")
+    train_step = make_train_step(model.module, lr_callable, param_norm_callable, dof_weights=dof_weights)
 
     # Checkpointing
     if cfg.save_dir is not None:
@@ -416,7 +423,7 @@ def main(cfg: Config) -> None:
     # that SynthVizCallback needs via ctx.stats.
     eval_loop = EvalLoop(
         loader=eval_dataset.dataset,
-        callbacks=[cfg.hist, cfg.chunks, cfg.viz, cfg.rast, cfg.val_mse, cfg.synth],
+        callbacks=[cfg.hist, cfg.chunks, cfg.viz, cfg.rast, cfg.val_mse, cfg.synth, cfg.kp3dc],
         denorm=ActionBatchDenormalizer(dataset.dataset_statistics),
         obs_keys=obs_keys,
         pred_rng=pred_rng,
