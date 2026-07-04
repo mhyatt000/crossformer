@@ -12,7 +12,7 @@ share the *same* BodyPart instance, so the DOF embeddings are identical.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import auto, Enum, StrEnum
 from typing import ClassVar, Iterator, Protocol, runtime_checkable, Sequence
 
@@ -21,6 +21,29 @@ from typing import ClassVar, Iterator, Protocol, runtime_checkable, Sequence
 # ---------------------------------------------------------------------------
 
 MASK_ID = 0
+
+# Camera-view slots per sample (authority: fix_views(n=3) in data/grain/restructure.py).
+# View ids are 1..MAX_VIEWS; 0 = NO_VIEW (global / view-independent).
+MAX_VIEWS = 3
+
+# Robot kinematic-chain keypoint names, in storage order (matches keypoint2id in
+# crossformer/run/dream.py — kp3dc_robot / kp3dw_robot arrays are (…, 14, 3)).
+KP_CHAIN: tuple[str, ...] = (
+    "link_base",
+    "link1",
+    "link2",
+    "link3",
+    "link4",
+    "link5",
+    "link6",
+    "link7",
+    "link_eef",
+    "link_tcp",
+    "left_finger_joint",
+    "right_finger_joint",
+    "left_finger_tip",
+    "right_finger_tip",
+)
 
 DOF: dict[str, int] = {
     "MASK": MASK_ID,
@@ -84,6 +107,10 @@ DOF: dict[str, int] = {
     "t_y": 250,
     "t_z": 251,
     **{f"r6d_{i}": 252 + i for i in range(6)},
+    # Robot kinematic-chain 3D keypoints, dream order (14 keypoints x xyz).
+    # Per-view kp3dc copies share these ids; act.view disambiguates the frame
+    # (0 = world / NO_VIEW, 1..MAX_VIEWS = camera of that view).
+    **{f"kp_{n}_{ax}": 258 + i * 3 + j for i, n in enumerate(KP_CHAIN) for j, ax in enumerate("xyz")},
 }
 
 VOCAB_SIZE = 512
@@ -190,6 +217,11 @@ class BodyPart:
     frame: Frame
     kind: PartKind
     norm_mask: tuple[bool, ...] | None = None
+    # per_view marks a catalog part that is replicated once per camera view by
+    # Embodiment.expanded; view is set only on those expanded copies (1..MAX_VIEWS,
+    # 0 = view-independent). All copies share dof_ids — act.view disambiguates.
+    per_view: bool = False
+    view: int = 0
 
     @property
     def dof_ids(self) -> tuple[int, ...]:
@@ -240,6 +272,16 @@ MANO_48 = BodyPart("mano_48", tuple(f"mano_{i}" for i in range(48)), Frame.ABSOL
 
 # 3D hand keypoints (21 joints x 3 coords = 63 DOFs) — legacy generic block
 KP3D_21 = BodyPart("kp3d_21", tuple(f"k3d_{i}" for i in range(63)), Frame.ABSOLUTE, PartKind.SPATIAL3D)
+
+# Robot kinematic-chain 3D keypoints in camera frame (kp3dc_robot), one copy
+# per camera view via per_view expansion. (H, V, 14, 3) in the data.
+KP3DC = BodyPart(
+    "kp3dc",
+    tuple(f"kp_{n}_{ax}" for n in KP_CHAIN for ax in "xyz"),
+    Frame.ABSOLUTE,
+    PartKind.SPATIAL3D,
+    per_view=True,
+)
 
 # Robot kinematic chain 3D keypoints (Cartesian positions at each joint)
 KP_BASE = BodyPart("kp_base", ("kp_base_x", "kp_base_y", "kp_base_z"), Frame.ABSOLUTE, PartKind.SPATIAL3D)
@@ -353,15 +395,30 @@ class Embodiment:
         type(self).REGISTRY[self.name] = self
 
     @property
+    def expanded(self) -> tuple[BodyPart, ...]:
+        """Parts with per-view parts replicated once per view (view = 1..MAX_VIEWS).
+
+        The action-slot layout (dof_ids, action_dim, embody_transform) is defined
+        over this expansion; the catalog keeps a single per_view part.
+        """
+        out: list[BodyPart] = []
+        for p in self.parts:
+            if p.per_view:
+                out.extend(replace(p, view=v) for v in range(1, MAX_VIEWS + 1))
+            else:
+                out.append(p)
+        return tuple(out)
+
+    @property
     def dof_ids(self) -> tuple[int, ...]:
         out: tuple[int, ...] = ()
-        for p in self.parts:
+        for p in self.expanded:
             out = out + p.dof_ids
         return out
 
     @property
     def action_dim(self) -> int:
-        return sum(p.action_dim for p in self.parts)
+        return sum(p.action_dim for p in self.expanded)
 
     @property
     def part_names(self) -> tuple[str, ...]:
@@ -394,7 +451,9 @@ Embodiment.REGISTRY = {}
 # ---------------------------------------------------------------------------
 
 # this defines bodyparts in embodiment. whether or not they exist and available in all datasets
-SINGLE = Embodiment("single", (ARM_7DOF, GRIPPER, CART_POS, CART_ORI))
+# KP3DC expands to one 42-dim part per view (see Embodiment.expanded); datasets
+# without kp3dc_robot get those slots zero-filled and force-masked.
+SINGLE = Embodiment("single", (ARM_7DOF, GRIPPER, CART_POS, CART_ORI, KP3DC))
 BIMANUAL = Embodiment("bimanual", (ARM_7DOF, GRIPPER, ARM_7DOF, GRIPPER))
 CART_GRIPPER = Embodiment("cart_gripper", (CART_POSE, GRIPPER))
 HUMAN_SINGLE = Embodiment("human_single", (CART_POS,))  #  HUMAN_TCP, KP_FINGERTIPS, KP_FINGER_JOINTS))
@@ -404,7 +463,6 @@ POSE_RUKA = Embodiment("pose_ruka", (CART_POSE, HAND_11))
 # horizon=1: model predicts current state, not future trajectory.
 # action == proprio by definition, so all body parts appear in both.
 SINGLE_GRIP_CAL = Embodiment("single_grip_cal", (ARM_7DOF, GRIPPER, KP2D_ARM10DOF, CAM_INTR, CAM_EXTR))
-
 
 # ---------------------------------------------------------------------------
 # Dataset

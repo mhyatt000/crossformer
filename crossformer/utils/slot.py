@@ -28,15 +28,20 @@ def split_by_bodypart(
     action: Array,
     ids: Array,
     embodiments: tuple[Embodiment, ...],
+    views: Array | None = None,
 ) -> dict[str, Array]:
     """Split (..., A) action into {part_name: slice} given possible embodiments.
 
     Body parts may be shuffled to any slot offset and some parts may be MASK'd
-    out. The candidate vocabulary is the union of parts across `embodiments`.
-    For each part we build a one-hot gather `(n, A)` from `ids == dof_ids`,
-    then einsum it against `action` to pull each DOF from whichever slot it
-    landed in. Missing / MASK'd parts produce all-zero gathers, hence zero
-    output. No offset scan.
+    out. The candidate vocabulary is the union of expanded parts across
+    `embodiments`. For each part we build a one-hot gather `(n, A)` from
+    `ids == dof_ids`, then einsum it against `action` to pull each DOF from
+    whichever slot it landed in. Missing / MASK'd parts produce all-zero
+    gathers, hence zero output. No offset scan.
+
+    Per-view parts share dof ids across their copies, so they additionally
+    require `views` (act.view, same layout as ids) to disambiguate; their
+    outputs are keyed ``f"{name}_v{view}"``.
     """
     A = ids.shape[-1]
     max_dim = max(e.action_dim for e in embodiments)
@@ -47,18 +52,28 @@ def split_by_bodypart(
 
     parts: dict[str, BodyPart] = {}
     for e in embodiments:
-        for p in e.parts:
-            parts.setdefault(p.name, p)
+        for p in e.expanded:
+            key = p.name if p.view == 0 else f"{p.name}_v{p.view}"
+            parts.setdefault(key, p)
 
     # Right-align ids with action's leading dims by inserting singleton axes.
     extra = action.ndim - ids.ndim
     if extra < 0:
         raise ValueError(f"action.ndim {action.ndim} < ids.ndim {ids.ndim}")
     ids_b = ids.reshape(*ids.shape[:-1], *(1,) * extra, ids.shape[-1])
+    views_b = None
+    if views is not None:
+        if views.shape != ids.shape:
+            raise ValueError(f"views {views.shape} must match ids {ids.shape}")
+        views_b = views.reshape(*views.shape[:-1], *(1,) * extra, views.shape[-1])
 
     out: dict[str, Array] = {}
-    for p in parts.values():
+    for key, p in parts.items():
         expected = jnp.asarray(p.dof_ids, dtype=ids.dtype)[:, None]  # (n, 1)
-        gather = (ids_b[..., None, :] == expected).astype(action.dtype)  # (..., n, A)
-        out[p.name] = (action[..., None, :] * gather).sum(-1)
+        gather = ids_b[..., None, :] == expected  # (..., n, A)
+        if p.view > 0:
+            if views_b is None:
+                raise ValueError(f"{key}: per-view part requires `views` (act.view) to disambiguate")
+            gather = gather & (views_b[..., None, :] == p.view)
+        out[key] = (action[..., None, :] * gather.astype(action.dtype)).sum(-1)
     return out

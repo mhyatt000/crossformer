@@ -4,8 +4,6 @@ Restructure raw trajectories into a unified format for training.
 
 from __future__ import annotations
 
-from rich import print
-from crossformer.utils.spec import spec
 import jax
 import numpy as np
 
@@ -49,19 +47,21 @@ def multiarray_transforms(x: dict) -> dict:
     """Apply the standard MultiArrayRecord transforms to a single step.
     we derrive proprio from the i=0 action and select i=0 info
     """
-    x = x | {'action': x["proprio"].copy()}
+    x = x | {"action": x["proprio"].copy()}
     x = x | {"proprio": jax.tree.map(lambda y: y[0], x["proprio"])}  # select first item from horizon
     x = x | {"observation": {k: x.pop(k) for k in ["image", "proprio"]}}
 
-    x['info'] = info =  jax.tree.map(flatten_info_leaf, x["info"])
-    x['task'] = {}
-    x["observation"]["timestep"] = sid = info['id']['step']
+    x["info"] = info = jax.tree.map(flatten_info_leaf, x["info"])
+    x["task"] = {}
+    x["observation"]["timestep"] = sid = info["id"]["step"]
     return x
+
 
 def init_zero_lang(x: dict) -> dict:
     """Initialize missing language embedding to zeros. noop for compatibility"""
     x = x | {"language.embedding": np.zeros((512,), dtype=np.float32)}
     return x
+
 
 def tag_name(x: dict, *, name: str) -> dict:
     x["dataset_name"] = str2np(name, length=32)
@@ -149,11 +149,10 @@ def fix_views(x: dict, n: int = 3) -> dict:
 
 
 def restructure_lift_058(x: dict, *, name: str, lang_key: str | None = None) -> dict:
-
     x = multiarray_transforms(x)
     x = init_zero_lang(x)
     x = tag_name(x, name=name)
-    x['info'] = tag_name(x['info'], name=name)
+    x["info"] = tag_name(x["info"], name=name)
 
     # normalize the camera-view axis to a fixed count (validity-ranked, aligned
     # across image/keypoints/extrinsics/masks). image stays a stacked (V,H,W,C)
@@ -164,10 +163,9 @@ def restructure_lift_058(x: dict, *, name: str, lang_key: str | None = None) -> 
 
 
 def restructure_lift_0513(x: dict, *, name: str, lang_key: str | None = None) -> dict:
-
     def adapt_058_0513(y) -> dict:
-        """ 0.5.13 has differences"""
-        y['image']= y.pop('images')
+        """0.5.13 has differences"""
+        y["image"] = y.pop("images")
         return y
 
     x = adapt_058_0513(x)
@@ -199,11 +197,10 @@ def _restructure_step_mano(x: dict, *, name: str, lang_key: str) -> dict:
 
 
 def restructure_mano_0513(x: dict, *, name: str, lang_key: str | None = None) -> dict:
-
     x = multiarray_transforms(x)
     x = init_zero_lang(x)
     x = tag_name(x, name=name)
-    x['info'] = tag_name(x['info'], name=name)
+    x["info"] = tag_name(x["info"], name=name)
 
 
 def restructure_xarm_dream(step: dict, *, name: str, lang_key: str | None = None) -> dict:

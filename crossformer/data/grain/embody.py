@@ -70,16 +70,17 @@ def build_action_block(
     Returns:
         dict with act.base (H, max_a) float32,
                   act.id  (max_a,)   int32,
+                  act.view (max_a,)  int32 (0 = NO_VIEW, 1..MAX_VIEWS per view),
                   mask.act (max_a,)  bool.
     """
     assert len(parts) == len(actions) == len(modes) == len(order)
-    if valid_masks is None:
-        valid_masks = [None] * len(parts)
-    assert len(valid_masks) == len(parts)
+    vms: list[np.ndarray | None] = list(valid_masks) if valid_masks is not None else [None] * len(parts)
+    assert len(vms) == len(parts)
     H = actions[0].shape[0]
 
     act_chunks: list[np.ndarray] = []
     id_chunks: list[np.ndarray] = []
+    view_chunks: list[np.ndarray] = []
     valid_chunks: list[np.ndarray] = []
 
     for idx in order:
@@ -90,11 +91,13 @@ def build_action_block(
         if mode == MASK:
             act_chunks.append(np.zeros((H, D), dtype=np.float32))
             id_chunks.append(np.full(D, MASK_DOF, dtype=np.int32))
+            view_chunks.append(np.zeros(D, dtype=np.int32))
             valid_chunks.append(np.zeros(D, dtype=bool))
         else:  # INCLUDE
             act_chunks.append(act.astype(np.float32))
             id_chunks.append(np.array(part.dof_ids, dtype=np.int32))
-            vm = valid_masks[idx]
+            view_chunks.append(np.full(D, part.view, dtype=np.int32))
+            vm = vms[idx]
             if vm is None:
                 valid_chunks.append(np.ones(D, dtype=bool))
             else:
@@ -107,11 +110,13 @@ def build_action_block(
 
     act_base = np.concatenate(act_chunks, axis=-1)  # (H, used)
     act_id = np.concatenate(id_chunks)  # (used,)
+    act_view = np.concatenate(view_chunks)  # (used,)
     valid = np.concatenate(valid_chunks)  # (used,)
 
     if pad_d > 0:
         act_base = np.pad(act_base, ((0, 0), (0, pad_d)))
         act_id = np.pad(act_id, (0, pad_d), constant_values=MASK_DOF)
+        act_view = np.pad(act_view, (0, pad_d))
         valid = np.pad(valid, (0, pad_d))
 
     mask_act = (act_id != MASK_DOF) & valid
@@ -119,6 +124,7 @@ def build_action_block(
     return {
         "act.base": act_base,
         "act.id": act_id,
+        "act.view": act_view,
         "mask.act": mask_act,
     }
 
@@ -144,6 +150,7 @@ PART_TO_ACTION_KEY: dict[str, str] = {
     "kp2d_arm10dof": "kp2d",
     "cam_intr": "cam_intr",
     "cam_extr": "cam_extr",
+    "kp3dc": "kp3dc_robot",
 }
 
 
@@ -151,7 +158,7 @@ def extract_part_actions(
     action_dict: dict[str, np.ndarray],
     embodiment: Embodiment,
     key_map: dict[str, str] | None = None,
-) -> list[np.ndarray]:
+) -> list[np.ndarray | None]:
     """Pull per-body-part action arrays from a flat action dict.
 
     Args:
@@ -160,17 +167,26 @@ def extract_part_actions(
         key_map: override for PART_TO_ACTION_KEY.
 
     Returns:
-        list of (H, D_i) arrays, one per body part in embodiment.parts.
+        list of (H, D_i) arrays, one per body part in embodiment.expanded.
+        None where the action key is absent (part must be force-masked).
+        Per-view parts slice their view from the (H, V, ...) array; trailing
+        dims are flattened (e.g. kp3dc (H, 14, 3) -> (H, 42)).
     """
     km = key_map or PART_TO_ACTION_KEY
-    out = []
-    for part in embodiment.parts:
+    out: list[np.ndarray | None] = []
+    for part in embodiment.expanded:
         key = km.get(part.name)
         if key is None:
             raise KeyError(f"no action key mapping for body part {part.name!r}")
         if key not in action_dict:
-            raise KeyError(f"action key {key!r} (for {part.name!r}) not in data. got={list(action_dict)}")
-        out.append(action_dict[key])
+            out.append(None)
+            continue
+        arr = np.asarray(action_dict[key])
+        if part.view > 0:
+            arr = arr[:, part.view - 1]
+        if arr.ndim > 2:
+            arr = arr.reshape(arr.shape[0], -1)
+        out.append(arr)
     return out
 
 
@@ -183,6 +199,10 @@ def build_action_norm_mask(
     km = key_map or PART_TO_ACTION_KEY
     parts_by_key: dict[str, list[BodyPart]] = {}
     for part in embodiment.parts:
+        if part.per_view:
+            # raw multiview arrays keep their (H, V, ...) shape here; the
+            # default all-True mask below broadcasts, a per-part mask can't
+            continue
         key = km.get(part.name)
         if key is None:
             raise KeyError(f"no action key mapping for body part {part.name!r}")
@@ -227,16 +247,36 @@ def build_embodiment_action(
             fully valid.
 
     Returns:
-        {"act.base": (H, max_a), "act.id": (max_a,), "mask.act": (max_a,)}.
+        {"act.base": (H, max_a), "act.id": (max_a,), "act.view": (max_a,), "mask.act": (max_a,)}.
     """
-    parts = list(embodiment.parts)
-    actions = extract_part_actions(action_dict, embodiment, key_map)
+    parts = list(embodiment.expanded)
+    extracted = extract_part_actions(action_dict, embodiment, key_map)
     modes = sample_modes(len(parts), rng, mask_prob)
+
+    # parts whose action key is absent in this dataset: zero-fill + force MASK
+    present = [i for i, a in enumerate(extracted) if a is not None]
+    assert present, f"no action keys found for any part of {embodiment.name!r}. got={list(action_dict)}"
+    H = extracted[present[0]].shape[0]  # type: ignore[union-attr]
+    actions: list[np.ndarray] = []
+    for i, a in enumerate(extracted):
+        if a is None:
+            actions.append(np.zeros((H, parts[i].action_dim), dtype=np.float32))
+            modes[i] = MASK
+        else:
+            actions.append(a)
+    if all(m == MASK for m in modes):  # keep the sample_modes guarantee
+        modes[present[rng.integers(len(present))]] = INCLUDE
+
     order = rng.permutation(len(parts)).tolist() if shuffle_slot else list(range(len(parts)))
     valid_masks: list[np.ndarray | None] | None = None
     if valid_mask_dict is not None:
         km = key_map or PART_TO_ACTION_KEY
-        valid_masks = [valid_mask_dict.get(km.get(p.name, ""), None) for p in parts]
+        valid_masks = []
+        for p in parts:
+            vm = valid_mask_dict.get(km.get(p.name, ""), None)
+            if vm is not None and p.view > 0:
+                vm = np.asarray(vm)[p.view - 1]  # (V, D) -> this view's (D,)
+            valid_masks.append(vm)
     return build_action_block(parts, actions, modes, order, max_a, valid_masks)
 
 
@@ -266,6 +306,28 @@ def decode_embody_name(arr: np.ndarray) -> str:
     return arr.astype(np.uint8).tobytes().rstrip(b"\x00").decode("utf-8")
 
 
+def kp3dc_valid(sample: dict) -> np.ndarray | None:
+    """Per-view kp3dc validity (V, 42) from per-keypoint + extrinsics masks.
+
+    Conservative over the horizon: a keypoint/view is valid only if valid at
+    every real (non-padded) chunk step. Padded steps (mask.horizon False) are
+    ignored.
+    """
+    m = sample.get("mask", {})
+    kp = m.get("proprio", {}).get("kp3dc_robot")  # (H, V, K) bool
+    if kp is None:
+        return None
+    kp = np.asarray(kp, dtype=bool)
+    w2c = m.get("state", {}).get("extr", {}).get("w2c")  # (H, V) bool
+    w2c = np.ones(kp.shape[:2], dtype=bool) if w2c is None else np.asarray(w2c, dtype=bool)
+    horizon = np.asarray(m.get("horizon", np.ones(kp.shape[0])), dtype=bool)  # (H,)
+
+    kp = np.where(horizon[:, None, None], kp, True).all(axis=0)  # (V, K)
+    w2c = np.where(horizon[:, None], w2c, True).all(axis=0)  # (V,)
+    valid = kp & w2c[:, None]  # (V, K)
+    return np.repeat(valid, 3, axis=-1)  # (V, 3K) — xyz per keypoint
+
+
 def embody_transform(
     sample: dict,
     *,
@@ -274,12 +336,16 @@ def embody_transform(
     mask_prob: float = 0.10,
     shuffle_slot: bool = True,
 ) -> dict:
-    """Grain .map() transform: adds act.base, act.id, act.embody, mask.act."""
+    """Grain .map() transform: adds act.base, act.id, act.view, act.embody, mask.act."""
     rng = np.random.default_rng()
     sample = note_bodypart(sample, embodiment=embodiment)
     # Consume per-part validity masks from restructure, if present.
     # Pop to avoid flatten/unflat collision with the top-level "mask.act" key.
     valid_mask_dict = sample.get("mask", {}).pop("act", None)
+    kpv = kp3dc_valid(sample)
+    if kpv is not None:
+        valid_mask_dict = dict(valid_mask_dict or {})
+        valid_mask_dict["kp3dc_robot"] = kpv  # (V, D); sliced per view part
     block = build_embodiment_action(
         sample["action"],
         embodiment,
