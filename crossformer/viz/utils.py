@@ -9,19 +9,15 @@ import imageio
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
+import wandb
 
 from crossformer.data.grain.metadata import ArrayStatistics
 from crossformer.data.oxe import ActionDim
-
-# from manotorch.manolayer import ManoLayer
-# from oikit.oi_image.oi_image import OakInkImageSequence
-# from oikit.oi_image.utils import persp_project
-from crossformer.viz._oikit import (  # OpenDRRenderer,
+from crossformer.viz._oikit import (
     edge_list_hand,
     edge_list_obj,
     vert_type_hand,
 )
-import wandb
 
 
 def persp_project(points3d, cam_intr):
