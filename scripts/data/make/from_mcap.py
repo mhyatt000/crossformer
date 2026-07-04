@@ -16,10 +16,10 @@ from tqdm import tqdm
 import tyro
 from webpolicy.client import Client
 
-from crossformer.data.arec.arec import ArrayRecordBuilder, WriterSpec
+from crossformer.data.arec.arec import ArrayRecordBuilder
 from crossformer.data.grain.loader import _apply_fd_limit
 from crossformer.data.grain.map import flatmap
-from crossformer.data.grain.write import BuildMGR
+from crossformer.data.grain.write import BuildMGR, make_writers
 from crossformer.data.mcap import McapLoader
 from crossformer.data.utils.trajectory import scan_noop
 from crossformer.run.dream import (
@@ -32,15 +32,6 @@ from crossformer.run.dream import (
 )
 from crossformer.utils.spec import diff, SimpleSpec, spec
 from crossformer.utils.tree import flat
-
-
-def make_writers(writer: Literal["source", "multisource"]) -> WriterSpec:
-    if writer == "source":
-        return {"data": ["*"]}
-    return {
-        "image": (["images"], {"options": "group_size:1"}),
-        "proprio": (["proprio", "info", "state", "mask"], {"options": "group_size:32"}),
-    }
 
 
 @dataclass

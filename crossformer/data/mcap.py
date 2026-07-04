@@ -146,6 +146,61 @@ def read_mcap(
     }
 
 
+def _constant(x: Any, name: str) -> Any:
+    x = np.asarray(x)
+    if not len(x) or not np.all(x == x[0]):
+        raise ValueError(f"RawImage {name} must be constant")
+    return x[0].item()
+
+
+def decode_raw_image(value: dict) -> np.ndarray:
+    """Decode a ``foxglove.RawImage`` topic into an ``[T, H, W, 3]`` RGB array."""
+    import cv2
+
+    data = value["data"]
+    h = _constant(data["height"], "height")
+    w = _constant(data["width"], "width")
+    step = _constant(data["step"], "step")
+    if step % w:
+        raise ValueError(f"RawImage step={step} is not divisible by width={w}")
+    c = step // w
+    images = data["data"]
+    if images.shape[1] != h * step:
+        raise ValueError(f"RawImage data width={images.shape[1]} does not match height x step={h * step}")
+    images = images.reshape(len(images), h, w, c)
+    if c == 2:  # YUYV422 -> RGB
+        images = np.stack([cv2.cvtColor(image, cv2.COLOR_YUV2RGB_YUY2) for image in images])
+    return images
+
+
+def camera_name(topic: str) -> str:
+    """Turn an image topic path into a short, stable camera key.
+
+    ``/cam/side/image_raw`` -> ``cam_side``;
+    ``/camera/camera/color/image_raw/compressed`` -> ``camera``.
+    """
+    drop = {"image_raw", "compressed", "color", "image", "raw"}
+    parts = [p for p in topic.strip("/").split("/") if p not in drop]
+    deduped: list[str] = []
+    for p in parts:  # collapse consecutive duplicates (camera/camera -> camera)
+        if not deduped or deduped[-1] != p:
+            deduped.append(p)
+    return "_".join(deduped) if deduped else topic.strip("/")
+
+
+def decode_cameras(tree: dict) -> dict[str, np.ndarray]:
+    """Decode every RawImage topic into a name-keyed ``{cam: images}``, truncated to the shortest stream."""
+    images = {
+        camera_name(topic): decode_raw_image(value)
+        for topic, value in tree["topics"].items()
+        if value["schema"] == "foxglove.RawImage"
+    }
+    if not images:
+        raise ValueError(f"episode has no RawImage topics: {sorted(tree['topics'])}")
+    n = min(len(v) for v in images.values())
+    return {k: v[:n] for k, v in images.items()}
+
+
 class McapLoader:
     """Load one MCAP file as one episode."""
 
@@ -184,8 +239,18 @@ class McapLoader:
             max_messages_per_topic=self.max_messages_per_topic,
         )
 
-    def dataset(self) -> grain.MapDataset[dict[str, Any]]:
-        read = partial(read_mcap, max_messages_per_topic=self.max_messages_per_topic)
+    def dataset(
+        self,
+        *,
+        progress_offset: int | None = None,
+        progress_slots: int = 1,
+    ) -> grain.MapDataset[dict[str, Any]]:
+        read = partial(
+            read_mcap,
+            max_messages_per_topic=self.max_messages_per_topic,
+            progress_offset=progress_offset,
+            progress_slots=progress_slots,
+        )
         return grain.MapDataset.source(self.files).map_with_index(read)
 
     def iter_dataset(
@@ -196,13 +261,10 @@ class McapLoader:
         stop: int | None = None,
         show_message_progress: bool = False,
     ) -> Iterable[dict[str, Any]]:
-        read = partial(
-            read_mcap,
-            max_messages_per_topic=self.max_messages_per_topic,
+        ds = self.dataset(
             progress_offset=1 if show_message_progress else None,
             progress_slots=max(1, read_threads),
         )
-        ds = grain.MapDataset.source(self.files).map_with_index(read)
         if stop is not None:
             ds = ds[:stop]
         return ds.to_iter_dataset(
