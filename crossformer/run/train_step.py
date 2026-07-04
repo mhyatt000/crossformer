@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import Callable
+from typing import Any, Callable
 
 from einops import rearrange
 import jax
+from jax import Array
 import jax.numpy as jnp
+from jax.typing import ArrayLike
 import optax
 
 from crossformer.utils.mytyping import Params
@@ -27,10 +29,10 @@ def lookup_guide(batch: dict, keys: tuple[str, ...]) -> jnp.ndarray:
 
 
 def make_train_step(
-    module,
+    module: Any,
     lr_callable: float | Callable[[int], float] = 1e-3,
     param_norm_callable: Callable[[Params], float] = optax.global_norm,
-):
+) -> Callable:
     """Build a compiled train step using bundled action format.
 
     Expects actions as (B, W, H, max_a) with dof_ids from act.id.
@@ -48,7 +50,19 @@ def make_train_step(
         lr_callable = lambda _: _lr
 
     @partial(jax.jit, static_argnames=("train",))
-    def train_step(state, obs, task, pad_mask, actions, dof_ids, chunk_steps, guide_input=None, train=True):
+    def train_step(
+        state: Any,
+        obs: Any,
+        task: Any,
+        pad_mask: ArrayLike,
+        actions: ArrayLike,
+        dof_ids: ArrayLike,
+        chunk_steps: ArrayLike,
+        guide_input: ArrayLike | None = None,
+        view_ids: ArrayLike | None = None,
+        mask_act: ArrayLike | None = None,
+        train: bool = True,
+    ) -> tuple[Any, dict[str, Any]]:
         """Bundled train step: fwd transformer, compute loss on unified action block.
 
         Args:
@@ -60,6 +74,8 @@ def make_train_step(
             dof_ids: (B, max_a) DOF vocab IDs from act.id (MASK_ID=0 for padding).
             chunk_steps: (B, H) temporal positions — just arange(H) for now.
             guide_input: optional (B, S, D) guidance signal.
+            view_ids: optional (B, max_a) per-slot camera id from act.view (zeros when None).
+            mask_act: optional (B, max_a) per-slot supervision mask from mask.act.
             train: bool.
 
         Returns:
@@ -68,7 +84,7 @@ def make_train_step(
         rng = jax.random.fold_in(state.rng, state.step)
         params = state.model.params
 
-        def _total_loss(params):
+        def _total_loss(params: Any) -> tuple[Array, dict[str, Array]]:
             bound = module.bind({"params": params}, rngs={"dropout": rng})
             transformer_outputs = bound.crossformer_transformer(obs, task, pad_mask, train=train)
 
@@ -77,8 +93,10 @@ def make_train_step(
                 actions,
                 dof_ids,
                 chunk_steps,
+                view_ids=view_ids,
                 train=train,
                 guide_input=guide_input,
+                mask_act=mask_act,
             )
             return loss, metrics
 

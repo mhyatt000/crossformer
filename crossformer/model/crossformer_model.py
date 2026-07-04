@@ -77,7 +77,7 @@ class CrossFormerModel:
     example_batch: Data
     dataset_statistics: Data | None = struct.field(pytree_node=False)
 
-    def create_tasks(self, goals: Data | None = None, texts: Sequence[str] | None = None):
+    def create_tasks(self, goals: Data | None = None, texts: Sequence[str] | None = None) -> Data:
         """Creates tasks dict from goals and texts.
 
         Args:
@@ -127,7 +127,7 @@ class CrossFormerModel:
         tasks: Data,
         timestep_pad_mask: ArrayLike,
         train: bool = False,
-    ):
+    ) -> Any:
         """Runs the transformer, but does shape checking on the inputs.
 
         Args:
@@ -174,8 +174,9 @@ class CrossFormerModel:
         head_name: str = "action",
         dof_ids: ArrayLike | None = None,
         chunk_steps: ArrayLike | None = None,
+        view_ids: ArrayLike | None = None,
         guide_input: ArrayLike | None = None,
-    ):
+    ) -> Any:
         """Samples actions from the model. See `action_heads.py` for more info.
 
         Args:
@@ -188,6 +189,7 @@ class CrossFormerModel:
             train: whether to run in train mode
             dof_ids: (batch_size, max_a) DOF vocab IDs (required for XFlowHead).
             chunk_steps: (batch_size, max_h) temporal positions (required for XFlowHead).
+            view_ids: (batch_size, max_a) per-slot camera id from act.view (optional; zeros when None).
             ...see `action_heads.py` for the rest of the kwargs.
         Returns:
             actions: (*sample_shape, batch_size, action_horizon, action_dim)
@@ -212,6 +214,8 @@ class CrossFormerModel:
             head_kwargs["dof_ids"] = dof_ids
         if chunk_steps is not None:
             head_kwargs["chunk_steps"] = chunk_steps
+        if view_ids is not None:
+            head_kwargs["view_ids"] = view_ids
         if guide_input is not None:
             head_kwargs["guide_input"] = guide_input
 
@@ -341,7 +345,7 @@ class CrossFormerModel:
         step: int,
         checkpoint_path: str | None = None,
         checkpoint_manager: orbax.checkpoint.CheckpointManager | None = None,
-    ):
+    ) -> None:
         """Saves a model, as well as corresponding metadata needed for `load_pretrained`. Takes either a
         pre-existing checkpoint manager (which already knows where to save the checkpoint) or a path to a
         directory to save the checkpoint to.
@@ -396,7 +400,7 @@ class CrossFormerModel:
         verbose: bool = False,
         rng: PRNGKey | None = None,
         dataset_statistics: Data | None = None,
-    ):
+    ) -> "CrossFormerModel":
         """Initializes a model with a fresh set of weights from a given config + example_batch.
 
         Args:
@@ -428,7 +432,7 @@ class CrossFormerModel:
             )  # Prints out the parameter count of our model, and tokenizer details
 
         @jax.jit
-        def _init(rng):
+        def _init(rng: Any) -> Any:
             return module.init(rng, *init_args, train=False)
 
         params = _init(rng)["params"]
@@ -444,14 +448,14 @@ class CrossFormerModel:
 
 
 def _verify_shapes(
-    pytree,
+    pytree: Any,
     name: str,
-    example_pytree,
+    example_pytree: Any,
     starting_dim: int = 0,
     strict: bool = False,
     raise_error: bool = True,
     silent: bool = False,
-):
+) -> Any:
     weak_fail, fail = False, False
     pytree_flat = flax.traverse_util.flatten_dict(pytree)
     example_pytree_flat = flax.traverse_util.flatten_dict(example_pytree)
@@ -496,7 +500,7 @@ def _verify_shapes(
     return weak_fail or fail
 
 
-def _stats_to_arrays(stats):
+def _stats_to_arrays(stats: Any) -> Any:
     if isinstance(stats, dict):
         return {k: _stats_to_arrays(v) for k, v in stats.items()}
     if stats is None:
@@ -504,7 +508,7 @@ def _stats_to_arrays(stats):
     return np.asarray(stats)
 
 
-def _stats_to_jsonable(stats):
+def _stats_to_jsonable(stats: Any) -> Any:
     if isinstance(stats, dict):
         return {k: _stats_to_jsonable(v) for k, v in stats.items()}
     if stats is None:
@@ -512,7 +516,7 @@ def _stats_to_jsonable(stats):
     return np.asarray(stats).tolist()
 
 
-def _download_from_huggingface(huggingface_repo_id: str):
+def _download_from_huggingface(huggingface_repo_id: str) -> Any:
     import huggingface_hub
 
     folder = huggingface_hub.snapshot_download(huggingface_repo_id)

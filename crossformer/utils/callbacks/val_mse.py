@@ -1,3 +1,5 @@
+"""Fixed-batch action MSE eval callback for XFlow validation."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -6,119 +8,74 @@ from typing import Any, Mapping
 from einops import rearrange
 import jax
 import jax.numpy as jnp
+from jax.typing import ArrayLike
 import numpy as np
 from rich import print
 from rich.rule import Rule
 
-from crossformer.embody import DOF, MASK_ID
+from crossformer.embody import MASK_ID
 from crossformer.run.train_step import lookup_guide
-from crossformer.utils.callbacks.viz import ActionBatchDenormalizer
-
-
-@dataclass
-class ValMSEConfig:
-    """Config for ``ValMSECallback``."""
-
-    every: int = 0
-    head_name: str = "xflow"
-    ds_key: tuple[str, ...] = ("info", "dataset_name")
-    guide_keys: tuple[str, ...] | None = None
-    sample_idx: int = 0
-    print_sample: bool = True
-
-    def create(
-        self,
-        stats: Mapping[str, Any],
-        guide_keys: tuple[str, ...] | None = None,
-    ) -> ValMSECallback:
-        return ValMSECallback(
-            stats=stats,
-            head_name=self.head_name,
-            ds_key=self.ds_key,
-            guide_keys=guide_keys or self.guide_keys or ("action.position", "action.orientation"),
-            sample_idx=self.sample_idx,
-            print_sample=self.print_sample,
-        )
+from crossformer.utils.callbacks.base import EvalContext
+from crossformer.utils.callbacks.denorm import dof_name
 
 
 @dataclass
 class ValMSECallback:
     """Log fixed-batch action MSE for XFlow validation."""
 
-    stats: Mapping[str, Any]
-    head_name: str = "xflow"
-    ds_key: tuple[str, ...] = ("info", "dataset_name")
-    guide_keys: tuple[str, ...] = ("action.position", "action.orientation")
+    name: str = "val_mse"
+    every: int = 0
+    head_name: str = "action"
     sample_idx: int = 0
     print_sample: bool = True
     _eval_fns: dict[bool, Any] = field(default_factory=dict, init=False, repr=False)
 
-    def __post_init__(self):
-        self.denorm = ActionBatchDenormalizer(self.stats)
-
-    def every(
-        self,
-        model,
-        params,
-        batch: Mapping[str, Any],
-        step: int,
-        log_every: int,
-        rng,
-        use_guidance: bool,
-    ) -> dict[str, float] | None:
-        if log_every <= 0 or (step + 1) % log_every != 0:
-            return None
-        return self(model, params, batch, step, rng, use_guidance)
-
-    def __call__(
-        self,
-        model,
-        params,
-        batch: Mapping[str, Any],
-        step: int,
-        rng,
-        use_guidance: bool,
-    ) -> dict[str, float]:
+    def __call__(self, ctx: EvalContext) -> dict[str, float]:
+        batch = ctx.batch
         obs = batch["observation"]
         task = batch.get("task", {"pad_mask_dict": {}})
         actions = batch["act"]["base"]
         if actions.ndim == 3:
             actions = actions[:, None, :, :]
         dof_ids = batch["act"]["id"]
+        view_ids = batch["act"].get("view")
+        if view_ids is None:
+            view_ids = jnp.zeros_like(dof_ids)
+        mask_act = batch.get("mask", {}).get("act")
         chunk_steps = jnp.tile(jnp.arange(actions.shape[2], dtype=jnp.float32)[None], (actions.shape[0], 1))
-        ds_names = self.denorm.decode_dataset_names(jax.device_get(self._get(batch, self.ds_key)))
-        guide_input = lookup_guide(batch, self.guide_keys) if use_guidance else None
+        guide_input = lookup_guide(batch, ctx.guide_keys) if ctx.use_guidance else None
 
-        teacher, unguided, guided = self._eval_fn(model.module, use_guidance)(
-            params,
+        teacher, unguided, guided = self._eval_fn(ctx.model.module, ctx.use_guidance)(
+            ctx.params,
             obs,
             task,
             actions,
             dof_ids,
+            view_ids,
             chunk_steps,
             guide_input,
-            rng,
+            ctx.rng,
         )
 
         out = {}
         samples = {}
-        metrics, sample = self._collect("teacher", teacher, actions, dof_ids, ds_names)
+        metrics, sample = self._collect(ctx, "teacher", teacher, actions, dof_ids, mask_act)
         out.update(metrics)
         samples["teacher"] = sample
-        metrics, sample = self._collect("unguided", unguided, actions, dof_ids, ds_names)
+        metrics, sample = self._collect(ctx, "unguided", unguided, actions, dof_ids, mask_act)
         out.update(metrics)
         samples["unguided"] = sample
 
-        if use_guidance:
-            metrics, sample = self._collect("guided", guided, actions, dof_ids, ds_names)
+        if ctx.use_guidance:
+            metrics, sample = self._collect(ctx, "guided", guided, actions, dof_ids, mask_act)
             out.update(metrics)
             samples["guided"] = sample
 
         if self.print_sample:
-            self._print_sample(step, samples)
+            self._print_sample(ctx.step, samples)
         return out
 
-    def _eval_fn(self, module, use_guidance: bool):
+    def _eval_fn(self, module: Any, use_guidance: bool) -> Any:
         fn = self._eval_fns.get(use_guidance)
         if fn is not None:
             return fn
@@ -126,7 +83,17 @@ class ValMSECallback:
         head_name = self.head_name
 
         @jax.jit
-        def eval_fn(params, obs, task, actions, dof_ids, chunk_steps, guide_input, rng):
+        def eval_fn(
+            params: Any,
+            obs: Any,
+            task: Any,
+            actions: ArrayLike,
+            dof_ids: ArrayLike,
+            view_ids: ArrayLike,
+            chunk_steps: ArrayLike,
+            guide_input: ArrayLike | None,
+            rng: Any,
+        ) -> Any:
             bound = module.bind({"params": params})
             transformer_outputs = bound.crossformer_transformer(
                 obs,
@@ -140,6 +107,7 @@ class ValMSECallback:
                 a_t=actions,
                 dof_ids=dof_ids,
                 chunk_steps=chunk_steps,
+                view_ids=view_ids,
                 train=False,
                 guide_input=guide_input if use_guidance else None,
             )
@@ -149,6 +117,7 @@ class ValMSECallback:
                 rng=key_no,
                 dof_ids=dof_ids,
                 chunk_steps=chunk_steps,
+                view_ids=view_ids,
                 train=False,
                 guide_input=None,
             )
@@ -160,6 +129,7 @@ class ValMSECallback:
                     rng=key_yes,
                     dof_ids=dof_ids,
                     chunk_steps=chunk_steps,
+                    view_ids=view_ids,
                     train=False,
                     guide_input=guide_input,
                 )
@@ -170,15 +140,19 @@ class ValMSECallback:
 
     def _collect(
         self,
+        ctx: EvalContext,
         name: str,
-        pred,
-        gt,
-        dof_ids,
-        ds_names: list[str],
+        pred: ArrayLike,
+        gt: ArrayLike,
+        dof_ids: ArrayLike,
+        mask_act: ArrayLike | None = None,
     ) -> tuple[dict[str, float], dict[str, Any]]:
+        ds_names = ctx.ds_names
         pred = np.asarray(jax.device_get(pred), dtype=np.float32)
         gt = np.asarray(jax.device_get(gt), dtype=np.float32)
         dof_ids = np.asarray(jax.device_get(dof_ids))
+        if mask_act is not None:
+            mask_act = np.asarray(jax.device_get(mask_act), dtype=bool)
         if pred.ndim == 3:
             pred = rearrange(pred, "b w (h a) -> b w h a", h=gt.shape[2], a=gt.shape[3])
         pred = pred[:, 0, 0]
@@ -191,9 +165,11 @@ class ValMSECallback:
         per_dof: dict[str, list[float]] = {}
 
         for i, ds_name in enumerate(ds_names):
-            pred_i = self.denorm.denormalize_slot(pred[i], dof_ids[i], ds_name)
-            gt_i = self.denorm.denormalize_slot(gt[i], dof_ids[i], ds_name)
-            valid = np.asarray(dof_ids[i]) != MASK_ID
+            pred_i = ctx.denorm.denormalize_slot(pred[i], dof_ids[i], ds_name)
+            gt_i = ctx.denorm.denormalize_slot(gt[i], dof_ids[i], ds_name)
+            # Per-DOF validity: prefer mask.act (respects per-joint vis gating);
+            # fall back to just dropping pad slots.
+            valid = mask_act[i] if mask_act is not None else np.asarray(dof_ids[i]) != MASK_ID
 
             pred_all.append(pred_i)
             gt_all.append(gt_i)
@@ -204,9 +180,10 @@ class ValMSECallback:
                 dof_id = int(dof_id)
                 if dof_id == MASK_ID:
                     continue
-                dof_name = self._dof_name(dof_id)
+                if mask_act is not None and not bool(mask_act[i, slot]):
+                    continue
                 err = float((pred_i[slot] - gt_i[slot]) ** 2)
-                per_dof.setdefault(dof_name, []).append(err)
+                per_dof.setdefault(dof_name(dof_id), []).append(err)
 
         pred_all = np.stack(pred_all).reshape(-1)
         gt_all = np.stack(gt_all).reshape(-1)
@@ -214,19 +191,19 @@ class ValMSECallback:
         gt_valid = np.concatenate(gt_valid) if gt_valid else np.empty((0,), dtype=np.float32)
 
         out = {
-            f"val_mse/{name}/all": self._mse(pred_all, gt_all),
-            f"val_mse/{name}/valid": self._mse(pred_valid, gt_valid),
-            f"val_mse/{name}/pred_min": float(pred_valid.min()),
-            f"val_mse/{name}/pred_max": float(pred_valid.max()),
-            f"val_mse/{name}/pred_mean": float(pred_valid.mean()),
-            f"val_mse/{name}/pred_std": float(pred_valid.std()),
-            f"val_mse/{name}/gt_min": float(gt_valid.min()),
-            f"val_mse/{name}/gt_max": float(gt_valid.max()),
-            f"val_mse/{name}/gt_mean": float(gt_valid.mean()),
-            f"val_mse/{name}/gt_std": float(gt_valid.std()),
+            f"{name}/all": self._mse(pred_all, gt_all),
+            f"{name}/valid": self._mse(pred_valid, gt_valid),
+            f"{name}/pred_min": float(pred_valid.min()),
+            f"{name}/pred_max": float(pred_valid.max()),
+            f"{name}/pred_mean": float(pred_valid.mean()),
+            f"{name}/pred_std": float(pred_valid.std()),
+            f"{name}/gt_min": float(gt_valid.min()),
+            f"{name}/gt_max": float(gt_valid.max()),
+            f"{name}/gt_mean": float(gt_valid.mean()),
+            f"{name}/gt_std": float(gt_valid.std()),
         }
-        for dof_name, errs in sorted(per_dof.items()):
-            out[f"val_mse/{name}/dof/{dof_name}"] = float(np.mean(np.asarray(errs, dtype=np.float32)))
+        for dname, errs in sorted(per_dof.items()):
+            out[f"{name}/dof/{dname}"] = float(np.mean(np.asarray(errs, dtype=np.float32)))
         s = min(self.sample_idx, len(ds_names) - 1)
         pred_sample = pred_all.reshape(len(ds_names), -1)[s]
         gt_sample = gt_all.reshape(len(ds_names), -1)[s]
@@ -254,19 +231,7 @@ class ValMSECallback:
                 }
             )
 
-    def _get(self, batch: Mapping[str, Any], path: tuple[str, ...]) -> Any:
-        cur = batch
-        for key in path:
-            cur = cur[key]
-        return cur
-
     def _mse(self, pred: np.ndarray, gt: np.ndarray) -> float:
         if pred.size == 0:
             return float("nan")
         return float(np.mean((pred - gt) ** 2))
-
-    def _dof_name(self, dof_id: int) -> str:
-        for name, idx in DOF.items():
-            if idx == dof_id:
-                return name
-        return f"dof_{dof_id}"

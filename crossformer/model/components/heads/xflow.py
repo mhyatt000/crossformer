@@ -37,6 +37,10 @@ class PerceiverDecoder(nn.Module):
         dropout_prob: dropout rate for attention and MLP.
         qk_channels: override QK projection dim (default: inferred from inputs).
         v_channels: override V projection dim.
+        factor_axes: optional (H, A) factorization of the query sequence
+            (seq_q == H*A, ordered "(h a)"). Each self-attn layer becomes two:
+            attention over A within each timestep, then over H within each
+            action slot — O(H*A^2 + A*H^2) instead of O((H*A)^2) logits.
     """
 
     num_heads: int = 8
@@ -46,6 +50,7 @@ class PerceiverDecoder(nn.Module):
     dropout_prob: float = 0.0
     qk_channels: int | None = None
     v_channels: int | None = None
+    factor_axes: tuple[int, int] | None = None
 
     @nn.compact
     def __call__(
@@ -84,14 +89,32 @@ class PerceiverDecoder(nn.Module):
             )(x, context, attention_mask=attention_mask, bias_weight=bias_weight, deterministic=deterministic)
 
             for i in range(self.num_self_attend_layers):
-                x = SelfAttention(
-                    num_heads=self.num_heads,
-                    widening_factor=self.widening_factor,
-                    dropout_prob=self.dropout_prob,
-                    qk_channels=self.qk_channels,
-                    v_channels=self.v_channels,
-                    name=f"self_attend_{i}" if legacy else f"self_attend_{b}_{i}",
-                )(x, deterministic=deterministic)
+                if self.factor_axes is None:
+                    x = SelfAttention(
+                        num_heads=self.num_heads,
+                        widening_factor=self.widening_factor,
+                        dropout_prob=self.dropout_prob,
+                        qk_channels=self.qk_channels,
+                        v_channels=self.v_channels,
+                        name=f"self_attend_{i}" if legacy else f"self_attend_{b}_{i}",
+                    )(x, deterministic=deterministic)
+                    continue
+
+                H, A = self.factor_axes
+                sa = {
+                    "num_heads": self.num_heads,
+                    "widening_factor": self.widening_factor,
+                    "dropout_prob": self.dropout_prob,
+                    "qk_channels": self.qk_channels,
+                    "v_channels": self.v_channels,
+                }
+                # attention over A within each timestep
+                x = rearrange(x, "b (h a) d -> (b h) a d", h=H, a=A)
+                x = SelfAttention(**sa, name=f"self_attend_a_{b}_{i}")(x, deterministic=deterministic)
+                # attention over H within each action slot
+                x = rearrange(x, "(b h) a d -> (b a) h d", h=H, a=A)
+                x = SelfAttention(**sa, name=f"self_attend_h_{b}_{i}")(x, deterministic=deterministic)
+                x = rearrange(x, "(b a) h d -> b (h a) d", h=H, a=A)
 
         return x
 
@@ -131,6 +154,10 @@ class XFlowHead(nn.Module, ActionHead):
     num_self_attend_layers: int = 1
     widening_factor: int = 4
     dropout_prob: float = 0.1
+    # Factor decoder self-attention over (max_horizon, max_dofs) instead of the
+    # full (max_horizon*max_dofs)^2 sequence. Changes the param tree (two
+    # self-attn layers per one) — not checkpoint-compatible with False.
+    factor_attn: bool = False
 
     # Flow matching
     time_dim: int = 32
@@ -182,6 +209,7 @@ class XFlowHead(nn.Module, ActionHead):
             num_self_attend_layers=self.num_self_attend_layers,
             widening_factor=self.widening_factor,
             dropout_prob=self.dropout_prob,
+            factor_axes=(self.max_horizon, self.max_dofs) if self.factor_attn else None,
             name="decoder",
         )
         self.output_proj = nn.Dense(1, name="output_proj")

@@ -73,6 +73,9 @@ class XFlow(CN):
     head_depth: int = 2
     head_heads: int = 8
     head_blocks: int = 1
+    # factor decoder self-attn over (horizon, dofs) axes: O(H*A^2 + A*H^2)
+    # instead of O((H*A)^2). New param tree — not checkpoint-compatible.
+    factor_attn: bool = False
     flow_steps: int = 50
     use_guidance: bool = False
     guidance_input_dim: int | None = None
@@ -89,6 +92,7 @@ class XFlow(CN):
             num_heads=self.head_heads,
             num_blocks=self.head_blocks,
             num_self_attend_layers=self.head_depth,
+            factor_attn=self.factor_attn,
             flow_steps=self.flow_steps,
             use_guidance=self.use_guidance,
             guidance_embed_dim=token_dim,
@@ -113,7 +117,7 @@ class ModelFactory(CN):
     def heads(self) -> list[str]:
         return [self.xflow.readout_name]
 
-    def _obs_tokenizers(self):
+    def _obs_tokenizers(self) -> list[ImageTokenizerCfg | LowdimTokenizerCfg | StackedViewTokenizerCfg]:
         toks = []
         if self.vision.stacked:
             toks.append(
@@ -146,7 +150,7 @@ class ModelFactory(CN):
     def create(self) -> dict[str, Any]:
         return {"model": self.to_model_cfg().create()}
 
-    def build(self):
+    def build(self) -> Any:
         return self.to_model_cfg().build()
 
     def spec(self) -> dict[str, Any]:
@@ -163,10 +167,10 @@ class ModelFactory(CN):
         flattened = flax.traverse_util.flatten_dict(self.spec(), keep_empty_nodes=True)
         return list(flattened.keys())
 
-    def delete(self, flat, verbose=False) -> dict[str, Any]:
+    def delete(self, flat: dict, verbose: bool = False) -> dict[str, Any]:
         _print = print if verbose else lambda *args, **kwargs: None
 
-        def inside(a: list[str], b: list[str]):
+        def inside(a: list[str], b: list[str]) -> bool:
             if len(a) > len(b):
                 return False
             return all(_a == _b for _a, _b in zip(a, b[: len(a)]))
@@ -205,7 +209,7 @@ class ModelFactory(CN):
             encoder=encoder,
         )
 
-    def make_obs_im_encoder(self):
+    def make_obs_im_encoder(self) -> ModuleSpec:
         if self.vision.use_dino:
             return ModuleSpec.create(
                 DinoV3Encoder,

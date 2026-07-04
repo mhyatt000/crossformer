@@ -27,7 +27,7 @@ from crossformer.utils.spec import spec
 from crossformer.utils.tree.core import drop_fn
 
 
-def resize(img, size):
+def resize(img: Any, size: tuple[int, int]) -> Any:
     x = jnp.asarray(img)
     *lead, h, w, c = x.shape
     x = x.reshape((-1, h, w, c)) if lead else x[None]
@@ -37,7 +37,7 @@ def resize(img, size):
     return np.asarray(x)
 
 
-def stack_and_pad(history: deque, num_obs: int):
+def stack_and_pad(history: deque, num_obs: int) -> Any:
     """
     Converts a list of observation dictionaries (`history`) into a single observation dictionary
     by stacking the values. Adds a padding mask to the observation that denotes which timesteps
@@ -62,7 +62,7 @@ class PolicyConfig:
     exp: float = 0.99  # exponential weighting for ensembler, higher means more weight on recent predictions
     warmup: bool = True  # whether to run a warmup phase to trigger compilation and stabilize predictions
 
-    def verify(self):
+    def verify(self) -> None:
         path = Path(self.path).expanduser().resolve()
         assert self.path and path.exists(), f"Model path {self.path} does not exist"
         cfg = path / "config.json"
@@ -92,7 +92,7 @@ class PolicyV2Config:
     denorm: bool = True  # denormalize actions (xflow or legacy)
     warmup: bool = True
 
-    def verify(self):
+    def verify(self) -> None:
         path = Path(self.path).expanduser().resolve()
         assert self.path and path.exists(), f"Model path {self.path} does not exist"
         cfg = path / "config.json"
@@ -133,11 +133,11 @@ TASKS = {
 
 
 class Ensembler:
-    def __init__(self, exp_weight: float, pred_horizon: int):
+    def __init__(self, exp_weight: float, pred_horizon: int) -> None:
         self.exp_weight = exp_weight
         self.history = deque(maxlen=pred_horizon)
 
-    def reset(self):
+    def reset(self) -> None:
         self.history.clear()
 
     def __call__(self, actions: np.ndarray) -> np.ndarray:
@@ -150,7 +150,7 @@ class Ensembler:
 
 
 class Policy(BasePolicy):
-    def __init__(self, cfg: PolicyConfig):
+    def __init__(self, cfg: PolicyConfig) -> None:
         self.cfg = cfg
 
         self.model: CrossFormerModel = CrossFormerModel.load_pretrained(cfg.path, step=cfg.step)
@@ -188,7 +188,7 @@ class Policy(BasePolicy):
         if self.cfg.warmup:
             self.warmup()
 
-    def warmup(self):
+    def warmup(self) -> None:
         self.task = self.model.example_batch["task"]
         warmup_batch = dict(self.model.example_batch)
         if self._is_xflow:
@@ -200,12 +200,12 @@ class Policy(BasePolicy):
             print(self.step(warmup_batch))
         self.reset_history()
 
-    def reset_history(self):
+    def reset_history(self) -> None:
         self.history = deque(maxlen=self.horizon)
         self.num_obs = 0
         self.emsembler.reset()
 
-    def reset(self, payload: dict):
+    def reset(self, payload: dict) -> Any:
         name = payload.get("model", "crossformer")
         if "goal" in payload:
             goal_size = self.img_hw.get("image_primary", (224, 224))
@@ -223,7 +223,7 @@ class Policy(BasePolicy):
 
         return {"reset": True}
 
-    def preprocess(self, obs: dict):
+    def preprocess(self, obs: dict) -> Any:
         norm_stats = self.model.dataset_statistics[self.dataset_name]["proprio"]
         obs = dict(obs)
         obs["timestep_pad_mask"] = self.model.example_batch["observation"]["timestep_pad_mask"]  # dummy
@@ -246,7 +246,7 @@ class Policy(BasePolicy):
                 obs[key] = (obs[key] - n["mean"]) / (n["std"])
         return obs
 
-    def step(self, payload: dict):
+    def step(self, payload: dict) -> Any:
         if payload.get("reset", False):
             return self.reset(payload)
 
@@ -273,8 +273,14 @@ class Policy(BasePolicy):
         if self._is_xflow:
             if "dof_ids" not in payload or "chunk_steps" not in payload:
                 raise ValueError("XFlowHead requires 'dof_ids' and 'chunk_steps' in the payload")
-            xflow_kwargs["dof_ids"] = jnp.asarray(payload["dof_ids"])[None]  # (1, A)
+            dof_ids = jnp.asarray(payload["dof_ids"])[None]  # (1, A)
+            xflow_kwargs["dof_ids"] = dof_ids
             xflow_kwargs["chunk_steps"] = jnp.asarray(payload["chunk_steps"])[None]  # (1, H)
+            # Per-slot camera id (act.view); zeros keep old clients (NO_VIEW everywhere).
+            if "view_ids" in payload:
+                xflow_kwargs["view_ids"] = jnp.asarray(payload["view_ids"])[None]  # (1, A)
+            else:
+                xflow_kwargs["view_ids"] = jnp.zeros_like(dof_ids)
 
         self.rng, key = jax.random.split(self.rng)
         actions = self.model.sample_actions(

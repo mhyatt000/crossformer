@@ -94,7 +94,10 @@ def build_action_block(
             view_chunks.append(np.zeros(D, dtype=np.int32))
             valid_chunks.append(np.zeros(D, dtype=bool))
         else:  # INCLUDE
-            act_chunks.append(act.astype(np.float32))
+            # camera-frame keypoints are NaN for uncalibrated views (see
+            # project_world_to_cam); zero-fill so masked slots can't poison the
+            # loss (NaN * 0 = NaN) — mask.act carries their validity.
+            act_chunks.append(np.nan_to_num(act.astype(np.float32)))
             id_chunks.append(np.array(part.dof_ids, dtype=np.int32))
             view_chunks.append(np.full(D, part.view, dtype=np.int32))
             vm = vms[idx]

@@ -15,6 +15,7 @@ from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 
+from flax.core import unfreeze
 import jax
 from jax.experimental import multihost_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
@@ -30,18 +31,18 @@ from crossformer.cn.dataset import DataSourceE
 from crossformer.cn.dataset.dataset import Loader
 from crossformer.cn.model_factory import Vision
 from crossformer.data.grain.embody import decode_embody_name
+from crossformer.model.components.multiview import load_tips_params
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.run.train_step import lookup_guide, make_train_step
-from crossformer.run.xflow_eval import extract_bundled_actions, flatten_obs, XFlowEvalCallbacks, XFlowEvalLoop
-from crossformer.utils.callbacks.rast import RastConfig
+from crossformer.run.xflow_eval import EvalLoop
+from crossformer.utils.callbacks.base import extract_bundled_actions, flatten_obs
+from crossformer.utils.callbacks.denorm import ActionBatchDenormalizer
+from crossformer.utils.callbacks.hist import ChunkCallback, HistCallback
+from crossformer.utils.callbacks.rast import RastCallback
 from crossformer.utils.callbacks.save import SaveCallback
 from crossformer.utils.callbacks.synth_viz import SynthVizCallback
-from crossformer.utils.callbacks.val_mse import ValMSEConfig
-from crossformer.utils.callbacks.viz import (
-    ChunkVizCallback,
-    HistVizCallback,
-    VizConfig,
-)
+from crossformer.utils.callbacks.val_mse import ValMSECallback
+from crossformer.utils.callbacks.viz import FlowPCACallback
 from crossformer.utils.jax_utils import initialize_compilation_cache
 from crossformer.utils.spec import spec
 from crossformer.utils.train_utils import create_optimizer, Timer, TrainState
@@ -98,13 +99,15 @@ class Config:
     resize: tuple[int, int] | None = (64, 64)  # final image size; None disables all resize stages
     no_resize: bool = False  # override resize to None from CLI (tyro-friendly)
     recompute: bool = False  # force recompute of cached dataset statistics
-    eval_frames: int = 64  # eval examples to poll for rast videos
-    hist_every: int = 0  # histogram log interval
-    synth_viz_every: int = 0  # synth kp2d viz interval (0 = disabled)
     quit_after_model: bool = False  # stop after model creation for debugging
-    viz: VizConfig = default(VizConfig())
-    val_mse: ValMSEConfig = default(ValMSEConfig())
-    rast: RastConfig = default(RastConfig())
+
+    # Eval callbacks (each schedules itself via .every; 0 = disabled)
+    hist: HistCallback = default(HistCallback())
+    chunks: ChunkCallback = default(ChunkCallback())
+    viz: FlowPCACallback = default(FlowPCACallback())
+    rast: RastCallback = default(RastCallback())
+    val_mse: ValMSECallback = default(ValMSECallback())
+    synth: SynthVizCallback = default(SynthVizCallback())
 
     wandb: cn.Wandb = default(cn.Wandb())
 
@@ -112,7 +115,7 @@ class Config:
 # -- helpers ------------------------------------------------------------------
 
 
-def infer_model_keys(obs):
+def infer_model_keys(obs: dict) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Infer image and proprio tokenizer keys from a real observation batch."""
     image_keys = tuple(k.removeprefix("image_") for k in sorted(obs) if k.startswith("image_"))
     proprio_keys = tuple(k.removeprefix("proprio_") for k in sorted(obs) if k.startswith("proprio_"))
@@ -123,8 +126,15 @@ def _num_tokens(tok_cfg: dict) -> int:
     return int(tok_cfg.get("kwargs", {}).get("num_tokens", 0))
 
 
-def _leaf_dtypes(tree) -> list[str]:
+def _leaf_dtypes(tree: Any) -> list[str]:
     return sorted({str(x.dtype) for x in jax.tree.leaves(tree) if hasattr(x, "dtype")})
+
+
+def _has_tips_subtree(tree: object) -> bool:
+    """True if a "tips" submodule (the frozen stacked encoder) lives in the tree."""
+    if not isinstance(tree, dict):
+        return False
+    return "tips" in tree or any(_has_tips_subtree(v) for v in tree.values())
 
 
 def _build_optimizer_cfg(cfg: Config) -> dict:
@@ -139,11 +149,18 @@ def _build_optimizer_cfg(cfg: Config) -> dict:
         if cfg.warmup_steps > 0
         else cfg.lr
     )
+    frozen = list(cfg.frozen_keys)
+    # Freeze the pretrained stacked TIPS trunk: freeze_weights routes matched
+    # params to optax.set_to_zero(), which drops the whole adamw update (grads
+    # AND weight decay), so decay can't shrink the loaded weights. "*tips*"
+    # matches the nested "tips" submodule path inside the tokenizer.
+    if cfg.model.vision.stacked and cfg.model.vision.stacked_encoder == "tips" and cfg.model.vision.stacked_freeze:
+        frozen.append("*tips*")
     return {
         "learning_rate": learning_rate,
         "weight_decay": cfg.weight_decay,
         "clip_gradient": cfg.clip_gradient,
-        "frozen_keys": list(cfg.frozen_keys) if cfg.frozen_keys else None,
+        "frozen_keys": frozen or None,
     }
 
 
@@ -153,7 +170,7 @@ def _align_batch_size(batch_size: int, device_count: int) -> int:
     return (batch_size // device_count) * device_count
 
 
-def per_embodiment_metrics(batch, update_info):
+def per_embodiment_metrics(batch: dict, update_info: dict) -> dict[str, float]:
     """Compute per-embodiment loss from sample_mse and act.embody.
 
     Returns dict like {"embodiment/single": mse, "embodiment/dual_arm": mse, ...}.
@@ -167,7 +184,7 @@ def per_embodiment_metrics(batch, update_info):
     return {f"embodiment/{k}": sum(v) / len(v) for k, v in groups.items()}
 
 
-def shard_batch(batch, mesh):
+def shard_batch(batch: Any, mesh: Mesh) -> Any:
     """Shard a host-local batch across the data axis."""
     return multihost_utils.host_local_array_to_global_array(batch, mesh, PartitionSpec("batch"))
 
@@ -194,7 +211,7 @@ def _save_path(cfg: Config) -> str:
 # -- main ---------------------------------------------------------------------
 
 
-def main(cfg: Config):
+def main(cfg: Config) -> None:
     initialize_compilation_cache()
     devices = jax.devices()
     mesh = Mesh(devices, axis_names="batch")
@@ -284,8 +301,15 @@ def main(cfg: Config):
     cfg.model.xflow.max_horizon = max_h
     cfg.model.xflow.use_guidance = cfg.use_guidance
     cfg.model.xflow.guidance_input_dim = None if guide_example is None else guide_example.shape[-1]
-    example_obs = flatten_obs(example_batch["observation"], obs_keys)
+    example_obs = flatten_obs(
+        example_batch["observation"], obs_keys, view_mask=example_batch.get("mask", {}).get("view")
+    )
 
+    # With obs_keys empty, example_obs carries every observation leaf verbatim,
+    # including the stacked "image" (B, W, V, H, W, C) and the injected view_mask
+    # the stacked tokenizer needs. The image_* union below is a no-op on the
+    # stacked path (infer_model_keys finds no image_* keys) but keeps the legacy
+    # named-key path working.
     init_obs = dict(example_obs)
     init_obs |= {
         k: v
@@ -339,6 +363,15 @@ def main(cfg: Config):
     if cfg.quit_after_model:
         print("quit_after_model=True; stopping after model creation")
         return
+
+    # Load pretrained TIPS weights into every "tips" subtree (stacked encoder).
+    # The optimizer freezes these params (see _build_optimizer_cfg), so this is
+    # the only place they get their pretrained values.
+    if _has_tips_subtree(model.params):
+        loaded = load_tips_params(unfreeze(model.params), variant=cfg.model.vision.tips_variant)
+        model = model.replace(params=loaded)
+        print(f"  tips: loaded pretrained '{cfg.model.vision.tips_variant}' weights")
+
     model = model.replace(
         params=jax.tree.map(lambda x: jax.device_put(x, replicated_sharding), model.params),
         example_batch=jax.tree.map(lambda x: jax.device_put(x, replicated_sharding), model.example_batch),
@@ -348,8 +381,9 @@ def main(cfg: Config):
     print(f"  params: {n_params:,}")
     print(f"  param dtypes: {param_dtypes}")
     print(f"  heads: {list(model.module.heads.keys())}")
-    if cfg.frozen_keys:
-        print(f"  frozen_keys: {list(cfg.frozen_keys)}")
+    effective_frozen = model.config["optimizer"].get("frozen_keys")
+    if effective_frozen:
+        print(f"  frozen_keys: {effective_frozen}")
     wandb.config.update({"n_params": n_params}, allow_val_change=True)
 
     # Guidance config sanity check
@@ -377,35 +411,19 @@ def main(cfg: Config):
         save_callback = SaveCallback(None)
         print("  [dim]no save_dir — checkpoints disabled[/]")
 
-    hist_cb = HistVizCallback(stats=dataset.dataset_statistics)
-    chunk_cb = ChunkVizCallback(stats=dataset.dataset_statistics)
-    viz_cb = cfg.viz.create()
-    rast_cb = cfg.rast.create()
-    val_mse_cb = cfg.val_mse.create(stats=dataset.dataset_statistics, guide_keys=cfg.guide_keys)
-    # SynthVizCallback needs the raw DatasetStatistics (has .unnormalize);
-    # the dataset_statistics property returns a JSON-serialized form used by
-    # other callbacks.
-    synth_viz_cb = SynthVizCallback(stats=dataset.statistics) if cfg.synth_viz_every > 0 else None
-    eval_loop = XFlowEvalLoop(
+    # dataset.dataset_statistics is the JSON-serialized form the denormalizer
+    # reads; dataset.statistics is the raw DatasetStatistics (has .unnormalize)
+    # that SynthVizCallback needs via ctx.stats.
+    eval_loop = EvalLoop(
         loader=eval_dataset.dataset,
+        callbacks=[cfg.hist, cfg.chunks, cfg.viz, cfg.rast, cfg.val_mse, cfg.synth],
+        denorm=ActionBatchDenormalizer(dataset.dataset_statistics),
         obs_keys=obs_keys,
         pred_rng=pred_rng,
-        callbacks=XFlowEvalCallbacks(
-            hist_cb=hist_cb,
-            chunk_cb=chunk_cb,
-            viz_cb=viz_cb,
-            rast_cb=rast_cb,
-            val_mse_cb=val_mse_cb,
-            synth_viz_cb=synth_viz_cb,
-            wandb_log=cfg.wandb.log,
-            hist_every=cfg.hist_every,
-            viz_every=cfg.viz.every,
-            synth_viz_every=cfg.synth_viz_every,
-            val_every=cfg.val_mse.every,
-            eval_frames=cfg.eval_frames,
-            use_guidance=cfg.use_guidance,
-            guide_keys=cfg.guide_keys,
-        ),
+        stats=dataset.statistics,
+        use_guidance=cfg.use_guidance,
+        guide_keys=cfg.guide_keys,
+        wandb_log=cfg.wandb.log,
     )
 
     # Train
@@ -419,7 +437,7 @@ def main(cfg: Config):
         timer.tick("total")
         with timer("dataset"):
             batch = next(dsit)
-            obs = flatten_obs(batch["observation"], obs_keys)
+            obs = flatten_obs(batch["observation"], obs_keys, view_mask=batch.get("mask", {}).get("view"))
             task = batch.get("task", {"pad_mask_dict": {}})
             pad_mask = obs["timestep_pad_mask"]
             lowdim_active = True
@@ -434,7 +452,7 @@ def main(cfg: Config):
                 if cfg.guidance_drop_prob > 0.0 and guide_rng.random() < cfg.guidance_drop_prob:
                     guide_input = None
 
-            actions, dof_ids, chunk_steps = extract_bundled_actions(batch, max_h)
+            actions, dof_ids, chunk_steps, view_ids, mask_act = extract_bundled_actions(batch, max_h)
 
         with timer("train"):
             state, update_info = train_step(
@@ -446,6 +464,8 @@ def main(cfg: Config):
                 dof_ids,
                 chunk_steps,
                 guide_input=guide_input,
+                view_ids=view_ids,
+                mask_act=mask_act,
             )
         timer.tock("total")
         update_info = jax.device_get(update_info)
