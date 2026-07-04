@@ -143,7 +143,7 @@ class ArrayRecordBuilder:
         version: str,
         branch: str = "main",
         root: str = Path("~/.cache/arrayrecords"),
-        shard_size: int = 100_000,
+        shard_size: int = 5_000,  # 100_000,
         writer_options: str | None = "group_size:1",
         build_meta: dict[str, Any] | None = None,  # things that affect schema
         writers: WriterSpec | None = None,
@@ -441,7 +441,10 @@ class DecodingArrayRecordSource(grain.sour
 """
 
 
-def build_fn_per_step(*, episodes=None, fn=None):
+def build_fn_per_step(*, episodes=None, fn: Callable[Sequence[dict]] = None):
+    """Flattens episodes into step-wise records with episode_id and step_id.
+    assumes fn yields episodes, where each episode is an iterable of step dicts.
+    """
     assert episodes or fn
     iter = episodes if episodes else fn()
     for ep_id, ep in enumerate(iter):
@@ -453,7 +456,7 @@ def build_fn_per_step(*, episodes=None, fn=None):
 stackem = lambda *xs: jax.tree.map(lambda *ys: np.stack(ys), *xs)
 
 
-def build_fn_per_episode(*, episodes=None, fn=None):
+def build_fn_per_episode(*, episodes=None, fn: Callable[dict] = None):
     assert episodes or fn
     iter = episodes if episodes else fn()
     for ep_id, ep in enumerate(iter):
