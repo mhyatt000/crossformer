@@ -32,6 +32,7 @@ def make_train_step(
     module: Any,
     lr_callable: float | Callable[[int], float] = 1e-3,
     param_norm_callable: Callable[[Params], float] = optax.global_norm,
+    dof_weights: ArrayLike | None = None,
 ) -> Callable:
     """Build a compiled train step using bundled action format.
 
@@ -97,6 +98,7 @@ def make_train_step(
                 train=train,
                 guide_input=guide_input,
                 mask_act=mask_act,
+                dof_weights=dof_weights,
             )
             return loss, metrics
 

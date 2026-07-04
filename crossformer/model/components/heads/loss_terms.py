@@ -414,3 +414,72 @@ def load_loss_terms(
         assert isinstance(term, LossTerm), f"{key}: {target} is not a LossTerm"
         terms[key] = term
     return terms
+
+
+# ---------------------------------------------------------------------------
+# Per-DOF flow-loss weights — config/loss-weights.yaml
+# ---------------------------------------------------------------------------
+
+
+def _bodyparts_by_name() -> dict[str, BodyPart]:
+    import sys
+
+    import crossformer.embody as _embody
+
+    mod = sys.modules[_embody.__name__]
+    out: dict[str, BodyPart] = {}
+    for v in vars(mod).values():
+        if isinstance(v, BodyPart):
+            out.setdefault(v.name, v)
+    return out
+
+
+def dof_loss_weights(cfg: Mapping[str, Any]) -> np.ndarray:
+    """(VOCAB_SIZE,) per-DOF flow-loss weights from a config mapping.
+
+    Sections (both optional, defaults 1.0 everywhere):
+        bodypart: {part_name: w | [w0, ..., w_{dim-1}]} — scalar weights the
+            whole part; a list weights each DOF within the part (len == dim).
+        dof: {dof_name: w} — per token name in crossformer.embody.DOF; applied
+            after bodypart, so the more specific entry wins.
+
+    Per-view parts (kp3dc) share DOF ids across views, so a weight applies to
+    every view copy. Weights multiply the loss mask: masked_mean renormalizes
+    by the weight sum, so downweighting one part upweights the rest.
+    """
+    table = np.ones(VOCAB_SIZE, dtype=np.float32)
+
+    parts = _bodyparts_by_name()
+    for name, w in (cfg.get("bodypart") or {}).items():
+        part = parts.get(name)
+        if part is None:
+            raise KeyError(f"unknown bodypart {name!r}. known: {sorted(parts)}")
+        ids_ = np.asarray(part.dof_ids)
+        if isinstance(w, (int, float)):
+            table[ids_] = float(w)
+        else:
+            w = np.asarray(w, dtype=np.float32)
+            if w.shape != (part.action_dim,):
+                raise ValueError(f"{name!r}: weight list len {w.shape} != part dim {part.action_dim}")
+            table[ids_] = w
+
+    from crossformer.embody import DOF
+
+    for name, w in (cfg.get("dof") or {}).items():
+        if name not in DOF:
+            raise KeyError(f"unknown dof name {name!r}")
+        table[DOF[name]] = float(w)
+
+    return table
+
+
+def load_loss_weights(path: str | Path) -> np.ndarray:
+    """Load config/loss-weights.yaml into a (VOCAB_SIZE,) weight table."""
+    import yaml
+
+    with open(path) as f:
+        cfg = yaml.safe_load(f) or {}
+    unknown = set(cfg) - {"bodypart", "dof"}
+    if unknown:
+        raise KeyError(f"loss-weights config has unknown sections: {sorted(unknown)}")
+    return dof_loss_weights(cfg)

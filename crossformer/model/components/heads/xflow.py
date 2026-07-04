@@ -449,6 +449,7 @@ class XFlowHead(nn.Module, ActionHead):
         guide_input: ArrayLike | None = None,
         guidance_mask: ArrayLike | None = None,
         mask_act: ArrayLike | None = None,
+        dof_weights: ArrayLike | None = None,
     ) -> tuple[Array, dict[str, Array]]:
         """Compute flow matching loss.
 
@@ -462,6 +463,10 @@ class XFlowHead(nn.Module, ActionHead):
             mask_act: (B, max_A) bool — per-slot supervision mask (optional). Broadcast
                 over the horizon and ANDed into the padding mask so invalid-but-included
                 DOFs (e.g. per-view invalid kp3dc) are not supervised against zeros.
+            dof_weights: (VOCAB_SIZE,) per-DOF loss weights (optional; see
+                loss_terms.load_loss_weights). Resolved per slot via dof_ids and
+                folded into the loss mask — masked_mean renormalizes by the
+                weight sum, so weights are relative.
         """
         actions_flat = rearrange(actions, "b w h a -> b w (h a)")
         actions_flat = jnp.clip(actions_flat, -self.max_action, self.max_action)
@@ -496,7 +501,13 @@ class XFlowHead(nn.Module, ActionHead):
             )
             act_mask = rearrange(act_mask, "b h a -> b (h a)")
             q_mask = q_mask & act_mask
-        mask = jnp.broadcast_to(q_mask[:, None, :], pred.shape)
+
+        weights = q_mask.astype(pred.dtype)
+        if dof_weights is not None:
+            w = jnp.asarray(dof_weights, dtype=pred.dtype)[jnp.asarray(dof_ids)]  # (B, max_A)
+            w = jnp.broadcast_to(w[:, None, :], (w.shape[0], self.max_horizon, self.max_dofs))
+            weights = weights * rearrange(w, "b h a -> b (h a)")
+        mask = jnp.broadcast_to(weights[:, None, :], pred.shape)
 
         loss, metrics = continuous_loss(pred, target, mask, loss_type=self.loss_type)
         return loss * self.loss_weight, metrics

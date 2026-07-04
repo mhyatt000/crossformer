@@ -171,3 +171,95 @@ def test_load_loss_terms_from_yaml() -> None:
 def test_load_loss_terms_requires_fk() -> None:
     with pytest.raises((ValueError, TypeError)):
         load_loss_terms(_LOSS_YAML, fk_fn=None)
+
+
+# ---------------------------------------------------------------------------
+# per-DOF flow-loss weights
+# ---------------------------------------------------------------------------
+
+
+def test_dof_loss_weights_sections_and_precedence() -> None:
+    from crossformer.model.components.heads.loss_terms import dof_loss_weights
+
+    table = dof_loss_weights(
+        {
+            "bodypart": {
+                "arm_7dof": 0.5,  # scalar -> whole part
+                "cart_pos": [1.0, 2.0, 3.0],  # list -> per dof
+            },
+            "dof": {"j0": 4.0},  # more specific: overrides arm_7dof scalar
+        }
+    )
+    assert table.shape == (512,)
+    np.testing.assert_allclose(table[list(ARM_7DOF.dof_ids)], [4.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5])
+    np.testing.assert_allclose(table[[DOF["ee_x"], DOF["ee_y"], DOF["ee_z"]]], [1.0, 2.0, 3.0])
+    np.testing.assert_allclose(table[DOF["gripper"]], 1.0)  # untouched default
+
+
+def test_dof_loss_weights_errors() -> None:
+    from crossformer.model.components.heads.loss_terms import dof_loss_weights
+
+    with pytest.raises(KeyError):
+        dof_loss_weights({"bodypart": {"nope": 1.0}})
+    with pytest.raises(KeyError):
+        dof_loss_weights({"dof": {"nope": 1.0}})
+    with pytest.raises(ValueError):
+        dof_loss_weights({"bodypart": {"cart_pos": [1.0, 2.0]}})  # wrong length
+
+
+def test_load_loss_weights_yaml() -> None:
+    from crossformer.model.components.heads.loss_terms import load_loss_weights
+
+    table = load_loss_weights(Path(__file__).parents[2] / "config" / "loss-weights.yaml")
+    # link1..link7 xyz downweighted (exact value is user-tunable), rest at 1.0
+    kp = table[list(KP3DC.dof_ids)]
+    assert (kp[3:24] < 1.0).all() and len(set(kp[3:24].tolist())) == 1
+    np.testing.assert_allclose(kp[:3], 1.0)
+    np.testing.assert_allclose(kp[24:], 1.0)
+
+
+def test_zero_weight_equals_masked_slot() -> None:
+    """dof_weights=0 on a slot must give the same loss as mask_act=False there."""
+    from crossformer.model.components.base import TokenGroup
+    from crossformer.model.components.heads.xflow import XFlowHead
+
+    head = XFlowHead(
+        readout_key="obs",
+        max_dofs=5,
+        max_horizon=2,
+        num_query_channels=16,
+        num_heads=2,
+        num_blocks=1,
+        num_self_attend_layers=1,
+        dropout_prob=0.0,
+        flow_steps=2,
+    )
+    tokens = jnp.linspace(0.0, 1.0, 2 * 3 * 4 * 8, dtype=jnp.float32).reshape(2, 3, 4, 8)
+    outputs = {"obs": TokenGroup(tokens=tokens, mask=jnp.ones((2, 3, 4), dtype=jnp.bool_))}
+    params = head.init(jax.random.PRNGKey(0), outputs, train=False)
+
+    actions = jnp.asarray(np.random.default_rng(0).standard_normal((2, 3, 2, 5)), dtype=jnp.float32)
+    dof_ids = jnp.array([[1, 2, 3, 8, 0], [1, 2, 3, 8, 0]], dtype=jnp.int32)
+    chunk_steps = jnp.array([[0.0, 1.0], [0.0, 1.0]], dtype=jnp.float32)
+
+    def run(**kw: object) -> float:
+        loss, _ = head.apply(
+            params,
+            outputs,
+            actions,
+            dof_ids,
+            chunk_steps,
+            train=False,
+            method=head.loss,
+            rngs={"dropout": jax.random.PRNGKey(7)},
+            **kw,
+        )
+        return float(loss)
+
+    # zero out the gripper (id 8) via weights vs via mask_act
+    weights = np.ones(512, dtype=np.float32)
+    weights[8] = 0.0
+    mask_act = jnp.array([[True, True, True, False, True]] * 2)
+    assert run(dof_weights=jnp.asarray(weights)) == pytest.approx(run(mask_act=mask_act), rel=1e-5)
+    # and both differ from the unweighted loss
+    assert run() != pytest.approx(run(mask_act=mask_act), rel=1e-5)

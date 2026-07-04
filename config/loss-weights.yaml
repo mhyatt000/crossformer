@@ -1,0 +1,37 @@
+# Per-DOF flow-loss weights. Pass via `--loss-weights config/loss-weights.yaml`.
+# Loaded by crossformer.model.components.heads.loss_terms:load_loss_weights.
+#
+# Sections (both optional; every DOF defaults to 1.0):
+#   bodypart: part_name -> weight            (scalar weights the whole part)
+#             part_name -> [w0..w_{dim-1}]   (list weights each DOF in the part)
+#   dof:      dof_name  -> weight            (token names from crossformer/embody.py DOF;
+#                                             applied after bodypart, so it wins)
+#
+# Weights fold into the loss mask; masked_mean renormalizes by the weight sum,
+# so they are relative — downweighting one part upweights everything else.
+# Per-view parts (kp3dc) share DOF ids, so a weight applies to all view copies.
+
+bodypart:
+  # kp3dc layout: 14 keypoints x xyz, KP_CHAIN order:
+  #   link_base, link1..link7, link_eef, link_tcp,
+  #   left/right_finger_joint, left/right_finger_tip
+  # Downweight the arm links (link1..link7); keep base/eef/tcp/fingers at 1.0.
+  kp3dc: [
+    1.0, 1.0, 1.0,  # link_base
+    0.1, 0.1, 0.1,  # link1
+    0.1, 0.1, 0.1,  # link2
+    0.1, 0.1, 0.1,  # link3
+    0.1, 0.1, 0.1,  # link4
+    0.1, 0.1, 0.1,  # link5
+    0.1, 0.1, 0.1,  # link6
+    0.1, 0.1, 0.1,  # link7
+    1.0, 1.0, 1.0,  # link_eef
+    1.0, 1.0, 1.0,  # link_tcp
+    1.0, 1.0, 1.0,  # left_finger_joint
+    1.0, 1.0, 1.0,  # right_finger_joint
+    1.0, 1.0, 1.0,  # left_finger_tip
+    1.0, 1.0, 1.0,  # right_finger_tip
+  ]
+
+# dof:
+#   gripper: 2.0
