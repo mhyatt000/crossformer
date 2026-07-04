@@ -18,7 +18,7 @@ from crossformer.utils.mytyping import PRNGKey
 
 from .base import ActionHead
 from .dof import build_query_mask, FactoredQueryEncoding
-from .io.attention import CrossAttention, make_cross_attention_mask, SelfAttention
+from .io.attention import CrossAttention, make_cross_attention_mask, make_view_bias_weight, SelfAttention
 from .losses import continuous_loss, sample_tau
 
 
@@ -48,13 +48,22 @@ class PerceiverDecoder(nn.Module):
     v_channels: int | None = None
 
     @nn.compact
-    def __call__(self, queries, context, *, deterministic=True, attention_mask=None):
+    def __call__(
+        self,
+        queries: Array,
+        context: Array,
+        *,
+        deterministic: bool = True,
+        attention_mask: ArrayLike | None = None,
+        bias_weight: ArrayLike | None = None,
+    ) -> Array:
         """Interleave cross-attn and self-attn blocks.
 
         Args:
             queries: (batch, seq_q, d_q)
             context: (batch, seq_kv, d_kv)
             attention_mask: (batch, seq_q, seq_kv) bool mask for cross-attention.
+            bias_weight: (batch, seq_q, seq_kv) multiplicative cross-attention weights.
 
         Returns:
             (batch, seq_q, d_q)
@@ -72,7 +81,7 @@ class PerceiverDecoder(nn.Module):
                 use_query_residual=True,
                 shape_for_attn="kv",
                 name="cross_attend" if legacy else f"cross_attend_{b}",
-            )(x, context, attention_mask=attention_mask, deterministic=deterministic)
+            )(x, context, attention_mask=attention_mask, bias_weight=bias_weight, deterministic=deterministic)
 
             for i in range(self.num_self_attend_layers):
                 x = SelfAttention(
@@ -142,7 +151,7 @@ class XFlowHead(nn.Module, ActionHead):
     compress_guidance: bool = False
     num_guidance_latents: int = 4
 
-    def setup(self):
+    def setup(self) -> None:
         D = self.num_query_channels
 
         if self.pool_strategy == "use_map":
@@ -192,29 +201,36 @@ class XFlowHead(nn.Module, ActionHead):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _embed(self, transformer_outputs: dict[str, TokenGroup], train: bool) -> Array:
-        """Return context embeddings as (B, W, E) pooled or (B, W, N, E) unpooled.
+    def _embed(self, transformer_outputs: dict[str, TokenGroup], train: bool) -> tuple[Array, Array]:
+        """Return context embeddings and aligned per-token view ids.
 
         Selection:
           readout_only=True  -> transformer_outputs[readout_key] only
           readout_only=False -> concat all groups along the token axis
 
         Pooling:
-          "pass"    -> (B, W, N, E) unpooled (K=N cross-attn tokens)
-          "mean"    -> (B, W, E) mean-reduced (K=1)
-          "use_map" -> (B, W, E) MAP-pooled (K=1)
+          "pass"    -> (B, W, N, E) unpooled (K=N cross-attn tokens), view (B, W, N)
+          "mean"    -> (B, W, E) mean-reduced (K=1), view (B, W) all-zero (mixed)
+          "use_map" -> (B, W, E) MAP-pooled (K=1), view (B, W) all-zero (mixed)
+
+        The per-token view ids ride on TokenGroup.view (0 for groups without one);
+        they survive the transformer's random view permutation because they travel
+        with the tokens rather than being reconstructed from group order.
         """
         if self.readout_only:
             token_group = transformer_outputs[self.readout_key]
         else:
             token_group = TokenGroup.concatenate(list(transformer_outputs.values()))
         assert token_group.tokens.ndim == 4
+        view = token_group.view
+        if view is None:
+            view = jnp.zeros(token_group.mask.shape, dtype=jnp.int32)
         if self.pool_strategy == "use_map":
-            return self.map_head(token_group, train=train)[:, :, 0]
+            return self.map_head(token_group, train=train)[:, :, 0], jnp.zeros(view.shape[:2], dtype=jnp.int32)
         if self.pool_strategy == "mean":
-            return token_group.tokens.mean(axis=-2)
+            return token_group.tokens.mean(axis=-2), jnp.zeros(view.shape[:2], dtype=jnp.int32)
         if self.pool_strategy == "pass":
-            return token_group.tokens
+            return token_group.tokens, view
         raise ValueError(f"{self.pool_strategy} not implemented!")
 
     def _build_queries(
@@ -222,22 +238,24 @@ class XFlowHead(nn.Module, ActionHead):
         chunk_steps: ArrayLike,
         dof_ids: ArrayLike,
         slot_pos: ArrayLike,
+        view_ids: ArrayLike,
         time: ArrayLike,
         a_t: ArrayLike,
     ) -> Array:
-        """Build factored conditioned queries: (chunk + dof + slot) + action + time.
+        """Build factored conditioned queries: (chunk + dof + slot + view) + action + time.
 
         Args:
             chunk_steps: (BW, max_H) float.
             dof_ids: (BW, max_A) int.
             slot_pos: (BW, max_A) float.
+            view_ids: (BW, max_A) int camera-view id per slot.
             time: (BW, 1) flow timestep.
             a_t: (BW, max_H, max_A) noisy actions.
 
         Returns:
             (BW, max_H*max_A, D)
         """
-        pos_q = self.query_pos_enc(chunk_steps, dof_ids, slot_pos)  # (BW, max_H*max_A, D)
+        pos_q = self.query_pos_enc(chunk_steps, dof_ids, slot_pos, view_ids)  # (BW, max_H*max_A, D)
 
         # Per-scalar action conditioning
         a_flat = rearrange(a_t, "bw h a -> bw (h a) 1")
@@ -266,6 +284,7 @@ class XFlowHead(nn.Module, ActionHead):
         dof_ids: ArrayLike | None = None,
         chunk_steps: ArrayLike | None = None,
         slot_pos: ArrayLike | None = None,
+        view_ids: ArrayLike | None = None,
         train: bool = True,
         guide_input: ArrayLike | None = None,
         guidance_mask: ArrayLike | None = None,
@@ -279,6 +298,7 @@ class XFlowHead(nn.Module, ActionHead):
             dof_ids: (B, max_A) int — MASK-padded DOF vocab IDs.
             chunk_steps: (B, max_H) float — padded temporal positions.
             slot_pos: (B, max_A) float — ordinal position in action vector.
+            view_ids: (B, max_A) int — camera-view id per slot (0 = NO_VIEW); None ⇒ zeros.
             guide_input: (B, S, D) optional raw guidance signal.
             guidance_mask: (B, G) int mask (1=keep, 0=drop for CFG).
 
@@ -286,7 +306,7 @@ class XFlowHead(nn.Module, ActionHead):
             (B, W, max_H*max_A) predicted velocity field.
         """
         max_H, max_A = self.max_horizon, self.max_dofs
-        embeddings = self._embed(transformer_outputs, train=train)
+        embeddings, kv_view = self._embed(transformer_outputs, train=train)
 
         # During init provide zero dummies
         if self.is_initializing():
@@ -296,6 +316,7 @@ class XFlowHead(nn.Module, ActionHead):
             dof_ids = jnp.zeros((B, max_A), dtype=jnp.int32)
             chunk_steps = jnp.zeros((B, max_H), dtype=jnp.float32)
             slot_pos = jnp.zeros((B, max_A), dtype=jnp.float32)
+            view_ids = jnp.zeros((B, max_A), dtype=jnp.int32)
             time = jnp.zeros((B, W, 1))
             a_t = jnp.zeros((B, W, max_H, max_A))
             if self.use_guidance and guide_input is None:
@@ -310,6 +331,8 @@ class XFlowHead(nn.Module, ActionHead):
                 jnp.arange(max_A, dtype=jnp.float32),
                 dof_ids.shape,
             )
+        if view_ids is None:
+            view_ids = jnp.zeros_like(dof_ids)
 
         if a_t.ndim == 3:
             a_t = rearrange(a_t, "b w (h a) -> b w h a", h=max_H, a=max_A)
@@ -318,8 +341,10 @@ class XFlowHead(nn.Module, ActionHead):
 
         # Merge batch and window: (B, W, ...) -> (BW, ...)
         embed_bw = rearrange(embeddings, "b w ... -> (b w) ...")
+        kv_view_bw = rearrange(kv_view, "b w ... -> (b w) ...")
         if embed_bw.ndim == 2:
             embed_bw = embed_bw[:, None, :]  # (BW, 1, E)
+            kv_view_bw = kv_view_bw[:, None]  # (BW, 1)
         time_bw = rearrange(time, "b w t -> (b w) t")
         a_t_bw = rearrange(a_t, "b w h a -> (b w) h a")
 
@@ -327,9 +352,15 @@ class XFlowHead(nn.Module, ActionHead):
         dof_bw = jnp.repeat(dof_ids, W, axis=0)
         chunk_bw = jnp.repeat(chunk_steps, W, axis=0)
         slot_bw = jnp.repeat(slot_pos, W, axis=0)
+        view_bw = jnp.repeat(view_ids, W, axis=0)
+
+        # Per-query view id: broadcast per-slot view over chunk steps, matching the
+        # (h a) query ordering of build_query_mask.
+        q_view = jnp.broadcast_to(view_bw[:, None, :], (B * W, max_H, max_A))
+        q_view = rearrange(q_view, "bw h a -> bw (h a)")
 
         # Build conditioned queries
-        queries = self._build_queries(chunk_bw, dof_bw, slot_bw, time_bw, a_t_bw)
+        queries = self._build_queries(chunk_bw, dof_bw, slot_bw, view_bw, time_bw, a_t_bw)
 
         # Query mask from padding — zero out padded queries
         q_mask = build_query_mask(chunk_bw, dof_bw, slot_bw)  # (BW, max_H*max_A)
@@ -345,6 +376,8 @@ class XFlowHead(nn.Module, ActionHead):
             guide_bw = jnp.tile(guidance_tokens[:, None], (1, W, 1, 1))
             guide_bw = rearrange(guide_bw, "b w g e -> (b w) g e")
             context = jnp.concatenate([context, guide_bw], axis=1)
+            # Appended guidance tokens are view-independent (view 0).
+            kv_view_bw = jnp.concatenate([kv_view_bw, jnp.zeros((B * W, G), dtype=kv_view_bw.dtype)], axis=1)
 
             if guidance_mask is not None:
                 g_mask_bw = jnp.tile(guidance_mask[:, None], (1, W, 1))
@@ -357,6 +390,7 @@ class XFlowHead(nn.Module, ActionHead):
             q_mask.astype(jnp.int32),
             kv_mask,
         )
+        bias_weight = make_view_bias_weight(q_view, kv_view_bw)
 
         # Decode
         decoded = self.decoder(
@@ -364,6 +398,7 @@ class XFlowHead(nn.Module, ActionHead):
             context,
             deterministic=not train,
             attention_mask=attention_mask,
+            bias_weight=bias_weight,
         )
 
         # Scalar output per query, flatten
@@ -381,9 +416,11 @@ class XFlowHead(nn.Module, ActionHead):
         dof_ids: ArrayLike,
         chunk_steps: ArrayLike,
         slot_pos: ArrayLike | None = None,
+        view_ids: ArrayLike | None = None,
         train: bool = True,
         guide_input: ArrayLike | None = None,
         guidance_mask: ArrayLike | None = None,
+        mask_act: ArrayLike | None = None,
     ) -> tuple[Array, dict[str, Array]]:
         """Compute flow matching loss.
 
@@ -393,6 +430,10 @@ class XFlowHead(nn.Module, ActionHead):
             dof_ids: (B, max_A) MASK-padded DOF vocab IDs.
             chunk_steps: (B, max_H) padded temporal positions.
             slot_pos: (B, max_A) float — ordinal position (optional, defaults to arange).
+            view_ids: (B, max_A) int — camera-view id per slot (optional, defaults to zeros).
+            mask_act: (B, max_A) bool — per-slot supervision mask (optional). Broadcast
+                over the horizon and ANDed into the padding mask so invalid-but-included
+                DOFs (e.g. per-view invalid kp3dc) are not supervised against zeros.
         """
         actions_flat = rearrange(actions, "b w h a -> b w (h a)")
         actions_flat = jnp.clip(actions_flat, -self.max_action, self.max_action)
@@ -412,6 +453,7 @@ class XFlowHead(nn.Module, ActionHead):
             dof_ids=dof_ids,
             chunk_steps=chunk_steps,
             slot_pos=slot_pos,
+            view_ids=view_ids,
             train=train,
             guide_input=guide_input,
             guidance_mask=guidance_mask,
@@ -419,6 +461,13 @@ class XFlowHead(nn.Module, ActionHead):
 
         # Loss mask from padding — broadcast across window dim
         q_mask = build_query_mask(chunk_steps, dof_ids, slot_pos)  # (B, max_H*max_A)
+        if mask_act is not None:
+            act_mask = jnp.broadcast_to(
+                jnp.asarray(mask_act, dtype=bool)[:, None, :],
+                (q_mask.shape[0], self.max_horizon, self.max_dofs),
+            )
+            act_mask = rearrange(act_mask, "b h a -> b (h a)")
+            q_mask = q_mask & act_mask
         mask = jnp.broadcast_to(q_mask[:, None, :], pred.shape)
 
         loss, metrics = continuous_loss(pred, target, mask, loss_type=self.loss_type)
@@ -435,14 +484,15 @@ class XFlowHead(nn.Module, ActionHead):
         dof_ids: ArrayLike,
         chunk_steps: ArrayLike,
         slot_pos: ArrayLike | None = None,
+        view_ids: ArrayLike | None = None,
         train: bool = False,
-        *args,
+        *args: object,
         sample_shape: tuple[int, ...] = (),
         guide_input: ArrayLike | None = None,
         guidance_mask: ArrayLike | None = None,
         cfg_scale: float | None = None,
         accumulate: bool = False,
-        **kwargs,
+        **kwargs: object,
     ) -> Array:
         """Predict actions by solving the flow ODE (Euler integration).
 
@@ -461,7 +511,7 @@ class XFlowHead(nn.Module, ActionHead):
             G = self.num_guidance_latents if self.compress_guidance else guide_input.shape[1]
             guidance_mask = jnp.ones((guide_input.shape[0], G), dtype=jnp.int32)
 
-        def sample_actions(rng):
+        def sample_actions(rng: PRNGKey) -> Array:
             rng, key = jax.random.split(rng)
             tokens = transformer_outputs[self.readout_key].tokens
             batch_size, window_size = tokens.shape[:2]
@@ -473,7 +523,7 @@ class XFlowHead(nn.Module, ActionHead):
             dt = 1.0 / max(self.flow_steps, 1)
             a_0 = a_t
 
-            def _velocity(a_t, time_val):
+            def _velocity(a_t: Array, time_val: ArrayLike) -> Array:
                 t = jnp.full((*a_t.shape[:2], 1), time_val, dtype=a_t.dtype)
                 return module.apply(
                     variables,
@@ -483,12 +533,13 @@ class XFlowHead(nn.Module, ActionHead):
                     dof_ids=dof_ids,
                     chunk_steps=chunk_steps,
                     slot_pos=slot_pos,
+                    view_ids=view_ids,
                     train=train,
                     guide_input=guide_input,
                     guidance_mask=guidance_mask,
                 )
 
-            def scan_fn(a_t, step):
+            def scan_fn(a_t: Array, step: Array) -> tuple[Array, Array | tuple]:
                 time_val = (step + 0.5) * dt
 
                 if cfg_scale is not None:
@@ -502,6 +553,7 @@ class XFlowHead(nn.Module, ActionHead):
                         dof_ids=dof_ids,
                         chunk_steps=chunk_steps,
                         slot_pos=slot_pos,
+                        view_ids=view_ids,
                         train=train,
                         guide_input=guide_input,
                         guidance_mask=zero_mask,

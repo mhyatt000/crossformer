@@ -13,8 +13,9 @@ from __future__ import annotations
 from einops import rearrange
 import flax.linen as nn
 from jax import Array
+import jax.numpy as jnp
 
-from crossformer.embody import ids, MASK_ID, VOCAB_SIZE
+from crossformer.embody import ids, MASK_ID, MAX_VIEWS, VOCAB_SIZE
 from crossformer.model.components.diffusion import FourierFeatures
 
 # ---------------------------------------------------------------------------
@@ -169,12 +170,15 @@ class FactoredQueryEncoding(nn.Module):
         chunk_steps: Array,
         dof_ids: Array,
         slot_pos: Array,
+        view_ids: Array | None = None,
     ) -> Array:
         """
         Args:
             chunk_steps: (batch, max_H) float — temporal positions.
             dof_ids: (batch, max_A) int — DOF vocab IDs.
             slot_pos: (batch, max_A) float — ordinal position in action vector.
+            view_ids: (batch, max_A) int — camera-view id per slot (0 = NO_VIEW);
+                None ⇒ all zeros (view-independent).
 
         Returns:
             (batch, max_H * max_A, D) query encodings.
@@ -200,7 +204,12 @@ class FactoredQueryEncoding(nn.Module):
         )(slot_pos[..., None])
         slot_emb = nn.Dense(D, name="slot_proj")(slot_emb)
 
-        # Sum DOF + slot per action position, then outer sum with chunk
-        act_emb = dof_emb + slot_emb  # (B, max_A, D)
+        # View: (B, max_A) → Embed → (B, max_A, D); row 0 = NO_VIEW no-op
+        if view_ids is None:
+            view_ids = jnp.zeros_like(dof_ids)
+        view_emb = nn.Embed(MAX_VIEWS + 1, D, name="view_embed")(view_ids)
+
+        # Sum DOF + slot + view per action position, then outer sum with chunk
+        act_emb = dof_emb + slot_emb + view_emb  # (B, max_A, D)
         pos_q = chunk_emb[:, :, None, :] + act_emb[:, None, :, :]
         return rearrange(pos_q, "b h a d -> b (h a) d")
