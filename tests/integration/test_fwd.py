@@ -1,16 +1,25 @@
 from __future__ import annotations
 
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 import pytest
 
+from crossformer.model.components.heads.xflow import XFlowHead
+from crossformer.model.components.tokenizers import LowdimObsTokenizer
+from crossformer.model.components.transformer import common_transformer_sizes
 from crossformer.model.crossformer_model import CrossFormerModel
-from scripts.train.xflow import Config, extract_bundled_actions, make_model_config, normalize_obs, resolve_obs_keys
+from crossformer.run.xflow_eval import extract_bundled_actions, flatten_obs
 
 pytestmark = pytest.mark.integration
 
 
-def _example_batch():
+def _spec(cls: type[object], **kwargs: object) -> dict[str, Any]:
+    return {"module": cls.__module__, "name": cls.__name__, "args": (), "kwargs": kwargs}
+
+
+def _example_batch() -> dict[str, Any]:
     b, w, h, a = 2, 1, 4, 5
     obs = {
         "proprio_joint": jnp.arange(b * w * 7, dtype=jnp.float32).reshape(b, w, 7) / 10.0,
@@ -38,28 +47,45 @@ def _example_batch():
     }
 
 
-def test_xflow_script_config_forward_smoke():
+def _model_config(*, max_h: int, max_a: int, max_w: int) -> dict[str, Any]:
+    token_dim, transformer_kwargs = common_transformer_sizes("dummy")
+    return {
+        "model": {
+            "observation_tokenizers": {
+                "proprio": _spec(LowdimObsTokenizer, obs_keys=("proprio_.*",)),
+            },
+            "task_tokenizers": {},
+            "heads": {
+                "action": _spec(
+                    XFlowHead,
+                    readout_key="readout_action",
+                    max_horizon=max_h,
+                    max_dofs=max_a,
+                    num_query_channels=32,
+                    num_heads=2,
+                    num_blocks=1,
+                    num_self_attend_layers=1,
+                    dropout_prob=0.0,
+                    flow_steps=3,
+                )
+            },
+            "readouts": {"action": 4},
+            "transformer_kwargs": transformer_kwargs,
+            "token_embedding_size": token_dim,
+            "max_horizon": max_w,
+        }
+    }
+
+
+def test_xflow_script_config_forward_smoke() -> None:
     batch = _example_batch()
-    obs_keys = resolve_obs_keys(batch["observation"], ("proprio_.*",))
-    obs = normalize_obs(batch["observation"], obs_keys)
+    obs = flatten_obs(batch["observation"], ("proprio_pose",))
     max_h = batch["act"]["base"].shape[1]
     max_a = batch["act"]["id"].shape[-1]
     max_w = obs["timestep_pad_mask"].shape[1]
 
-    cfg = Config(
-        transformer_size="dummy",
-        obs_keys=("proprio_.*",),
-        use_vision=False,
-        use_guidance=False,
-        head_channels=32,
-        head_depth=1,
-        head_heads=2,
-        flow_steps=3,
-    )
-    config = make_model_config(cfg, max_h=max_h, max_a=max_a, max_w=max_w)
-
     model = CrossFormerModel.from_config(
-        config,
+        _model_config(max_h=max_h, max_a=max_a, max_w=max_w),
         {"observation": obs, "task": batch["task"]},
         text_processor=None,
         verbose=False,
@@ -73,9 +99,9 @@ def test_xflow_script_config_forward_smoke():
         obs["timestep_pad_mask"],
         train=False,
     )
-    assert "readout_xflow" in outputs
-    assert outputs["readout_xflow"].tokens.shape[:2] == (2, 1)
-    assert jnp.all(jnp.isfinite(outputs["readout_xflow"].tokens))
+    assert "readout_action" in outputs
+    assert outputs["readout_action"].tokens.shape[:2] == (2, 1)
+    assert jnp.all(jnp.isfinite(outputs["readout_action"].tokens))
 
     actions, dof_ids, chunk_steps = extract_bundled_actions(batch, max_h)
     pred = model.sample_actions(
@@ -84,7 +110,7 @@ def test_xflow_script_config_forward_smoke():
         timestep_pad_mask=obs["timestep_pad_mask"],
         rng=jax.random.PRNGKey(1),
         train=False,
-        head_name="xflow",
+        head_name="action",
         dof_ids=dof_ids,
         chunk_steps=chunk_steps,
     )

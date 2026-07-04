@@ -13,13 +13,16 @@ from crossformer.data.grain.metadata import ArrayStatistics, OnlineStats
 
 
 class TestArrayStatisticsCompute:
-    def test_3d_input_yields_1d_stats(self):
+    def test_3d_input_yields_1d_stats(self) -> None:
         """Given (B, H, A) input, stats should have shape (A,)."""
         rng = np.random.default_rng(0)
         B, H, A = 50, 10, 7
         arr = rng.standard_normal((B, H, A))
 
         stats = ArrayStatistics.compute(arr)
+        assert stats.mask is not None
+        assert stats.p99 is not None
+        assert stats.p01 is not None
 
         assert stats.mean.shape == (A,)
         assert stats.std.shape == (A,)
@@ -29,7 +32,7 @@ class TestArrayStatisticsCompute:
         assert stats.p99.shape == (A,)
         assert stats.p01.shape == (A,)
 
-    def test_uses_first_timestep_only(self):
+    def test_uses_first_timestep_only(self) -> None:
         """Stats should match manual computation on arr[:, 0]."""
         rng = np.random.default_rng(42)
         B, H, A = 100, 5, 3
@@ -43,7 +46,7 @@ class TestArrayStatisticsCompute:
         np.testing.assert_allclose(stats.minimum, first.min(axis=0))
         np.testing.assert_allclose(stats.maximum, first.max(axis=0))
 
-    def test_2d_input_unchanged(self):
+    def test_2d_input_unchanged(self) -> None:
         """2D input (B, A) should pass through without slicing."""
         rng = np.random.default_rng(1)
         B, A = 30, 4
@@ -59,12 +62,30 @@ class TestArrayStatisticsCompute:
 # ---------------------------------------------------------------------------
 
 
+def _array_stats(
+    *,
+    mean: np.ndarray,
+    std: np.ndarray,
+    minimum: np.ndarray,
+    maximum: np.ndarray,
+    mask: np.ndarray,
+) -> ArrayStatistics:
+    kwargs = {
+        "mean": mean,
+        "std": std,
+        "minimum": minimum,
+        "maximum": maximum,
+        "mask": mask,
+    }
+    return ArrayStatistics(**kwargs)
+
+
 class TestBroadcastNormalize:
     @pytest.fixture()
-    def stats_and_data(self):
+    def stats_and_data(self) -> tuple[ArrayStatistics, np.ndarray]:
         rng = np.random.default_rng(7)
         A = 5
-        stats = ArrayStatistics(
+        stats = _array_stats(
             mean=rng.standard_normal(A),
             std=np.abs(rng.standard_normal(A)) + 0.1,
             minimum=np.zeros(A),
@@ -75,7 +96,7 @@ class TestBroadcastNormalize:
         x = rng.standard_normal((H, A))
         return stats, x
 
-    def test_normalize_broadcasts(self, stats_and_data):
+    def test_normalize_broadcasts(self, stats_and_data: tuple[ArrayStatistics, np.ndarray]) -> None:
         stats, x = stats_and_data
         y = stats.normalize(x)
         assert y.shape == x.shape
@@ -84,15 +105,15 @@ class TestBroadcastNormalize:
             expected = (x[t] - stats.mean) / np.maximum(stats.std, 1e-8)
             np.testing.assert_allclose(y[t], expected)
 
-    def test_unnormalize_inverts(self, stats_and_data):
+    def test_unnormalize_inverts(self, stats_and_data: tuple[ArrayStatistics, np.ndarray]) -> None:
         stats, x = stats_and_data
         np.testing.assert_allclose(stats.unnormalize(stats.normalize(x)), x, atol=1e-12)
 
-    def test_mask_preserves_original(self):
+    def test_mask_preserves_original(self) -> None:
         """Masked-out dims should keep original values after normalize."""
         A = 4
         mask = np.array([True, True, False, False])
-        stats = ArrayStatistics(
+        stats = _array_stats(
             mean=np.array([1.0, 2.0, 3.0, 4.0]),
             std=np.array([0.5, 0.5, 0.5, 0.5]),
             minimum=np.zeros(A),
@@ -113,7 +134,7 @@ class TestBroadcastNormalize:
 
 
 class TestOnlineStatsShape:
-    def test_stats_shape_is_action_dim(self):
+    def test_stats_shape_is_action_dim(self) -> None:
         """OnlineStats initialized with (A,) should produce (A,) results."""
         A = 6
         os = OnlineStats((A,))
@@ -124,7 +145,7 @@ class TestOnlineStatsShape:
         assert result["mean"].shape == (A,)
         assert result["std"].shape == (A,)
 
-    def test_online_matches_batch(self):
+    def test_online_matches_batch(self) -> None:
         """OnlineStats on first timesteps should match ArrayStatistics.compute."""
         rng = np.random.default_rng(99)
         B, H, A = 200, 4, 3
