@@ -1,0 +1,27 @@
+# Auxiliary loss terms for the xflow head (Phase 6).
+# Loaded by crossformer.model.components.heads.loss_terms:load_loss_terms;
+# each entry is a ModuleSpec (_target_ + inline kwargs) building a LossTerm.
+#
+# Effective weight per term = weight * tau^tau_power (per sample). Aux
+# consistency terms use tau_power > 0 so they only bite where the one-step
+# denoised estimate is well-posed; the flow MSE itself is never gated.
+# fk_fn (differentiable FK, dream keypoint order) is injected at load time.
+
+smoothness:
+  _target_: crossformer.model.components.heads.loss_terms:SmoothnessTerm
+  name: smoothness
+  weight: 0.05
+  tau_power: 2.0
+  order: 2  # 2 = acceleration, 3 = jerk
+
+fk_consistency:
+  _target_: crossformer.model.components.heads.loss_terms:FKConsistencyTerm
+  name: fk_consistency
+  weight: 0.1
+  tau_power: 2.0
+
+reprojection:
+  _target_: crossformer.model.components.heads.loss_terms:ReconstructionLoss
+  name: reprojection
+  weight: 0.05
+  tau_power: 2.0
