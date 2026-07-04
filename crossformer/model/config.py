@@ -3,10 +3,46 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from crossformer.model.components.multiview import (
+    StackedDinoTokenizer,
+    StackedTipsTokenizer,
+    TIPS_VARIANT_DEFAULT,
+)
 from crossformer.model.components.tokenizers import ImageTokenizer, LanguageTokenizer, LowdimObsTokenizer
 from crossformer.model.components.transformer import common_transformer_sizes
 from crossformer.model.crossformer_module import CrossFormerModule
 from crossformer.utils.spec import ModuleSpec
+
+
+@dataclass
+class StackedViewTokenizerCfg:
+    """Config for the single stacked-multiview image tokenizer.
+
+    Consumes observation["image"] (B, T, V, H, W, C) and emits one token group
+    with per-token view ids (see components/multiview.py).
+    """
+
+    name: str = "image"
+    encoder: str = "tips"  # tips | dino
+    tips_variant: str = TIPS_VARIANT_DEFAULT
+    dino_model_id: str | None = None
+    freeze: bool = True
+    permute_views: bool = True
+    key_drop_prob: float = 0.1
+    patch_drop_prob: float = 0.1
+
+    def create(self) -> ModuleSpec:
+        common = {
+            "permute_views": self.permute_views,
+            "key_drop_prob": self.key_drop_prob,
+            "patch_drop_prob": self.patch_drop_prob,
+        }
+        if self.encoder == "tips":
+            return ModuleSpec.create(StackedTipsTokenizer, variant=self.tips_variant, freeze=self.freeze, **common)
+        if self.encoder == "dino":
+            dino = {"model_id": self.dino_model_id} if self.dino_model_id else {}
+            return ModuleSpec.create(StackedDinoTokenizer, **dino, **common)
+        raise ValueError(f"unknown stacked encoder: {self.encoder!r}")
 
 
 @dataclass
@@ -59,7 +95,7 @@ class LowdimTokenizerCfg:
             low=self.low,
             high=self.high,
             dropout_rate=self.dropout_rate,
-            p_token_drop=self.p_token_drop,
+            token_drop=self.token_drop,
         )
 
 
@@ -105,7 +141,9 @@ class TransformerCfg:
 class ModelCfg:
     """Thin config wrapper for explicit CrossFormer module construction."""
 
-    observation_tokenizers: list[ImageTokenizerCfg | LowdimTokenizerCfg] = field(default_factory=list)
+    observation_tokenizers: list[ImageTokenizerCfg | LowdimTokenizerCfg | StackedViewTokenizerCfg] = field(
+        default_factory=list
+    )
     task_tokenizers: list[ImageTokenizerCfg | LanguageTokenizerCfg] = field(default_factory=list)
     heads: dict[str, ModuleSpec] = field(default_factory=dict)
     readouts: dict[str, int] = field(default_factory=dict)

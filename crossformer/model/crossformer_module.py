@@ -8,6 +8,7 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 
+from crossformer.embody import MAX_VIEWS
 from crossformer.model.components.base import TokenGroup
 from crossformer.model.components.block_transformer import (
     AttentionRule,
@@ -187,6 +188,11 @@ class CrossFormerTransformer(nn.Module):
         # Next, add the observation tokens
         #
 
+        # Learned camera-view embedding shared by all observation groups.
+        # Row 0 = NO_VIEW: global tokens (proprio, single-view images) get it
+        # uniformly — a learned no-op mirroring the q_world convention.
+        view_embed = nn.Embed(MAX_VIEWS + 1, self.token_embedding_size, name="view_embed")
+
         for name, tok in self.observation_tokenizers.items():
             group_name = f"obs_{name}"
             # Receive inputs from tokenizer and cast to embedding size
@@ -197,6 +203,13 @@ class CrossFormerTransformer(nn.Module):
 
             obs_tokens = nn.Dense(self.token_embedding_size, name=f"{group_name}_projection")(tokenizer_output.tokens)
             # obs_tokens shape is (batch, horizon, n_tokens, token_embedding_size)
+
+            # add per-token view embedding (0 = NO_VIEW when the tokenizer
+            # reports no view identity)
+            view_ids = tokenizer_output.view
+            if view_ids is None:
+                view_ids = jnp.zeros(obs_tokens.shape[:-1], dtype=jnp.int32)
+            obs_tokens = obs_tokens + view_embed(view_ids)
 
             # create positional embedding
             obs_pos_enc = self._create_positional_embedding(group_name, obs_tokens)
@@ -211,6 +224,7 @@ class CrossFormerTransformer(nn.Module):
                     mask=obs_pad_mask,
                     name=group_name,
                     attention_rules=observation_attention_rules,
+                    view=view_ids,
                 )
             )
         if self.repeat_task_tokens:
@@ -301,14 +315,22 @@ class CrossFormerTransformer(nn.Module):
         )
 
         outputs = {}
-        outputs.update({group.name: TokenGroup(group.tokens, group.mask) for group in prefix_outputs})
-        outputs.update({group.name: TokenGroup(group.tokens, group.mask) for group in timestep_outputs})
+        outputs.update({group.name: TokenGroup(group.tokens, group.mask, view=group.view) for group in prefix_outputs})
+        outputs.update(
+            {group.name: TokenGroup(group.tokens, group.mask, view=group.view) for group in timestep_outputs}
+        )
 
         if len(prefix_outputs) > 0:
-            outputs["task"] = TokenGroup.concatenate([TokenGroup(group.tokens, group.mask) for group in prefix_outputs])
+            outputs["task"] = TokenGroup.concatenate(
+                [TokenGroup(group.tokens, group.mask, view=group.view) for group in prefix_outputs]
+            )
 
         outputs["obs"] = TokenGroup.concatenate(
-            [TokenGroup(group.tokens, group.mask) for group in timestep_outputs if group.name.startswith("obs_")],
+            [
+                TokenGroup(group.tokens, group.mask, view=group.view)
+                for group in timestep_outputs
+                if group.name.startswith("obs_")
+            ],
             axis=-2,
         )
 

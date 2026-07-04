@@ -11,7 +11,6 @@ import resource
 from typing import Any, Protocol
 
 import cv2
-from crossformer.utils.mytyping import DeprecatedError
 import grain
 from grain.experimental import ThreadPrefetchIterDataset
 import numpy as np
@@ -26,7 +25,6 @@ from crossformer.data.grain.datasets import (
 from crossformer.data.grain.embody import embody_transform
 from crossformer.data.grain.pipelines import (
     _infer_observation_mappings,
-    add_horizon_mask,
     add_mask,
     apply_trajectory_transforms,
     compatibility,
@@ -36,6 +34,7 @@ from crossformer.data.grain.pipelines import (
     TransformConfig,
 )
 from crossformer.data.grain.util.remap import _remap_lang, rekey
+from crossformer.utils.mytyping import DeprecatedError
 from crossformer.utils.peace_and_quiet import (
     _set_worker_jax_cpu_env,
     import_jax_cpu_safe,
@@ -147,7 +146,6 @@ def make_source_by_mix(
     mix: Arec | MultiDataSource,
     cfg: TrainLike,
 ) -> tuple[grain.Dataset, builders.GrainDatasetConfig]:
-
     # jax = import_jax_cpu_safe()
     # TODO reduce config scope by only passing cfg.data ?
 
@@ -163,7 +161,7 @@ def make_source_by_mix(
         return x
 
     if hasattr(mix, "restructure") and mix.restructure is not None:
-        print('using custom restructure fn for mix', mix.name)
+        print("using custom restructure fn for mix", mix.name)
         ds = grain.MapDataset.source(mix.source).seed(42)
 
         base_fn = ModuleSpec.instantiate(mix.restructure)  # partial(restructure_fn)
@@ -171,7 +169,7 @@ def make_source_by_mix(
         ds = ds.map(r)
 
     elif isinstance(mix.source, MultiArrayRecordSource):
-        print('using MultiArrayRecordSource for mix', mix.name)
+        print("using MultiArrayRecordSource for mix", mix.name)
         ds = (
             grain.MapDataset.source(mix.source)
             .seed(42)
@@ -185,7 +183,7 @@ def make_source_by_mix(
         )
 
     else:
-        raise DeprecatedError('jul 1 2026')
+        raise DeprecatedError("jul 1 2026")
         ds = (
             grain.MapDataset.source(mix.source)
             .seed(42)
@@ -209,7 +207,7 @@ def make_source_by_mix(
     # log.debug("example spec: %s", spec(example))
 
     if False:
-        raise DeprecatedError('jul 1 2026')
+        raise DeprecatedError("jul 1 2026")
         mappings = _infer_observation_mappings(example)
         assert mappings, "Trajectory missing observation key"
 
@@ -224,8 +222,8 @@ def make_source_by_mix(
     dataset_config = builders.GrainDatasetConfig(
         name=mix.name,
         source=ds,
-        keys=list(flat(example).keys()), # keys,
-        standardize_fn=None, # standardize_fn,
+        keys=list(flat(example).keys()),  # keys,
+        standardize_fn=None,  # standardize_fn,
         restructure_fn=getattr(mix, "restructure", None),
         skip_norm_keys=cfg.data.transform.skip_norm_keys,
         force_recompute_dataset_statistics=cfg.data.recompute,
@@ -283,6 +281,11 @@ def make_single_dataset(
         # in the current state of data transforms, we dont use many horizon steps
         # code still expects horizon dim
         x["observation"]["proprio"] = jax.tree.map(lambda y: y[None], x["observation"]["proprio"])
+        # stacked multiview image (V,H,W,C) -> (1,V,H,W,C): the model asserts every
+        # observation leaf is (batch, horizon, ...). legacy named-camera dicts untouched.
+        img = x["observation"].get("image")
+        if isinstance(img, np.ndarray):
+            x["observation"]["image"] = img[None]
         return x
 
     ds = ds.map(unsqueeze_img_horizon)

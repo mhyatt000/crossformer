@@ -12,7 +12,13 @@ from crossformer.cn.heads import _SINGLE, HeadFactory
 from crossformer.model.components.dino_encoder import DinoV3Encoder, MODEL_ID_DEFAULT
 from crossformer.model.components.heads.xflow import XFlowHead
 from crossformer.model.components.vit_encoders import vit_encoder_configs
-from crossformer.model.config import ImageTokenizerCfg, LowdimTokenizerCfg, ModelCfg, TransformerCfg
+from crossformer.model.config import (
+    ImageTokenizerCfg,
+    LowdimTokenizerCfg,
+    ModelCfg,
+    StackedViewTokenizerCfg,
+    TransformerCfg,
+)
 from crossformer.utils.spec import ModuleSpec
 
 _DEFAULT_IMAGE_KEYS = ("primary", "side", "left_wrist")
@@ -49,6 +55,12 @@ class Vision(CN):
     dino_model_id: str = MODEL_ID_DEFAULT
     dino_target_size: tuple[int, int] = (240, 320)
     dino_patch_only: bool = False
+    # stacked-multiview path: one tokenizer over observation["image"] (B,T,V,H,W,C)
+    # with per-token view ids, instead of one ImageTokenizer per named camera key.
+    stacked: bool = True
+    stacked_encoder: Literal["tips", "dino"] = "tips"
+    tips_variant: str = "tips_v2_b14"
+    stacked_freeze: bool = True
 
 
 @dataclass
@@ -103,7 +115,17 @@ class ModelFactory(CN):
 
     def _obs_tokenizers(self):
         toks = []
-        if self.image_keys:
+        if self.vision.stacked:
+            toks.append(
+                StackedViewTokenizerCfg(
+                    name="image",
+                    encoder=self.vision.stacked_encoder,
+                    tips_variant=self.vision.tips_variant,
+                    dino_model_id=self.vision.dino_model_id if self.vision.stacked_encoder == "dino" else None,
+                    freeze=self.vision.stacked_freeze,
+                )
+            )
+        elif self.image_keys:
             encoder = self.make_obs_im_encoder()
             toks.extend(self.make_obs_im(key, encoder=encoder) for key in self.image_keys)
         toks.extend(self.make_obs_proprio(key) for key in self.proprio_keys)
