@@ -6,11 +6,12 @@ import numpy as np
 import pytest
 
 from crossformer.data.grain.metadata import ArrayStatistics, DatasetStatistics
+from crossformer.model.components.heads.dof import CHUNK_PAD
 from crossformer.model.components.heads.xflow import XFlowHead
 from crossformer.model.components.tokenizers import LowdimObsTokenizer
 from crossformer.model.components.transformer import common_transformer_sizes
 from crossformer.utils.callbacks.adapt import adapt_rast_batch, denorm_canonical, JOINT_IDS, RAST_IDS
-from crossformer.utils.callbacks.base import flatten_obs
+from crossformer.utils.callbacks.base import extract_bundled_actions, flatten_obs
 from crossformer.utils.callbacks.denorm import ActionBatchDenormalizer
 
 
@@ -74,6 +75,36 @@ def test_flatten_obs_adds_channel_and_flattens() -> None:
     assert out["scalar"].shape == (2, 3, 1)
     assert out["pose"].shape == (2, 3, 8)
     assert out["already_seq"].shape == (2, 3, 5)
+
+
+def test_extract_bundled_actions_uses_horizon_mask() -> None:
+    batch = {
+        "act": {
+            "base": np.zeros((2, 3, 4), dtype=np.float32),
+            "id": np.ones((2, 4), dtype=np.int32),
+        },
+        "mask": {
+            "horizon": np.array(
+                [
+                    [True, True, False],
+                    [True, False, False],
+                ]
+            )
+        },
+    }
+
+    _actions, _dof_ids, chunk_steps, _view_ids, _mask_act = extract_bundled_actions(batch, max_h=3)
+
+    np.testing.assert_allclose(
+        np.asarray(chunk_steps),
+        np.array(
+            [
+                [0.0, 1.0, CHUNK_PAD],
+                [0.0, CHUNK_PAD, CHUNK_PAD],
+            ],
+            dtype=np.float32,
+        ),
+    )
 
 
 def test_denorm_canonical_unnormalizes_joint_array() -> None:

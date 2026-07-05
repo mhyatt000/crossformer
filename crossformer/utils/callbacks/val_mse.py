@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 from einops import rearrange
 import jax
+from jax import Array
 import jax.numpy as jnp
 from jax.typing import ArrayLike
 import numpy as np
@@ -15,7 +16,7 @@ from rich.rule import Rule
 
 from crossformer.embody import MASK_ID
 from crossformer.run.train_step import lookup_guide
-from crossformer.utils.callbacks.base import EvalContext
+from crossformer.utils.callbacks.base import EvalContext, extract_bundled_actions
 from crossformer.utils.callbacks.denorm import dof_name
 
 
@@ -34,16 +35,9 @@ class ValMSECallback:
         batch = ctx.batch
         obs = batch["observation"]
         task = batch.get("task", {"pad_mask_dict": {}})
-        actions = batch["act"]["base"]
-        if actions.ndim == 3:
-            actions = actions[:, None, :, :]
-        dof_ids = batch["act"]["id"]
-        view_ids = batch["act"].get("view")
-        if view_ids is None:
-            view_ids = jnp.zeros_like(dof_ids)
-        mask_act = batch.get("mask", {}).get("act")
-        chunk_steps = jnp.tile(jnp.arange(actions.shape[2], dtype=jnp.float32)[None], (actions.shape[0], 1))
-        guide_input = lookup_guide(batch, ctx.guide_keys) if ctx.use_guidance else None
+        actions, dof_ids, chunk_steps, view_ids, mask_act = extract_bundled_actions(batch, max_h=0)
+        actions = jnp.asarray(actions)
+        guide_input = lookup_guide(dict(batch), ctx.guide_keys) if ctx.use_guidance else None
 
         teacher, unguided, guided = self._eval_fn(ctx.model.module, ctx.use_guidance)(
             ctx.params,
@@ -87,7 +81,7 @@ class ValMSECallback:
             params: Any,
             obs: Any,
             task: Any,
-            actions: ArrayLike,
+            actions: Array,
             dof_ids: ArrayLike,
             view_ids: ArrayLike,
             chunk_steps: ArrayLike,

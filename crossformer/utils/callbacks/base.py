@@ -22,6 +22,7 @@ import jax.numpy as jnp
 from jax.typing import ArrayLike
 import numpy as np
 
+from crossformer.model.components.heads.dof import CHUNK_PAD
 from crossformer.run.train_step import lookup_guide
 from crossformer.utils.callbacks.denorm import ActionBatchDenormalizer
 
@@ -80,6 +81,8 @@ def extract_bundled_actions(batch: Mapping[str, Any], max_h: int) -> tuple[Array
     Returns ``(actions, dof_ids, chunk_steps, view_ids, mask_act)`` where
     ``view_ids`` is the per-slot camera id (``act.view``; zeros when absent) and
     ``mask_act`` is the per-slot supervision mask (``mask.act``; None when absent).
+    ``mask.horizon`` is folded into ``chunk_steps`` using CHUNK_PAD so invalid
+    future action steps are masked by the head's existing query mask.
     """
     del max_h
     actions = batch["act"]["base"]
@@ -93,6 +96,13 @@ def extract_bundled_actions(batch: Mapping[str, Any], max_h: int) -> tuple[Array
         view_ids = jnp.zeros_like(dof_ids)
     mask_act = batch.get("mask", {}).get("act")
     chunk_steps = jnp.tile(jnp.arange(horizon, dtype=jnp.float32)[None], (bsz, 1))
+    horizon_mask = batch.get("mask", {}).get("horizon")
+    if horizon_mask is not None:
+        horizon_mask = jnp.asarray(horizon_mask, dtype=bool)
+        if horizon_mask.ndim == 1:
+            horizon_mask = horizon_mask[None]
+        horizon_mask = horizon_mask[:, :horizon]
+        chunk_steps = jnp.where(horizon_mask, chunk_steps, CHUNK_PAD)
     return actions, dof_ids, chunk_steps, view_ids, mask_act
 
 
@@ -163,7 +173,7 @@ class EvalContext:
 
     def _predict(self, *, accumulate: bool) -> np.ndarray:
         _, dof_ids, chunk_steps, view_ids, _ = extract_bundled_actions(self.batch, max_h=0)
-        guide_input = lookup_guide(self.batch, self.guide_keys) if self.use_guidance else None
+        guide_input = lookup_guide(dict(self.batch), self.guide_keys) if self.use_guidance else None
         pred = self._bound.heads[self.head_name].predict_action(
             self._transformer_outputs,
             rng=self.rng,

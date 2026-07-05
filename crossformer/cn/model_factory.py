@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from functools import partial
 from typing import Any, Literal
 
 import flax
@@ -32,6 +33,14 @@ _HEAD_TEMPLATES = {
 }
 
 
+def _module_spec(cls: Any, *args: Any, **kwargs: Any) -> ModuleSpec:
+    while isinstance(cls, partial):
+        args = (*cls.args, *args)
+        kwargs = {**(cls.keywords or {}), **kwargs}
+        cls = cls.func
+    return ModuleSpec(module=cls.__module__, name=cls.__name__, args=args, kwargs=kwargs)
+
+
 class Size(Enum):
     DUMMY = "dummy"
     VANILLA = "vanilla"
@@ -50,7 +59,7 @@ class Size(Enum):
 @dataclass
 class Vision(CN):
     use_film: bool = True
-    encoder: Literal[*vit_encoder_configs] = "resnetv2-26-film"
+    encoder: str = "resnetv2-26-film"
     use_dino: bool = False
     dino_model_id: str = MODEL_ID_DEFAULT
     dino_target_size: tuple[int, int] = (240, 320)
@@ -72,10 +81,10 @@ class XFlow(CN):
     head_channels: int = 256
     head_depth: int = 2
     head_heads: int = 8
-    head_blocks: int = 1
+    head_blocks: int = 2
     # factor decoder self-attn over (horizon, dofs) axes: O(H*A^2 + A*H^2)
     # instead of O((H*A)^2). New param tree — not checkpoint-compatible.
-    factor_attn: bool = False
+    factor_attn: bool = True
     flow_steps: int = 50
     use_guidance: bool = False
     guidance_input_dim: int | None = None
@@ -83,7 +92,7 @@ class XFlow(CN):
     num_guidance_latents: int = 4
 
     def create(self, *, token_dim: int) -> ModuleSpec:
-        return ModuleSpec.create(
+        return _module_spec(
             XFlowHead,
             readout_key=f"readout_{self.readout_name}",
             max_dofs=self.max_dofs,
@@ -163,14 +172,14 @@ class ModelFactory(CN):
             }
         }
 
-    def flatten(self) -> list[str]:
+    def flatten(self) -> list[tuple[str, ...]]:
         flattened = flax.traverse_util.flatten_dict(self.spec(), keep_empty_nodes=True)
         return list(flattened.keys())
 
-    def delete(self, flat: dict, verbose: bool = False) -> dict[str, Any]:
+    def delete(self, flat: dict[tuple[str, ...], Any], verbose: bool = False) -> dict[tuple[str, ...], Any]:
         _print = print if verbose else lambda *args, **kwargs: None
 
-        def inside(a: list[str], b: list[str]) -> bool:
+        def inside(a: tuple[str, ...], b: tuple[str, ...]) -> bool:
             if len(a) > len(b):
                 return False
             return all(_a == _b for _a, _b in zip(a, b[: len(a)]))
@@ -211,14 +220,14 @@ class ModelFactory(CN):
 
     def make_obs_im_encoder(self) -> ModuleSpec:
         if self.vision.use_dino:
-            return ModuleSpec.create(
+            return _module_spec(
                 DinoV3Encoder,
                 model_id=self.vision.dino_model_id,
                 target_size=self.vision.dino_target_size,
                 patch_only=self.vision.dino_patch_only,
             )
         assert self.vision.encoder in vit_encoder_configs, f"Unknown vision encoder: {self.vision.encoder}"
-        return ModuleSpec.create(vit_encoder_configs[self.vision.encoder], use_film=self.vision.use_film)
+        return _module_spec(vit_encoder_configs[self.vision.encoder], use_film=self.vision.use_film)
 
     def max_horizon(self) -> int:
         return self.window

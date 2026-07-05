@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
+from typing import Any, cast
 
 from flax.core import unfreeze
 import jax
@@ -68,11 +69,11 @@ class Config:
     verbose: bool = False  # print model tabulation during init
     model: cn.ModelFactory = default(
         cn.ModelFactory(
-            size=cn.Size.DUMMY,
+            size=cn.Size.DETR,
             window=20,
             image_keys=(),
             proprio_keys=(),
-            vision=Vision(use_film=False, encoder="resnetv2-50-film"),
+            vision=Vision(stacked=True, stacked_encoder="tips", tips_variant="tips_v2_b14", stacked_freeze=True),
         )
     )
     debug: bool = False  # debug mode with smaller model and dataset; overrides some other settings
@@ -93,12 +94,12 @@ class Config:
     guide_keys: tuple[str, ...] = ("action.position", "action.orientation")  # dot-paths into batch for guidance signal
 
     # Checkpointing
-    save_dir: str | None = Path().home().expanduser()  # checkpoint root dir (None to disable)
+    save_dir: str | None = str(Path().home().expanduser())  # checkpoint root dir (None to disable)
     save_interval: int = 25_000  # save every N steps
 
     train_loader: Loader = default(Loader(use_grain=True))
     mp: int = 8  # grain multiproc (for data loading)
-    rotate: bool = True  # apply augmax.Rotate((-15, 15), p=0.3) in grain pipeline
+    rotate: bool = False  # apply augmax.Rotate((-15, 15), p=0.3) in grain pipeline
     resize: tuple[int, int] | None = (64, 64)  # final image size; None disables all resize stages
     no_resize: bool = False  # override resize to None from CLI (tyro-friendly)
     recompute: bool = False  # force recompute of cached dataset statistics
@@ -119,14 +120,14 @@ class Config:
 # -- helpers ------------------------------------------------------------------
 
 
-def infer_model_keys(obs: dict) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def infer_model_keys(obs: dict[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Infer image and proprio tokenizer keys from a real observation batch."""
     image_keys = tuple(k.removeprefix("image_") for k in sorted(obs) if k.startswith("image_"))
     proprio_keys = tuple(k.removeprefix("proprio_") for k in sorted(obs) if k.startswith("proprio_"))
     return image_keys, proprio_keys
 
 
-def _num_tokens(tok_cfg: dict) -> int:
+def _num_tokens(tok_cfg: dict[str, Any]) -> int:
     return int(tok_cfg.get("kwargs", {}).get("num_tokens", 0))
 
 
@@ -141,7 +142,7 @@ def _has_tips_subtree(tree: object) -> bool:
     return "tips" in tree or any(_has_tips_subtree(v) for v in tree.values())
 
 
-def _build_optimizer_cfg(cfg: Config) -> dict:
+def _build_optimizer_cfg(cfg: Config) -> dict[str, Any]:
     learning_rate = (
         {
             "name": cfg.lr_schedule,
@@ -174,7 +175,7 @@ def _align_batch_size(batch_size: int, device_count: int) -> int:
     return (batch_size // device_count) * device_count
 
 
-def per_embodiment_metrics(batch: dict, update_info: dict) -> dict[str, float]:
+def per_embodiment_metrics(batch: dict[str, Any], update_info: dict[str, Any]) -> dict[str, float]:
     """Compute per-embodiment loss from sample_mse and act.embody.
 
     Returns dict like {"embodiment/single": mse, "embodiment/dual_arm": mse, ...}.
@@ -372,11 +373,11 @@ def main(cfg: Config) -> None:
     # The optimizer freezes these params (see _build_optimizer_cfg), so this is
     # the only place they get their pretrained values.
     if _has_tips_subtree(model.params):
-        loaded = load_tips_params(unfreeze(model.params), variant=cfg.model.vision.tips_variant)
-        model = model.replace(params=loaded)
+        loaded = load_tips_params(unfreeze(cast(Any, model.params)), variant=cfg.model.vision.tips_variant)
+        model = cast(Any, model).replace(params=loaded)
         print(f"  tips: loaded pretrained '{cfg.model.vision.tips_variant}' weights")
 
-    model = model.replace(
+    model = cast(Any, model).replace(
         params=jax.tree.map(lambda x: jax.device_put(x, replicated_sharding), model.params),
         example_batch=jax.tree.map(lambda x: jax.device_put(x, replicated_sharding), model.example_batch),
     )
@@ -392,12 +393,15 @@ def main(cfg: Config) -> None:
 
     # Guidance config sanity check
     if cfg.use_guidance:
+        assert guide_example is not None
         print(Rule("guidance encoder"))
         print(f"  guide_keys={cfg.guide_keys} shape={guide_example.shape}")
 
     # Optimizer + state
     params = model.params
-    tx, lr_callable, param_norm_callable = create_optimizer(params, **model.config["optimizer"])
+    tx, lr_callable, param_norm_callable = cast(
+        tuple[Any, Any, Any], create_optimizer(params, **model.config["optimizer"])
+    )
     print(Rule("optimizer"))
     print(f"  config: {model.config['optimizer']}")
     print(f"  tx: {tx}")
