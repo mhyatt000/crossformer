@@ -26,7 +26,7 @@ class StackedViewTokenizerCfg:
     """
 
     name: str = "image"
-    encoder: str = "tips"  # tips | dino
+    encoder: str = "tips"  # tips | dino | any non-FiLM vit_encoder_configs key (e.g. small-stem-16)
     tips_variant: str = TIPS_VARIANT_DEFAULT
     dino_model_id: str | None = None
     freeze: bool = True
@@ -45,7 +45,11 @@ class StackedViewTokenizerCfg:
         if self.encoder == "dino":
             dino = {"model_id": self.dino_model_id} if self.dino_model_id else {}
             return ModuleSpec.create(StackedDinoTokenizer, **dino, **common)
-        raise ValueError(f"unknown stacked encoder: {self.encoder!r}")
+        if self.encoder in vit_encoder_configs:
+            return ModuleSpec.create(StackedVitTokenizer, encoder_name=self.encoder, freeze=self.freeze, **common)
+        raise ValueError(
+            f"unknown stacked encoder: {self.encoder!r} (expected tips, dino, or one of {sorted(vit_encoder_configs)})"
+        )
 
 
 @dataclass
@@ -103,6 +107,38 @@ class LowdimTokenizerCfg:
 
 
 @dataclass
+class XStateTokenizerCfg:
+    """Config for nested observation.state tokenization."""
+
+    name: str = "state"
+    num_latents: int = 8
+    num_channels: int = 256
+    num_heads: int = 8
+    num_blocks: int = 2
+    num_self_attend_layers: int = 1
+    widening_factor: int = 4
+    dropout_prob: float = 0.0
+    input_drop_prob: float = 0.25
+    latent_drop_prob: float = 0.25
+    skip_missing: bool = True
+
+    def create(self) -> ModuleSpec:
+        return ModuleSpec.create(
+            XStateEncoder,
+            num_latents=self.num_latents,
+            num_channels=self.num_channels,
+            num_heads=self.num_heads,
+            num_blocks=self.num_blocks,
+            num_self_attend_layers=self.num_self_attend_layers,
+            widening_factor=self.widening_factor,
+            dropout_prob=self.dropout_prob,
+            input_drop_prob=self.input_drop_prob,
+            latent_drop_prob=self.latent_drop_prob,
+            skip_missing=self.skip_missing,
+        )
+
+
+@dataclass
 class LanguageTokenizerCfg:
     """Config for one language tokenizer."""
 
@@ -144,9 +180,9 @@ class TransformerCfg:
 class ModelCfg:
     """Thin config wrapper for explicit CrossFormer module construction."""
 
-    observation_tokenizers: list[ImageTokenizerCfg | LowdimTokenizerCfg | StackedViewTokenizerCfg] = field(
-        default_factory=list
-    )
+    observation_tokenizers: list[
+        ImageTokenizerCfg | LowdimTokenizerCfg | StackedViewTokenizerCfg | XStateTokenizerCfg
+    ] = field(default_factory=list)
     task_tokenizers: list[ImageTokenizerCfg | LanguageTokenizerCfg] = field(default_factory=list)
     heads: dict[str, ModuleSpec] = field(default_factory=dict)
     readouts: dict[str, int] = field(default_factory=dict)

@@ -34,6 +34,7 @@ from crossformer.cn.model_factory import Vision
 from crossformer.data.grain.embody import decode_embody_name
 from crossformer.model.components.heads.loss_terms import load_loss_weights
 from crossformer.model.components.multiview import load_tips_params
+from crossformer.model.bela import BELAModel
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.run.train_step import lookup_guide, make_train_step
 from crossformer.run.xflow_eval import EvalLoop
@@ -60,7 +61,7 @@ class Config:
 
     name: str = ""
     steps: int = 1_000_000  # training steps (1 for debug)
-    lr: float = 1e-3  # learning rate
+    lr: float = 1e-4  # learning rate
     log_every: int = 100  # log interval
     batch_size: int = 256  # global batch size
     eval_batch_size: int = 64  # eval loader batch size; keep modest so large train batches still boot
@@ -80,11 +81,12 @@ class Config:
 
     # Optimizer
     weight_decay: float = 1e-4  # adamw weight decay
-    warmup_steps: int = 0  # lr warmup steps (0 = no warmup)
-    lr_schedule: str = "constant"  # constant | cosine | rsqrt
+    warmup_steps: int = 2000  # lr warmup steps (0 = no warmup, falls back to constant lr)
+    lr_schedule: str = "cosine"  # constant | cosine | rsqrt
     clip_gradient: float | None = 1.0  # global gradient clipping (None to disable)
     frozen_keys: tuple[str, ...] = ()  # fnmatch patterns for frozen params
-    loss_weights: str | None = None  # per-DOF flow-loss weight yaml (config/loss-weights.yaml)
+    loss_weights: str | None = "config/loss-weights.yaml"  # per-DOF flow-loss weight yaml (None to disable)
+    subtree_norms: bool = False  # log grad/update norms per top-level param subtree (debug)
 
     # Token guidance
     use_guidance: bool = False  # enable guidance tokens
@@ -98,6 +100,7 @@ class Config:
     save_interval: int = 25_000  # save every N steps
 
     train_loader: Loader = default(Loader(use_grain=True))
+    batches: int | None = None  # train on only the first n batches, cycled forever (overfit debugging)
     mp: int = 8  # grain multiproc (for data loading)
     rotate: bool = False  # apply augmax.Rotate((-15, 15), p=0.3) in grain pipeline
     resize: tuple[int, int] | None = (64, 64)  # final image size; None disables all resize stages
@@ -128,7 +131,8 @@ def infer_model_keys(obs: dict[str, Any]) -> tuple[tuple[str, ...], tuple[str, .
 
 
 def _num_tokens(tok_cfg: dict[str, Any]) -> int:
-    return int(tok_cfg.get("kwargs", {}).get("num_tokens", 0))
+    kwargs = tok_cfg.get("kwargs", {})
+    return int(kwargs.get("num_tokens", kwargs.get("num_latents", 0)))
 
 
 def _leaf_dtypes(tree: Any) -> list[str]:
@@ -143,15 +147,19 @@ def _has_tips_subtree(tree: object) -> bool:
 
 
 def _build_optimizer_cfg(cfg: Config) -> dict[str, Any]:
+    # optax warmup_cosine_decay requires decay_steps > warmup_steps; cap warmup
+    # at 10% of the run so short debug runs (--steps 500) neither crash against
+    # the default warmup nor spend the whole run warming up.
+    warmup_steps = min(cfg.warmup_steps, cfg.steps // 10)
     learning_rate = (
         {
             "name": cfg.lr_schedule,
             "init_value": 0.0,
             "peak_value": cfg.lr,
-            "warmup_steps": cfg.warmup_steps,
+            "warmup_steps": warmup_steps,
             **({"decay_steps": cfg.steps} if cfg.lr_schedule == "cosine" else {}),
         }
-        if cfg.warmup_steps > 0
+        if warmup_steps > 0
         else cfg.lr
     )
     frozen = list(cfg.frozen_keys)
@@ -159,7 +167,8 @@ def _build_optimizer_cfg(cfg: Config) -> dict[str, Any]:
     # params to optax.set_to_zero(), which drops the whole adamw update (grads
     # AND weight decay), so decay can't shrink the loaded weights. "*tips*"
     # matches the nested "tips" submodule path inside the tokenizer.
-    if cfg.model.vision.stacked and cfg.model.vision.stacked_encoder == "tips" and cfg.model.vision.stacked_freeze:
+    v = cfg.model.vision
+    if v.stacked and v.stacked_encoder == "tips" and v.stacked_freeze and "*tips*" not in frozen:
         frozen.append("*tips*")
     return {
         "learning_rate": learning_rate,
@@ -257,9 +266,11 @@ def main(cfg: Config) -> None:
         ),
         recompute=cfg.recompute,
     )
-    dataset = GrainDataFactory(mp=cfg.mp, rotate=cfg.rotate, resize=effective_resize).make(
+    dataset = GrainDataFactory(mp=cfg.mp, rotate=cfg.rotate, resize=effective_resize, batches=cfg.batches).make(
         train_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=True
     )
+    if cfg.batches is not None:
+        print(f"  [bold yellow]overfit mode: cycling first {cfg.batches} batch(es) forever[/]")
     dsit = iter(dataset.dataset)
     example_batch = next(dsit)
     eval_dataset = GrainDataFactory(
@@ -307,7 +318,11 @@ def main(cfg: Config) -> None:
     cfg.model.xflow.use_guidance = cfg.use_guidance
     cfg.model.xflow.guidance_input_dim = None if guide_example is None else guide_example.shape[-1]
     example_obs = flatten_obs(
-        example_batch["observation"], obs_keys, view_mask=example_batch.get("mask", {}).get("view")
+        example_batch["observation"],
+        obs_keys,
+        view_mask=example_batch.get("mask", {}).get("view"),
+        state=example_batch.get("state"),
+        mask=example_batch.get("mask"),
     )
 
     # With obs_keys empty, example_obs carries every observation leaf verbatim,
@@ -336,14 +351,38 @@ def main(cfg: Config) -> None:
     task_tokens = sum(_num_tokens(tok) for tok in task_tok_cfg.values())
     readout_tokens = sum(int(v) for v in readouts.values())
     attn_tokens = obs_tokens + task_tokens + readout_tokens
-    xflow_head = model_spec["heads"]["action"]["kwargs"]
+    head_spec = model_spec["heads"]["action"]
     print(Rule("model diagnostics"))
+    print(f"  trunk: {cfg.model.trunk}" + (f" (latents={cfg.model.bela_latents})" if cfg.model.trunk == "bela" else ""))
     print(f"  attention tokens: {attn_tokens} (obs={obs_tokens} task={task_tokens} readout={readout_tokens})")
     print(f"  hidden dim: {model_spec['token_embedding_size']}")
     print(f"  transformer layers: {model_spec['transformer_kwargs']['num_layers']}")
     print(f"  transformer heads: {model_spec['transformer_kwargs']['num_attention_heads']}")
-    print(f"  xflow self-attend layers: {xflow_head['num_self_attend_layers']}")
-    print(f"  xflow head blocks: {xflow_head['num_blocks']}")
+    print(f"  head: {head_spec['name']} ({cfg.model.head_type})")
+    if cfg.model.vision.stacked:
+        enc_name = cfg.model.vision.stacked_encoder
+        variant = f" {cfg.model.vision.tips_variant}" if enc_name == "tips" else ""
+        print(
+            f"  vision: stacked {enc_name}{variant} (freeze={cfg.model.vision.stacked_freeze})"
+            f" — [yellow]vision.encoder/use-film ignored; select via --model.vision.stacked-encoder[/]"
+        )
+        if enc_name not in ("tips", "dino") and cfg.model.vision.stacked_freeze:
+            print(
+                f"  [red]warning: {enc_name} has no pretrained weights — freeze=True trains on random"
+                f" features; pass --model.vision.no-stacked-freeze[/]"
+            )
+    else:
+        print(f"  vision: per-camera {cfg.model.vision.encoder} (film={cfg.model.vision.use_film})")
+    if cfg.model.head_type == "xflow":
+        print(f"  xflow self-attend layers: {head_spec['kwargs']['num_self_attend_layers']}")
+        print(f"  xflow head blocks: {head_spec['kwargs']['num_blocks']}")
+    elif cfg.model.head_type == "pio":
+        depth = head_spec["kwargs"]["num_blocks"] * head_spec["kwargs"]["num_self_attend_layers"]
+        m = head_spec["kwargs"]["num_act_latents"]
+        if m > 0:
+            print(f"  pio act_latents: {m}  fuse layers: {head_spec['kwargs']['num_fuse_layers']}")
+        else:
+            print(f"  pio latents: {head_spec['kwargs']['num_latents']}  process depth: {depth}")
     wandb.config.update(
         {
             "example_batch_spec": spec(example_batch),
@@ -357,7 +396,8 @@ def main(cfg: Config) -> None:
     rng = jax.random.PRNGKey(42)
     init_rng, train_rng, pred_rng = jax.random.split(rng, 3)
 
-    model = CrossFormerModel.from_config(
+    model_cls = BELAModel if cfg.model.trunk == "bela" else CrossFormerModel
+    model = model_cls.from_config(
         model_cfg,
         init_batch,
         text_processor=None,
@@ -409,7 +449,9 @@ def main(cfg: Config) -> None:
     dof_weights = load_loss_weights(cfg.loss_weights) if cfg.loss_weights else None
     if dof_weights is not None:
         print(f"  loss_weights: {cfg.loss_weights} (non-unit dofs: {int((dof_weights != 1.0).sum())})")
-    train_step = make_train_step(model.module, lr_callable, param_norm_callable, dof_weights=dof_weights)
+    train_step = make_train_step(
+        model.module, lr_callable, param_norm_callable, dof_weights=dof_weights, subtree_norms=cfg.subtree_norms
+    )
 
     # Checkpointing
     if cfg.save_dir is not None:
@@ -448,7 +490,13 @@ def main(cfg: Config) -> None:
         timer.tick("total")
         with timer("dataset"):
             batch = next(dsit)
-            obs = flatten_obs(batch["observation"], obs_keys, view_mask=batch.get("mask", {}).get("view"))
+            obs = flatten_obs(
+                batch["observation"],
+                obs_keys,
+                view_mask=batch.get("mask", {}).get("view"),
+                state=batch.get("state"),
+                mask=batch.get("mask"),
+            )
             task = batch.get("task", {"pad_mask_dict": {}})
             pad_mask = obs["timestep_pad_mask"]
             lowdim_active = True

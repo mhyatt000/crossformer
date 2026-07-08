@@ -33,6 +33,7 @@ def make_train_step(
     lr_callable: float | Callable[[int], float] = 1e-3,
     param_norm_callable: Callable[[Params], float] = optax.global_norm,
     dof_weights: ArrayLike | None = None,
+    subtree_norms: bool = False,
 ) -> Callable:
     """Build a compiled train step using bundled action format.
 
@@ -104,12 +105,20 @@ def make_train_step(
 
         (loss, metrics), grads = jax.value_and_grad(_total_loss, has_aux=True)(params)
         updates, _ = state.tx.update(grads, state.opt_state, params)
+        # Per-top-level-module norms: pinpoints where gradient flow dies
+        # (e.g. a frozen-keys pattern matching more than intended).
+        per_module = {}
+        if subtree_norms:
+            per_module = {
+                f"grad_norm/{k}": optax.global_norm(v) for k, v in grads.items()
+            } | {f"update_norm/{k}": optax.global_norm(v) for k, v in updates.items()}
         update_info = {
             "loss": loss,
             "grad_norm": optax.global_norm(grads),
             "update_norm": optax.global_norm(updates),
             "param_norm": param_norm_callable(params),
             "learning_rate": lr_callable(state.step),
+            **per_module,
             **metrics,
         }
         _, new_rng = jax.random.split(state.rng)

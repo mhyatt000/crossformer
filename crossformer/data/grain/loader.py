@@ -8,7 +8,7 @@ from functools import partial
 import logging
 import os
 import resource
-from typing import Any, Protocol
+from typing import Any, Iterator, Protocol
 
 import cv2
 import grain
@@ -146,7 +146,9 @@ def make_source_by_mix(
     mix: Arec | MultiDataSource,
     cfg: TrainLike,
 ) -> tuple[grain.Dataset, builders.GrainDatasetConfig]:
-    # jax = import_jax_cpu_safe()
+    # bound here (not module level) so grain worker threads stay on CPU jax;
+    # the MultiArrayRecordSource branch's lambdas close over this name.
+    jax = import_jax_cpu_safe()
     # TODO reduce config scope by only passing cfg.data ?
 
     # grain.config.update("py_debug_mode", log.isEnabledFor(logging.DEBUG))
@@ -328,6 +330,30 @@ def _apply_fd_limit(limit: int) -> tuple[int, int]:
 
 
 @dataclass
+class _TakeBatches:
+    """Yield the first n batches of ds, then cycle them forever (cycle=True) or stop.
+
+    Sits at the very end of the pipeline, so the cached batches are the exact
+    final tensors — augmentations and sharding are frozen in. Cycling the same
+    batches is the overfit/debug mode; cycle=False just truncates.
+    """
+
+    ds: Any
+    n: int
+    cycle: bool = True
+
+    def __iter__(self) -> Iterator[Any]:
+        cache = []
+        it = iter(self.ds)
+        for _ in range(self.n):
+            item = next(it)
+            cache.append(item)
+            yield item
+        while self.cycle:
+            yield from cache
+
+
+@dataclass
 class GrainDataFactory:
     """in charge of making GrainDataLoader"""
 
@@ -341,6 +367,9 @@ class GrainDataFactory:
     # final image size; controls both mix_precompatibility cv2.resize and augmax.Resize.
     # None disables both stages (image stays at native size, no center_crop).
     resize: int | tuple[int, int] | None = (64, 64)
+    # take only the first n batches: cycled forever when train=True (overfit
+    # debugging), truncated when train=False. None = all batches.
+    batches: int | None = None
 
     verbose: bool = False  # log extra info like batch spec, and warmup prefetch
 
@@ -518,6 +547,11 @@ class GrainDataFactory:
         dconfig.keys = builders.Keys(image=list(img.keys()) if isinstance(img, dict) else ["image"])
         ds = do_frame_transforms(dconfig, tfconfig, ds, imaug=self.imaug, rotate=self.rotate)
         ds = ds.map(compatibility)
+
+        if self.batches is not None:
+            log.warning("batches=%d: %s the first %d batches", self.batches,
+                        "cycling" if train else "truncating to", self.batches)
+            ds = _TakeBatches(ds, self.batches, cycle=train)
 
         log.info("returning final dataset")
 
