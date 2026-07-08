@@ -1,4 +1,5 @@
-# Per-field stats adapters for robot proprio normalization.
+# Per-field stats adapters for proprio normalization (superset over all
+# datasets; entries for fields a dataset doesn't stream are ignored).
 # Each entry cleans a proprio field before it reaches OnlineStats.
 # Fields with no entry use the default (identity) adapter.
 
@@ -15,3 +16,12 @@ kp3dc_robot:
 # kp3dw_robot: world-frame keypoints, fixed shape -> identity adapter.
 kp3dw_robot:
   _target_: crossformer.data.grain.meta:StatsFieldAdapter
+
+# kp3dc_hand: camera-frame hand keypoints (mano), view axis on axis 0.
+# Pool views into one shared stat; drop views whose per-keypoint mask is
+# invalid. (mano data has no state.extr.w2c, so only the proprio mask applies.)
+kp3dc_hand:
+  _target_: crossformer.data.grain.meta:StatsFieldAdapter
+  agg: 0
+  mask:
+  - proprio.kp3dc_hand

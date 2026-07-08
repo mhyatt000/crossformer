@@ -73,7 +73,7 @@ class GrainDatasetConfig:
     source: Sequence[dict] | gp.RandomAccessDataSource | Callable[[], Any]
     standardize_fn: ModuleSpec | Callable | None = None
 
-    keys: Keys = field(default_factory=Keys)
+    keys: Keys|None | list[str]= field(default_factory=Keys)
     action_proprio_normalization_type: str = metadata.NormalizationType.NORMAL
     dataset_statistics: metadata.DatasetStatistics | Mapping[str, Any] | str | None = None
     statistics_save_dir: str | None = None
@@ -110,13 +110,14 @@ def _load_dataset_statistics(
         config.name,  # str(asdict(config))
         "bodypart_norm_mask_v2",
         str(len(ds)),
+    ]
+    hash_dependencies += [
         str(sorted(config.keys.image)),
         str(sorted(config.keys.depth)),
         str(sorted(config.keys.proprio.keys())),
-    ]
+        ] if hasattr(config.keys, "image") else [str(sorted(config.keys))]
     return metadata.compute_dataset_statistics(
         ds,
-        proprio_keys=list(config.keys.proprio.keys()),
         hash_dependencies=hash_dependencies,
         save_dir=config.statistics_save_dir,
         force_recompute=config.force_recompute_dataset_statistics,

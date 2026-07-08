@@ -14,12 +14,37 @@ import jax
 import numpy as np
 from tqdm import tqdm
 
+from crossformer.data.grain.meta import StatsFieldAdapter
 from crossformer.utils import databrief
 from crossformer.utils.mytyping import Data
+from crossformer.utils.spec import ModuleFile, ModuleSpec
 
 log = logging.getLogger(__name__)
 
 EPS = 1e-8
+
+# Per-field stats adapters (view pooling / masking). Fields absent from the
+# config fall back to the identity adapter.
+_ADAPTER_CONFIG = Path(__file__).resolve().parents[3] / "config" / "data" / "normalize.yaml"
+
+
+def _build_adapters(proprio: Mapping[str, object]) -> dict[str, StatsFieldAdapter]:
+    """One adapter per proprio key; config overrides, identity otherwise.
+
+    Config entries for fields absent from the streams are ignored; asserts the
+    resulting adapter/stream key sets match exactly (iou == 1).
+    """
+    specs = ModuleFile.load(_ADAPTER_CONFIG) if _ADAPTER_CONFIG.exists() else {}
+    # the config is a superset over all datasets; entries for fields this
+    # dataset doesn't stream are ignored
+    specs = {k: v for k, v in specs.items() if k in proprio}
+
+    adapters = {
+        key: (ModuleSpec.instantiate(specs[key])() if key in specs else StatsFieldAdapter()) for key in proprio
+    }
+    inter, union = set(adapters) & set(proprio), set(adapters) | set(proprio)
+    assert len(inter) == len(union), f"stream/adapter key mismatch: {union - inter}"
+    return adapters
 
 
 class OnlineStats:
@@ -167,7 +192,6 @@ def _cache_path(hash_dependencies: Iterable[str], save_dir: str | Path | None) -
 def compute_dataset_statistics(
     ds: Data,
     *,
-    proprio_keys: Sequence[str],
     hash_dependencies: Sequence[str],
     save_dir: str | Path | None = None,
     force_recompute: bool = False,
@@ -193,15 +217,21 @@ def compute_dataset_statistics(
     # Build OnlineStats only for action/proprio subtrees, using first-timestep shape (A,)
     sample = ds[0]
 
-    def _make_stream(x):
-        return OnlineStats(x.shape, dtype=x.dtype)
+    proprio = sample["observation"]["proprio"]
+    adapters = _build_adapters(proprio)
 
-    streams: dict = jax.tree.map(_make_stream, sample["observation"]["proprio"])
+    def _make_stream(key, value):
+        value = np.asarray(value)
+        return OnlineStats(adapters[key].feature_shape(value), dtype=value.dtype)
+
+    streams: dict = {key: _make_stream(key, value) for key, value in proprio.items()}
 
     def _update(x: dict):
         p = x["observation"]["proprio"]
         for key, value in p.items():
-            streams[key].update(value)
+            samples, masks = adapters[key].clean(value, x)
+            for i in range(len(samples)):
+                streams[key].update(samples[i], None if masks is None else masks[i])
         return x
 
     mpds = ds.to_iter_dataset(grain.ReadOptions(num_threads=16, prefetch_buffer_size=128)).map(_update)
