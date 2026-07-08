@@ -175,20 +175,32 @@ class MultiDataSource(DataSource):
 _ = (TFDS(name="xgym_duck_single", head=Head.SINGLE, embodiment=SINGLE),)
 
 XGYM = [
-    Arec(name="xgym_lift_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.7", branch="main"),
+    Arec(name="xgym_lift_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.13", branch="main",
+         restructure=ModuleSpec.create("crossformer.data.grain.restructure:restructure_lift_0513"),
+         chunk=50,
+         ),
     Arec(name="xgym_stack_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.5", branch="main"),
-    Arec(name="xgym_sweep_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.6", branch="main"),
+    Arec(name="xgym_sweep_single", head=Head.SINGLE, embodiment=SINGLE, version="0.5.8", branch="main"),
     Arec(name="sweep_mano", head=Head.MANO, embodiment=HUMAN_SINGLE, version="0.0.2", branch="to_step"),
+    Arec(name="xgym_lift_mano", head=Head.MANO, embodiment=HUMAN_SINGLE, version="0.5.13", branch="main",
+         restructure=ModuleSpec.create("crossformer.data.grain.restructure:restructure_mano_0513"),
+            chunk=50,
+            ),
 ]
 XGYM_WEIGHTS = [len(x.source) for x in XGYM]  # size weighted rn, not uniform
 XGYM_WEIGHTS = [w / sum(XGYM_WEIGHTS) for w in XGYM_WEIGHTS]
+
+Arec(name="xarm_sim", head=Head.SINGLE, embodiment=SINGLE, version="0.0.1", branch="main",
+     restructure=ModuleSpec.create("crossformer.data.grain.restructure:restructure_lift_0513"),
+     chunk=50,
+     )
 
 NEW = [
     Arec(
         name="xarm_dream_100k",
         head=Head.SINGLE,
         embodiment=SINGLE_GRIP_CAL,
-        version="0.0.2",
+        version="0.0.3",
         branch="main",
         chunk=1,
         restructure=ModuleSpec.create("crossformer.data.grain.restructure:restructure_xarm_dream"),
@@ -207,4 +219,12 @@ MultiDataSource(
     name="xgym_sweep",
     data=sweep,
     weights=[1.0] * len(sweep),
+)
+
+
+lift = [DataSource.REGISTRY["xgym_lift_single"], DataSource.REGISTRY["xgym_lift_mano"]]
+MultiDataSource(
+    name="xgym_lift",
+    data=lift,
+    weights=[1.0] * len(lift),
 )
