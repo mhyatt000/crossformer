@@ -156,6 +156,8 @@ PART_TO_ACTION_KEY: dict[str, str] = {
     "cam_intr": "cam_intr",
     "cam_extr": "cam_extr",
     "kp3dc": "kp3dc_robot",
+    "kp3dc_hand": "kp3dc_hand",
+    "kp2d_hand": "kp2d_hand",
 }
 
 

@@ -111,6 +111,11 @@ DOF: dict[str, int] = {
     # Per-view kp3dc copies share these ids; act.view disambiguates the frame
     # (0 = world / NO_VIEW, 1..MAX_VIEWS = camera of that view).
     **{f"kp_{n}_{ax}": 258 + i * 3 + j for i, n in enumerate(KP_CHAIN) for j, ax in enumerate("xyz")},
+    # MANO hand 3D keypoints in camera frame (21 joints x xyz). Per-view copies
+    # share these ids; act.view disambiguates the camera.
+    **{f"kp3dc_hand_{i}_{ax}": 300 + i * 3 + j for i in range(21) for j, ax in enumerate("xyz")},
+    # MANO hand 2D keypoints in image space (21 joints x uv), per view.
+    **{f"kp2d_hand_{i}_{ax}": 363 + i * 2 + j for i in range(21) for j, ax in enumerate("uv")},
 }
 
 VOCAB_SIZE = 512
@@ -272,6 +277,25 @@ MANO_48 = BodyPart("mano_48", tuple(f"mano_{i}" for i in range(48)), Frame.ABSOL
 
 # 3D hand keypoints (21 joints x 3 coords = 63 DOFs) — legacy generic block
 KP3D_21 = BodyPart("kp3d_21", tuple(f"k3d_{i}" for i in range(63)), Frame.ABSOLUTE, PartKind.SPATIAL3D)
+
+# MANO hand keypoints in camera frame (kp3dc_hand), one copy per camera view
+# via per_view expansion. (H, V, 21, 3) in the data.
+KP3DC_HAND = BodyPart(
+    "kp3dc_hand",
+    tuple(f"kp3dc_hand_{j}_{ax}" for j in range(21) for ax in "xyz"),
+    Frame.ABSOLUTE,
+    PartKind.SPATIAL3D,
+    per_view=True,
+)
+
+# MANO hand keypoints in image space (kp2d_hand), per view. (H, V, 21, 2).
+KP2D_HAND = BodyPart(
+    "kp2d_hand",
+    tuple(f"kp2d_hand_{j}_{ax}" for j in range(21) for ax in "uv"),
+    Frame.ABSOLUTE,
+    PartKind.SPATIAL2D,
+    per_view=True,
+)
 
 # Robot kinematic-chain 3D keypoints in camera frame (kp3dc_robot), one copy
 # per camera view via per_view expansion. (H, V, 14, 3) in the data.
@@ -456,7 +480,11 @@ Embodiment.REGISTRY = {}
 SINGLE = Embodiment("single", (ARM_7DOF, GRIPPER, CART_POS, CART_ORI, KP3DC))
 BIMANUAL = Embodiment("bimanual", (ARM_7DOF, GRIPPER, ARM_7DOF, GRIPPER))
 CART_GRIPPER = Embodiment("cart_gripper", (CART_POSE, GRIPPER))
-HUMAN_SINGLE = Embodiment("human_single", (CART_POS,))  #  HUMAN_TCP, KP_FINGERTIPS, KP_FINGER_JOINTS))
+# CART_POS is kept for legacy mano data (sweep_mano) that carries a world-frame
+# position; datasets without it (xgym_lift_mano) get that part zero-filled and
+# force-masked, and vice versa for kp3dc_hand. kp2d_hand stays in the data
+# stream as an aux (projection-consistency) target, not an action part.
+HUMAN_SINGLE = Embodiment("human_single", (CART_POS, KP3DC_HAND))
 NAV = Embodiment("nav", (BASE_2D,))
 XARM_RUKA = Embodiment("xarm_ruka", (ARM_7DOF, HAND_11))
 POSE_RUKA = Embodiment("pose_ruka", (CART_POSE, HAND_11))
@@ -616,6 +644,16 @@ sweep_mano = Dataset(
     state_keys=_MANO_STATE,
     version="0.0.2",
     branch="to_step",
+)
+
+xgym_lift_mano = Dataset(
+    "xgym_lift_mano",
+    HUMAN_SINGLE,
+    SourceType.AREC,
+    images=_MANO_IMG,
+    state_keys=("kp2d_hand", "kp3dc_hand"),
+    version="0.5.13",
+    branch="main",
 )
 
 _XARM_DREAM_STATE = ("cam_extr",)

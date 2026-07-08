@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import numpy as np
-import wandb
 
 from crossformer.utils.callbacks.base import EvalContext
 from crossformer.utils.callbacks.denorm import ActionBatchDenormalizer
-from crossformer.utils.callbacks.kp3dc_viz import Kp3dcVizCallback, KP3DC_IDS, project_kp3dc
+from crossformer.utils.callbacks.kp3dc_viz import KP3DC_HAND_IDS, KP3DC_IDS, Kp3dcVizCallback, project_kp3dc
 from crossformer.utils.jax_utils import str2np
+import wandb
 
 H, N_VIEWS = 4, 2
 
@@ -33,10 +33,10 @@ def _names(*xs: str) -> np.ndarray:
     return out
 
 
-def _kp_batch() -> dict:
-    """One sample whose slots are the full 42-dim kp3dc block, duplicated per view."""
-    n = len(KP3DC_IDS)
-    dof_ids = np.tile(np.asarray(KP3DC_IDS, dtype=np.int32), N_VIEWS)[None]  # (1, V*42)
+def _kp_batch(kp_ids: tuple[int, ...] = KP3DC_IDS) -> dict:
+    """One sample whose slots are the full kp3dc block for one set, duplicated per view."""
+    n = len(kp_ids)
+    dof_ids = np.tile(np.asarray(kp_ids, dtype=np.int32), N_VIEWS)[None]  # (1, V*n)
     view_ids = np.repeat(np.arange(1, N_VIEWS + 1, dtype=np.int32), n)[None]
     rng = np.random.default_rng(0)
     xyz = rng.uniform(-0.3, 0.3, size=(H, N_VIEWS * n)).astype(np.float32)
@@ -67,6 +67,12 @@ def test_kp3dc_callback_renders_one_image_per_view() -> None:
     out = Kp3dcVizCallback(every=1)(_ctx(_kp_batch()))
     assert sorted(out) == [f"view_{v}" for v in range(N_VIEWS)]
     assert all(isinstance(v, wandb.Image) for v in out.values())
+
+
+def test_kp3dc_callback_renders_hand_keypoints() -> None:
+    out = Kp3dcVizCallback(every=1)(_ctx(_kp_batch(KP3DC_HAND_IDS)))
+    assert sorted(out) == [f"view_{v}" for v in range(N_VIEWS)]
+    assert all("hand kp" in v._caption for v in out.values())
 
 
 def test_kp3dc_callback_skips_without_state() -> None:

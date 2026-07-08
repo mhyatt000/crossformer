@@ -79,6 +79,11 @@ _VIEW_FIELDS: list[tuple[tuple[str, ...], int]] = [
     (("state", "intr", "K"), 1),
     (("mask", "proprio", "kp3dc_robot"), 1),
     (("mask", "state", "extr", "w2c"), 1),
+    (("observation", "proprio", "kp3dc_hand"), 0),
+    (("action", "kp3dc_hand"), 1),
+    (("mask", "proprio", "kp3dc_hand"), 1),
+    (("observation", "proprio", "kp2d_hand"), 0),
+    (("action", "kp2d_hand"), 1),
 ]
 
 
@@ -197,10 +202,13 @@ def _restructure_step_mano(x: dict, *, name: str, lang_key: str) -> dict:
 
 
 def restructure_mano_0513(x: dict, *, name: str, lang_key: str | None = None) -> dict:
+    x["image"] = x.pop("images")
     x = multiarray_transforms(x)
     x = init_zero_lang(x)
     x = tag_name(x, name=name)
     x["info"] = tag_name(x["info"], name=name)
+    x = fix_views(x, n=3)
+    return x
 
 
 def restructure_xarm_dream(step: dict, *, name: str, lang_key: str | None = None) -> dict:

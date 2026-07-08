@@ -33,5 +33,33 @@ bodypart:
     1.0, 1.0, 1.0,  # right_finger_tip
   ]
 
+  # kp3dc_hand layout (HUMAN embodiment): 21 MANO joints x xyz.
+  # Order: wrist, then 4 joints per finger (thumb, index, middle, ring, pinky)
+  # with the tip last in each group. Mirror kp3dc: keep the wrist (root) and
+  # fingertips (contact points) at 1.0, downweight intermediate joints.
+  kp3dc_hand: [
+    1.0, 1.0, 1.0,  # *0  wrist
+    0.1, 0.1, 0.1,  # 1  thumb_cmc
+    0.1, 0.1, 0.1,  # 2  thumb_mcp
+    0.1, 0.1, 0.1,  # 3  thumb_ip
+    1.0, 1.0, 1.0,  # *4  thumb_tip
+    0.1, 0.1, 0.1,  # 5  index_mcp
+    0.1, 0.1, 0.1,  # 6  index_pip
+    0.1, 0.1, 0.1,  # 7  index_dip
+    1.0, 1.0, 1.0,  # *8  index_tip
+    0.1, 0.1, 0.1,  # 9  middle_mcp
+    0.1, 0.1, 0.1,  # 10 middle_pip
+    0.1, 0.1, 0.1,  # 11 middle_dip
+    0.1, 0.1, 0.1,  # 12 middle_tip
+    0.1, 0.1, 0.1,  # 13 ring_mcp
+    0.1, 0.1, 0.1,  # 14 ring_pip
+    0.1, 0.1, 0.1,  # 15 ring_dip
+    0.1, 0.1, 0.1,  # 16 ring_tip
+    0.1, 0.1, 0.1,  # 17 pinky_mcp
+    0.1, 0.1, 0.1,  # 18 pinky_pip
+    0.1, 0.1, 0.1,  # 19 pinky_dip
+    0.1, 0.1, 0.1,  # 20 pinky_tip
+  ]
+
 # dof:
 #   gripper: 2.0
