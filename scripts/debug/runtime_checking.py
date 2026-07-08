@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 from rich import print
@@ -9,7 +11,7 @@ from crossformer.utils.spec import spec
 from crossformer.utils.type_checking import Action, Batch, Chunked, jtyped, Step, Windowed
 
 
-def create_step_sample():
+def create_step_sample() -> dict[str, Any]:
     """Generate a single dummy sample reshaped to match Step type requirements."""
     sample = dummy_data()
 
@@ -25,7 +27,7 @@ def create_step_sample():
     return sample
 
 
-def create_batch_sample(batch_size=4):
+def create_batch_sample(batch_size: int = 4) -> dict[str, Any]:
     """Generate multiple samples and stack to create Batch with batch dimension."""
     samples = [create_step_sample() for _ in range(batch_size)]
 
@@ -63,7 +65,7 @@ def process_step_wrong(step: Step) -> Step:
     return step
 
 
-def main():
+def main() -> None:
     print("Starting debugging rig for @jtyped decorator...")
 
     step = create_step_sample()

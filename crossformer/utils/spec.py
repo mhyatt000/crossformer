@@ -17,15 +17,16 @@ class SimpleSpec:
     dtype: Any
 
 
-Spec = dict[Hashable, tuple[Iterable[int], Any] | SimpleSpec]
+SpecValue = tuple[Iterable[int], Any] | SimpleSpec
+Spec = dict[Hashable, SpecValue]
 
 
-def spec(tree: dict[str, Any], simple=True) -> Spec:
+def spec(tree: dict[str, Any], simple: bool = True) -> Spec:
     """Create a spec dictionary for the given tree structure."""
 
     sd = ocp.utils.to_shape_dtype_struct
 
-    def toshape(x):
+    def toshape(x: Any) -> Any:
         if not getattr(x, "shape", None):
             return x
         return SimpleSpec(tuple(x.shape), x.dtype)
@@ -33,12 +34,12 @@ def spec(tree: dict[str, Any], simple=True) -> Spec:
     return jax.tree.map(sd if not simple else toshape, tree)
 
 
-def _norm_shape(s) -> tuple[int, ...]:
+def _norm_shape(s: Any) -> tuple[int, ...]:
     # Accept list/tuple/np shape-like → tuple[int,...]
     return tuple(s) if s is not None else ()
 
 
-def _norm_dtype(dt) -> str:
+def _norm_dtype(dt: Any) -> str:
     # Works for strings, numpy/jax dtypes, and objects with .name or .__name__
     if dt is None:
         return "None"
@@ -49,7 +50,13 @@ def _norm_dtype(dt) -> str:
     return str(dt)
 
 
-def diff(a: Spec, b: Spec, simple=True):
+def _shape_dtype(value: SpecValue) -> tuple[Any, Any]:
+    if isinstance(value, SimpleSpec):
+        return value.shape, value.dtype
+    return value
+
+
+def diff(a: Spec, b: Spec, simple: bool = True) -> dict[str, Any]:
     """
     Compare two flat specs {key: (shape, dtype)} and report added/removed/changed.
     Returns:
@@ -66,24 +73,25 @@ def diff(a: Spec, b: Spec, simple=True):
 
     changed = {}
     for k in keys_a & keys_b:
-        sa, da = a[k].shape, a[k].dtype
-        sb, db = b[k].shape, b[k].dtype
+        sa, da = _shape_dtype(a[k])
+        sb, db = _shape_dtype(b[k])
         if _norm_shape(sa) != _norm_shape(sb) or _norm_dtype(da) != _norm_dtype(db):
             changed[k] = {"from": a[k], "to": b[k]}
 
     return {"added": added, "removed": removed, "changed": changed}
 
 
-def ezdiff(a: dict[str, Any], b: dict[str, Any], simple=True):
+def ezdiff(a: dict[str, Any], b: dict[str, Any], simple: bool = True) -> None:
     from crossformer.utils.tree import flat
 
-    a, b = spec(flat(a), simple=simple), spec(flat(b), simple=simple)
+    spec_a = spec(flat(a), simple=simple)
+    spec_b = spec(flat(b), simple=simple)
     from rich.pretty import pprint
 
-    pprint(diff(a, b, simple=simple))
+    pprint(diff(spec_a, spec_b, simple=simple))
 
 
-def valdiff(a: dict[str, Any], b: dict[str, Any], *, atol: float = 1e-5, rtol: float = 1e-5):
+def valdiff(a: dict[str, Any], b: dict[str, Any], *, atol: float = 1e-5, rtol: float = 1e-5) -> dict[str, Any]:
     """Compare two trees element-wise and report per-key value differences.
 
     Returns a dict with:
@@ -128,7 +136,7 @@ def valdiff(a: dict[str, Any], b: dict[str, Any], *, atol: float = 1e-5, rtol: f
     return result
 
 
-def ezvaldiff(a: dict[str, Any], b: dict[str, Any], *, atol: float = 1e-5, rtol: float = 1e-5):
+def ezvaldiff(a: dict[str, Any], b: dict[str, Any], *, atol: float = 1e-5, rtol: float = 1e-5) -> None:
     """Pretty-print a value-level diff between two nested dicts."""
     from rich.pretty import pprint
 
@@ -176,46 +184,41 @@ class ModuleSpec(TypedDict):
     args: tuple[Any, ...]
     kwargs: dict[str, Any]
 
-    @staticmethod
-    def create(callable_or_full_name: str | Callable, *args, **kwargs) -> ModuleSpec:  # type: ignore
-        """Create a module spec from a callable or import string.
 
-        Args:
-            callable_or_full_name (str or object): Either the object itself or a fully qualified import string
-                (e.g. "crossformer.model.components.transformer:Transformer")
-        args (tuple, optional): Passed into callable upon instantiation.
-        kwargs (dict, optional): Passed into callable upon instantiation.
-        """
-        if isinstance(callable_or_full_name, str):
-            assert callable_or_full_name.count(":") == 1, (
-                "If passing in a string, it must be a fully qualified import string "
-                "(e.g. 'crossformer.model.components.transformer:Transformer')"
-            )
-            module, name = callable_or_full_name.split(":")
-        else:
-            callable_or_full_name, args, kwargs = _unwrap_partial(callable_or_full_name, args, kwargs)
-            module, name = _infer_full_name(callable_or_full_name)
-
-        return ModuleSpec(module=module, name=name, args=args, kwargs=kwargs)
-
-    @staticmethod
-    def instantiate(spec: ModuleSpec):  # type: ignore
-        if set(spec.keys()) != {"module", "name", "args", "kwargs"}:
-            raise ValueError(
-                f"Expected ModuleSpec, but got {spec}. "
-                "ModuleSpec must have keys 'module', 'name', 'args', and 'kwargs'."
-            )
-        cls = _import_from_string(spec["module"], spec["name"])
-        return partial(cls, *spec["args"], **spec["kwargs"])
-
-    @staticmethod
-    def to_string(spec: ModuleSpec):  # type: ignore
-        return (
-            f"{spec['module']}:{spec['name']}"
-            f"({', '.join(spec['args'])}"
-            f"{', ' if spec['args'] and spec['kwargs'] else ''}"
-            f"{', '.join(f'{k}={v}' for k, v in spec['kwargs'].items())})"
+def create_module_spec(callable_or_full_name: str | Callable[..., Any], *args: Any, **kwargs: Any) -> ModuleSpec:
+    """Create a module spec from a callable or import string."""
+    if isinstance(callable_or_full_name, str):
+        assert callable_or_full_name.count(":") == 1, (
+            "If passing in a string, it must be a fully qualified import string "
+            "(e.g. 'crossformer.model.components.transformer:Transformer')"
         )
+        module, name = callable_or_full_name.split(":")
+    else:
+        obj, args, kwargs = _unwrap_partial(callable_or_full_name, args, kwargs)
+        module, name = _infer_full_name(obj)
+
+    return ModuleSpec(module=module, name=name, args=args, kwargs=kwargs)
+
+
+def instantiate_module_spec(spec: ModuleSpec) -> partial[Any]:
+    if set(spec.keys()) != {"module", "name", "args", "kwargs"}:
+        raise ValueError(
+            f"Expected ModuleSpec, but got {spec}. ModuleSpec must have keys 'module', 'name', 'args', and 'kwargs'."
+        )
+    cls = _import_from_string(spec["module"], spec["name"])
+    return partial(cls, *spec["args"], **spec["kwargs"])
+
+
+def module_spec_to_string(spec: ModuleSpec) -> str:
+    args = ", ".join(str(arg) for arg in spec["args"])
+    kwargs = ", ".join(f"{k}={v}" for k, v in spec["kwargs"].items())
+    sep = ", " if args and kwargs else ""
+    return f"{spec['module']}:{spec['name']}({args}{sep}{kwargs})"
+
+
+setattr(ModuleSpec, "create", staticmethod(create_module_spec))
+setattr(ModuleSpec, "instantiate", staticmethod(instantiate_module_spec))
+setattr(ModuleSpec, "to_string", staticmethod(module_spec_to_string))
 
 
 @dataclass
@@ -298,18 +301,21 @@ class ModuleFile:
         return ModuleSpec(module=module, name=name, args=args, kwargs=kwargs)
 
 
-def _infer_full_name(o: object):
-    if hasattr(o, "__module__") and hasattr(o, "__name__"):
-        return o.__module__, o.__name__
-    else:
-        raise ValueError(
-            f"Could not infer identifier for {o}. "
-            "Please pass in a fully qualified import string instead "
-            "e.g. 'crossformer.model.components.transformer:Transformer'"
-        )
+def _infer_full_name(o: object) -> tuple[str, str]:
+    module = getattr(o, "__module__", None)
+    name = getattr(o, "__name__", None)
+    if isinstance(module, str) and isinstance(name, str):
+        return module, name
+    raise ValueError(
+        f"Could not infer identifier for {o}. "
+        "Please pass in a fully qualified import string instead "
+        "e.g. 'crossformer.model.components.transformer:Transformer'"
+    )
 
 
-def _unwrap_partial(o: object, args: tuple[Any, ...], kwargs: dict[str, Any]):
+def _unwrap_partial(
+    o: object, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> tuple[object, tuple[Any, ...], dict[str, Any]]:
     while isinstance(o, partial):
         args = (*o.args, *args)
         kwargs = {**(o.keywords or {}), **kwargs}
@@ -317,7 +323,7 @@ def _unwrap_partial(o: object, args: tuple[Any, ...], kwargs: dict[str, Any]):
     return o, args, kwargs
 
 
-def _import_from_string(module_string: str, name: str):
+def _import_from_string(module_string: str, name: str) -> Any:
     try:
         module = importlib.import_module(module_string)
         return getattr(module, name)

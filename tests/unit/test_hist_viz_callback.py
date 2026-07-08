@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import numpy as np
-import wandb
 
 from crossformer.data.grain.metadata import ArrayStatistics, DatasetStatistics
 from crossformer.embody import DOF
@@ -9,6 +8,7 @@ from crossformer.utils.callbacks.base import EvalContext
 from crossformer.utils.callbacks.denorm import ActionBatchDenormalizer
 from crossformer.utils.callbacks.hist import HistCallback
 from crossformer.utils.jax_utils import str2np
+import wandb
 
 
 def _stats(

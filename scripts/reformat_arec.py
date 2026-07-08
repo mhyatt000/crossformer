@@ -24,7 +24,7 @@ from crossformer.utils.spec import spec
 
 @dataclass
 class ReformatConfig:
-    arec: Arec
+    arec: Arec = tyro.MISSING
     fmt: Literal["episode", "step"] | None = None  # format
 
 
