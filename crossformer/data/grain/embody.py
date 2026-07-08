@@ -55,7 +55,7 @@ def build_action_block(
     order: list[int],
     max_a: int,
     valid_masks: list[np.ndarray | None] | None = None,
-) -> dict[str, np.ndarray]:
+) -> dict[str, dict[str, np.ndarray]]:
     """Build act.base, act.id, mask.act from body parts in random order.
 
     Args:
@@ -125,10 +125,12 @@ def build_action_block(
     mask_act = (act_id != MASK_DOF) & valid
 
     return {
-        "act.base": act_base,
-        "act.id": act_id,
-        "act.view": act_view,
-        "mask.act": mask_act,
+        "act": {
+            "base": act_base,
+            "id": act_id,
+            "view": act_view,
+        },
+        "mask": {"act": mask_act},
     }
 
 
@@ -233,7 +235,7 @@ def build_embodiment_action(
     shuffle_slot: bool = True,
     key_map: dict[str, str] | None = None,
     valid_mask_dict: dict[str, np.ndarray] | None = None,
-) -> dict[str, np.ndarray]:
+) -> dict[str, dict[str, np.ndarray]]:
     """End-to-end: extract actions, sample modes, shuffle order, build block.
 
     Args:
@@ -250,7 +252,7 @@ def build_embodiment_action(
             fully valid.
 
     Returns:
-        {"act.base": (H, max_a), "act.id": (max_a,), "act.view": (max_a,), "mask.act": (max_a,)}.
+        {"act": {"base": (H, max_a), "id": (max_a,), "view": (max_a,)}, "mask": {"act": (max_a,)}}.
     """
     parts = list(embodiment.expanded)
     extracted = extract_part_actions(action_dict, embodiment, key_map)
@@ -342,8 +344,8 @@ def embody_transform(
     """Grain .map() transform: adds act.base, act.id, act.view, act.embody, mask.act."""
     rng = np.random.default_rng()
     sample = note_bodypart(sample, embodiment=embodiment)
-    # Consume per-part validity masks from restructure, if present.
-    # Pop to avoid flatten/unflat collision with the top-level "mask.act" key.
+    # Consume per-part validity masks from restructure, if present. Pop because
+    # mask.act is re-written below as the (max_a,) slot mask of the built block.
     valid_mask_dict = sample.get("mask", {}).pop("act", None)
     kpv = kp3dc_valid(sample)
     if kpv is not None:
@@ -358,6 +360,7 @@ def embody_transform(
         shuffle_slot=shuffle_slot,
         valid_mask_dict=valid_mask_dict,
     )
-    block["act.embody"] = _encode_name(embodiment.name)
-    sample.update(block)
+    block["act"]["embody"] = _encode_name(embodiment.name)
+    sample["act"] = block["act"]
+    sample.setdefault("mask", {})["act"] = block["mask"]["act"]
     return sample

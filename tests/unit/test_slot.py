@@ -33,10 +33,10 @@ def _block(emb, h, rng, modes=None, order=None):
 
 def _split(blk, embodiments):
     return split_by_bodypart(
-        jnp.asarray(blk["act.base"]),
-        jnp.asarray(blk["act.id"]),
+        jnp.asarray(blk["act"]["base"]),
+        jnp.asarray(blk["act"]["id"]),
         embodiments,
-        views=jnp.asarray(blk["act.view"]),
+        views=jnp.asarray(blk["act"]["view"]),
     )
 
 
@@ -57,10 +57,10 @@ def test_canonical_order_all_present(embodiments):
         modes = [INCLUDE] * len(parts)
         blk = build_action_block(parts, actions, modes, list(range(len(parts))), max_a)
         out = split_by_bodypart(
-            jnp.asarray(blk["act.base"]),
-            jnp.asarray(blk["act.id"]),
+            jnp.asarray(blk["act"]["base"]),
+            jnp.asarray(blk["act"]["id"]),
             embodiments,
-            views=jnp.asarray(blk["act.view"]),
+            views=jnp.asarray(blk["act"]["view"]),
         )
         exp = _expected(parts, actions, modes)
         for name, val in exp.items():
@@ -101,10 +101,10 @@ def test_human_single_only_returns_cart_pos():
     actions = _make_part_actions(HUMAN_SINGLE, 2, rng)
     blk = build_action_block(parts, actions, [INCLUDE], [0], MAX_A)
     out = split_by_bodypart(
-        jnp.asarray(blk["act.base"]),
-        jnp.asarray(blk["act.id"]),
+        jnp.asarray(blk["act"]["base"]),
+        jnp.asarray(blk["act"]["id"]),
         (SINGLE, HUMAN_SINGLE),
-        views=jnp.asarray(blk["act.view"]),
+        views=jnp.asarray(blk["act"]["view"]),
     )
     np.testing.assert_allclose(np.asarray(out["cart_pos"]), actions[0], atol=1e-6)
     # SINGLE-only parts should be all zero for a human sample
@@ -115,9 +115,9 @@ def test_human_single_only_returns_cart_pos():
 def test_batched_leading_dims():
     rng = np.random.default_rng(4)
     blocks = [_block(SINGLE, h=3, rng=rng, order=list(rng.permutation(N_PARTS)))[0] for _ in range(5)]
-    act = jnp.stack([jnp.asarray(b["act.base"]) for b in blocks])  # (B, H, A)
-    ids = jnp.stack([jnp.asarray(b["act.id"]) for b in blocks])  # (B, A)
-    views = jnp.stack([jnp.asarray(b["act.view"]) for b in blocks])  # (B, A)
+    act = jnp.stack([jnp.asarray(b["act"]["base"]) for b in blocks])  # (B, H, A)
+    ids = jnp.stack([jnp.asarray(b["act"]["id"]) for b in blocks])  # (B, A)
+    views = jnp.stack([jnp.asarray(b["act"]["view"]) for b in blocks])  # (B, A)
     out = split_by_bodypart(act, ids, (SINGLE,), views=views)
     assert out["arm_7dof"].shape == (5, 3, 7)
     assert out["gripper"].shape == (5, 3, 1)
@@ -146,9 +146,9 @@ def test_leading_dim_combinations(act_lead, ids_lead):
     # Single canonical sample: H=1, shape (1, A) and (A,)
     actions = _make_part_actions(SINGLE, 1, rng)
     blk = build_action_block(parts, actions, [INCLUDE] * len(parts), order, A)
-    base_act = blk["act.base"]  # (1, A)
-    base_ids = blk["act.id"]  # (A,)
-    base_views = blk["act.view"]  # (A,)
+    base_act = blk["act"]["base"]  # (1, A)
+    base_ids = blk["act"]["id"]  # (A,)
+    base_views = blk["act"]["view"]  # (A,)
 
     # Broadcast to requested leading shapes
     act = np.broadcast_to(base_act.reshape((1,) * (len(act_lead) - 1) + (1, A)), (*act_lead, A)).copy()
@@ -172,10 +172,10 @@ def test_jit_with_static_embodiments():
     blk, parts, actions, _, _ = _block(SINGLE, h=4, rng=rng, order=list(rng.permutation(N_PARTS)))
     fn = jax.jit(split_by_bodypart, static_argnames=("embodiments",))
     out = fn(
-        jnp.asarray(blk["act.base"]),
-        jnp.asarray(blk["act.id"]),
+        jnp.asarray(blk["act"]["base"]),
+        jnp.asarray(blk["act"]["id"]),
         (SINGLE, HUMAN_SINGLE),
-        views=jnp.asarray(blk["act.view"]),
+        views=jnp.asarray(blk["act"]["view"]),
     )
     for p, a in zip(parts, actions):
         np.testing.assert_allclose(np.asarray(out[_part_key(p)]), a, atol=1e-6)

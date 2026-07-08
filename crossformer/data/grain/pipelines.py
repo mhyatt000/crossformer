@@ -460,7 +460,7 @@ def add_horizon_mask(x: dict) -> dict:
     """Add mask.horizon with shape (W, H)."""
     sid = np.asarray(x["info"]["id"]["step"])
     len = np.asarray(x["info"]["len"])
-    action = np.asarray(x["act.base"])
+    action = np.asarray(x["act"]["base"])
 
     # Expect (*shape)
     H, A = action.shape
