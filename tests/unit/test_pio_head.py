@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import pytest
 
 from crossformer.model.components.base import TokenGroup
-from crossformer.model.components.heads.xflow import XFlowHead
+from crossformer.model.components.heads.pio import PerceiverIOHead
 
 pytestmark = pytest.mark.nn
 
@@ -17,15 +17,18 @@ def transformer_outputs():
     return {"obs": TokenGroup(tokens=tokens, mask=mask)}
 
 
-@pytest.fixture
-def head():
-    return XFlowHead(
+@pytest.fixture(params=[0, 4], ids=["single-encode", "act-fuse"])
+def head(request):
+    return PerceiverIOHead(
         readout_key="obs",
         max_dofs=5,
         max_horizon=2,
         num_query_channels=16,
         num_heads=2,
         num_self_attend_layers=1,
+        num_latents=6,
+        num_act_latents=request.param,
+        num_fuse_layers=1,
         dropout_prob=0.0,
         flow_steps=3,
         max_action=0.25,
@@ -54,7 +57,7 @@ def head_inputs():
     }
 
 
-def test_xflow_forward_accepts_rank4_and_flat_actions(transformer_outputs, head, head_inputs):
+def test_pio_forward_accepts_rank4_and_flat_actions(transformer_outputs, head, head_inputs):
     params = head.init(jax.random.PRNGKey(0), transformer_outputs, train=False)
 
     out_4d = head.apply(params, transformer_outputs, train=False, **head_inputs)
@@ -72,14 +75,20 @@ def test_xflow_forward_accepts_rank4_and_flat_actions(transformer_outputs, head,
     assert jnp.allclose(out_4d, out_flat)
 
 
-def test_xflow_forward_requires_flow_inputs(transformer_outputs, head):
+def test_pio_forward_requires_flow_inputs(transformer_outputs, head):
     params = head.init(jax.random.PRNGKey(0), transformer_outputs, train=False)
 
     with pytest.raises(ValueError, match="Must provide time, a_t, dof_ids, chunk_steps"):
         head.apply(params, transformer_outputs, train=False)
 
 
-def test_xflow_loss_ignores_padded_queries(transformer_outputs, head):
+def test_pio_no_dense_decoder_params(transformer_outputs, head):
+    """The inherited dense decoder must not materialize params (never called)."""
+    params = head.init(jax.random.PRNGKey(0), transformer_outputs, train=False)
+    assert "decoder" not in params["params"], sorted(params["params"])
+
+
+def test_pio_loss_ignores_padded_queries(transformer_outputs, head):
     params = head.init(jax.random.PRNGKey(0), transformer_outputs, train=True)
     dof_ids = jnp.array([[1, 2, 0, 0, 0], [3, 0, 0, 0, 0]], dtype=jnp.int32)
     chunk_steps = jnp.array([[0.0, 1.0], [0.0, -1.0]], dtype=jnp.float32)
@@ -114,8 +123,8 @@ def test_xflow_loss_ignores_padded_queries(transformer_outputs, head):
     assert jnp.allclose(metrics_a["mse"], metrics_b["mse"])
 
 
-def test_xflow_remat_is_equivalent(transformer_outputs, head, head_inputs):
-    """remat=True must share the param tree and produce identical outputs."""
+def test_pio_remat_is_equivalent(transformer_outputs, head, head_inputs):
+    """remat=True must share the param tree and produce identical outputs/grads."""
     head_r = head.clone(remat=True)
     params = head.init(jax.random.PRNGKey(0), transformer_outputs, train=False)
     params_r = head_r.init(jax.random.PRNGKey(0), transformer_outputs, train=False)
@@ -125,8 +134,18 @@ def test_xflow_remat_is_equivalent(transformer_outputs, head, head_inputs):
     out_r = head_r.apply(params, transformer_outputs, train=False, **head_inputs)
     assert jnp.allclose(out, out_r, atol=1e-5)
 
+    def loss_of(h):
+        def f(p):
+            return h.apply(p, transformer_outputs, train=False, **head_inputs).sum()
 
-def test_xflow_predict_action_respects_sample_shape_and_clipping(transformer_outputs, head, head_inputs):
+        return jax.grad(f)(params)
+
+    g, g_r = loss_of(head), loss_of(head_r)
+    flat, flat_r = jax.tree.leaves(g), jax.tree.leaves(g_r)
+    assert all(jnp.allclose(a, b, atol=1e-5) for a, b in zip(flat, flat_r))
+
+
+def test_pio_predict_action_respects_sample_shape_and_clipping(transformer_outputs, head, head_inputs):
     params = head.init(jax.random.PRNGKey(0), transformer_outputs, train=False)
 
     pred = head.apply(

@@ -17,8 +17,9 @@ from .dof import (
     pad_dof_ids,
 )
 from .flow import AdjFlowHead, FlowMatchingActionHead
-from .l1 import L1ActionHead, MSEActionHead
+from .l1 import BundledMSEHead, L1ActionHead, MSEActionHead
 from .losses import continuous_loss, masked_mean, sample_tau
+from .pio import PerceiverIOHead
 from .xflow import XFlowHead
 
 __all__ = [
@@ -29,12 +30,14 @@ __all__ = [
     "VOCAB_SIZE",
     "ActionHead",
     "AdjFlowHead",
+    "BundledMSEHead",
     "ContinuousActionHead",
     "DiffusionActionHead",
     "FactoredQueryEncoding",
     "FlowMatchingActionHead",
     "L1ActionHead",
     "MSEActionHead",
+    "PerceiverIOHead",
     "XFlowHead",
     "build_query_mask",
     "chunk_range",

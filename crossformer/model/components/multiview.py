@@ -13,6 +13,10 @@ Encoders:
       removing the params.
   StackedDinoTokenizer — frozen DINOv3 trunk via the load_dino closure
       (weights outside the param tree; see dino_encoder.py).
+  StackedVitTokenizer — trainable from-scratch encoder from
+      ``vit_encoders.vit_encoder_configs`` (e.g. small-stem-16) under the
+      module name "encoder". FiLM variants are rejected: the stacked path has
+      no language-conditioning wiring.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ import jax.numpy as jnp
 
 from crossformer.model.components.base import TokenGroup
 from crossformer.model.components.dino_encoder import DinoV3Encoder, MODEL_ID_DEFAULT
+from crossformer.model.components.vit_encoders import vit_encoder_configs
 
 TIPS_VARIANT_DEFAULT = "tips_v2_b14"
 
@@ -185,6 +190,35 @@ class StackedDinoTokenizer(_StackedViewTokenizer):
             target_size=self.target_size,
         )
         return lambda frames, train: encoder(frames, train=train)
+
+
+class StackedVitTokenizer(_StackedViewTokenizer):
+    """From-scratch encoder from vit_encoder_configs over stacked views.
+
+    The trunk is a linen submodule named "encoder"; it trains with the model
+    (no pretrained weights exist for these). ``freeze=True`` stops gradients,
+    which only makes sense when resuming from a checkpoint that trained it.
+    """
+
+    encoder_name: str = "small-stem-16"
+    freeze: bool = False
+
+    def make_encoder(self):
+        enc_ctor = vit_encoder_configs[self.encoder_name]
+        if (getattr(enc_ctor, "keywords", None) or {}).get("use_film", False):
+            raise ValueError(
+                f"stacked path has no language-conditioning wiring; "
+                f"pick a non-FiLM encoder (got {self.encoder_name!r})"
+            )
+        enc = enc_ctor(name="encoder")
+
+        def encode(frames: Array, train: bool) -> Array:
+            spatial = enc(frames, train=train)  # (N, fh, fw, E)
+            if self.freeze:
+                spatial = jax.lax.stop_gradient(spatial)
+            return spatial.reshape(spatial.shape[0], -1, spatial.shape[-1])
+
+        return encode
 
 
 def load_tips_params(params: dict, variant: str = TIPS_VARIANT_DEFAULT, checkpoint_path: str | Path | None = None):

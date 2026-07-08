@@ -51,6 +51,9 @@ class PerceiverDecoder(nn.Module):
     qk_channels: int | None = None
     v_channels: int | None = None
     factor_axes: tuple[int, int] | None = None
+    # Recompute block internals (attention scores, softmax, MLP hiddens) in
+    # backward instead of storing them. Same param tree — checkpoint-compatible.
+    remat: bool = False
 
     @nn.compact
     def __call__(
@@ -61,6 +64,7 @@ class PerceiverDecoder(nn.Module):
         deterministic: bool = True,
         attention_mask: ArrayLike | None = None,
         bias_weight: ArrayLike | None = None,
+        query_mask: ArrayLike | None = None,
     ) -> Array:
         """Interleave cross-attn and self-attn blocks.
 
@@ -69,15 +73,38 @@ class PerceiverDecoder(nn.Module):
             context: (batch, seq_kv, d_kv)
             attention_mask: (batch, seq_q, seq_kv) bool mask for cross-attention.
             bias_weight: (batch, seq_q, seq_kv) multiplicative cross-attention weights.
+            query_mask: (batch, seq_q) bool mask of valid queries; padded queries
+                are excluded from self-attention keys (their rows are wiped).
 
         Returns:
             (batch, seq_q, d_q)
         """
+        # Self-attention masks so valid queries never attend to padded slots.
+        sa_mask = sa_mask_a = sa_mask_h = None
+        if query_mask is not None:
+            qm = jnp.asarray(query_mask, dtype=jnp.int32)
+            if self.factor_axes is None:
+                sa_mask = make_cross_attention_mask(qm, qm)
+            else:
+                H, A = self.factor_axes
+                qm_a = rearrange(qm, "b (h a) -> (b h) a", h=H, a=A)
+                qm_h = rearrange(qm, "b (h a) -> (b a) h", h=H, a=A)
+                sa_mask_a = make_cross_attention_mask(qm_a, qm_a)
+                sa_mask_h = make_cross_attention_mask(qm_h, qm_h)
+
+        # static_argnums counts `self` as 0: deterministic is positional arg 5
+        # (CrossAttention) / 3 (SelfAttention); remat requires static args be
+        # passed positionally, hence the positional call style below.
+        CrossAttn, SelfAttn = CrossAttention, SelfAttention
+        if self.remat:
+            CrossAttn = nn.remat(CrossAttention, static_argnums=(5,))
+            SelfAttn = nn.remat(SelfAttention, static_argnums=(3,))
+
         # Preserve legacy param names at num_blocks=1 so old checkpoints load.
         legacy = self.num_blocks == 1
         x = queries
         for b in range(self.num_blocks):
-            x = CrossAttention(
+            x = CrossAttn(
                 num_heads=self.num_heads,
                 widening_factor=self.widening_factor,
                 dropout_prob=self.dropout_prob,
@@ -86,18 +113,18 @@ class PerceiverDecoder(nn.Module):
                 use_query_residual=True,
                 shape_for_attn="kv",
                 name="cross_attend" if legacy else f"cross_attend_{b}",
-            )(x, context, attention_mask=attention_mask, bias_weight=bias_weight, deterministic=deterministic)
+            )(x, context, attention_mask, bias_weight, deterministic)
 
             for i in range(self.num_self_attend_layers):
                 if self.factor_axes is None:
-                    x = SelfAttention(
+                    x = SelfAttn(
                         num_heads=self.num_heads,
                         widening_factor=self.widening_factor,
                         dropout_prob=self.dropout_prob,
                         qk_channels=self.qk_channels,
                         v_channels=self.v_channels,
                         name=f"self_attend_{i}" if legacy else f"self_attend_{b}_{i}",
-                    )(x, deterministic=deterministic)
+                    )(x, sa_mask, deterministic)
                     continue
 
                 H, A = self.factor_axes
@@ -110,10 +137,10 @@ class PerceiverDecoder(nn.Module):
                 }
                 # attention over A within each timestep
                 x = rearrange(x, "b (h a) d -> (b h) a d", h=H, a=A)
-                x = SelfAttention(**sa, name=f"self_attend_a_{b}_{i}")(x, deterministic=deterministic)
+                x = SelfAttn(**sa, name=f"self_attend_a_{b}_{i}")(x, sa_mask_a, deterministic)
                 # attention over H within each action slot
                 x = rearrange(x, "(b h) a d -> (b a) h d", h=H, a=A)
-                x = SelfAttention(**sa, name=f"self_attend_h_{b}_{i}")(x, deterministic=deterministic)
+                x = SelfAttn(**sa, name=f"self_attend_h_{b}_{i}")(x, sa_mask_h, deterministic)
                 x = rearrange(x, "(b a) h d -> b (h a) d", h=H, a=A)
 
         return x
@@ -158,6 +185,9 @@ class XFlowHead(nn.Module, ActionHead):
     # full (max_horizon*max_dofs)^2 sequence. Changes the param tree (two
     # self-attn layers per one) — not checkpoint-compatible with False.
     factor_attn: bool = False
+    # Gradient-checkpoint the attention blocks (recompute internals in
+    # backward). Same param tree — checkpoint-compatible.
+    remat: bool = False
 
     # Flow matching
     time_dim: int = 32
@@ -210,6 +240,7 @@ class XFlowHead(nn.Module, ActionHead):
             widening_factor=self.widening_factor,
             dropout_prob=self.dropout_prob,
             factor_axes=(self.max_horizon, self.max_dofs) if self.factor_attn else None,
+            remat=self.remat,
             name="decoder",
         )
         self.output_proj = nn.Dense(1, name="output_proj")
@@ -427,6 +458,7 @@ class XFlowHead(nn.Module, ActionHead):
             deterministic=not train,
             attention_mask=attention_mask,
             bias_weight=bias_weight,
+            query_mask=q_mask,
         )
 
         # Scalar output per query, flatten

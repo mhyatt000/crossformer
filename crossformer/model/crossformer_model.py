@@ -30,6 +30,10 @@ from crossformer.utils.spec import ModuleSpec, spec
 class CrossFormerModel:
     """Recommended way of interacting with CrossFormer models.
 
+    Subclasses may override ``module_cls`` (plain class attribute, not a field)
+    to swap the backbone module while inheriting all housekeeping
+    (from_config/load_pretrained/save_pretrained/sample_actions).
+
     Usage for inference:
 
         >>> model = CrossFormerModel.load_pretrained(checkpoint_dir)
@@ -76,6 +80,9 @@ class CrossFormerModel:
     params: Params
     example_batch: Data
     dataset_statistics: Data | None = struct.field(pytree_node=False)
+
+    # Backbone module class hook (plain class attribute, not a dataclass field).
+    module_cls = CrossFormerModule
 
     def create_tasks(self, goals: Data | None = None, texts: Sequence[str] | None = None) -> Data:
         """Creates tasks dict from goals and texts.
@@ -280,8 +287,8 @@ class CrossFormerModel:
             dataset_statistics = json.load(f)
             dataset_statistics = _stats_to_arrays(dataset_statistics)
 
-        # create model def (a CrossFormerModule)
-        module = CrossFormerModule.create(**config["model"])
+        # create model def (a CrossFormerModule or subclass via module_cls)
+        module = cls.module_cls.create(**config["model"])
 
         # infer params shape without actually doing any computation
         init_args = (
@@ -412,7 +419,7 @@ class CrossFormerModel:
             rng (Optional[PRNGKey], optional): RNG key for initializing the model.
             dataset_statistics (Optional[Dict[str, Any]], optional): Dataset statistics.
         """
-        module = CrossFormerModule.create(**config["model"])
+        module = cls.module_cls.create(**config["model"])
         rng = rng if rng is not None else jax.random.PRNGKey(0)
         example_batch = multihost_utils.process_allgather(example_batch)
         example_batch = jax.tree.map(lambda x: x[0][:1], example_batch)
