@@ -1,92 +1,46 @@
-# Scaling Cross-Embodied Learning: One Policy for Manipulation, Navigation, Locomotion and Aviation
-[![arXiv](https://img.shields.io/badge/arXiv-2408.11812-df2a2a.svg)](https://arxiv.org/pdf/2408.11812)
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://githubtocolab.com/rail-berkeley/crossformer/blob/main/inference_pretrained.ipynb)
-[![HF Models](https://img.shields.io/badge/%F0%9F%A4%97-Models-yellow)](https://huggingface.co/rail-berkeley/crossformer)
-[![Python](https://img.shields.io/badge/python-3.10-blue)](https://www.python.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Static Badge](https://img.shields.io/badge/Project-Page-a)](https://crossformer-model.github.io/)
 
-[Ria Doshi](https://www.linkedin.com/in/riadoshi/), [Homer Walke](https://homerwalke.com/), [Oier Mees](https://www.oiermees.com/), [Sudeep Dasari](https://sudeepdasari.github.io/), [Sergey Levine](https://people.eecs.berkeley.edu/~svlevine/)
-<hr style="border: 2px solid gray;"></hr>
+# installation
 
-This repo contains code for training and finetuning CrossFormer. CrossFormer is a transformer-based robot policy trained on 900K robot trajectories across 20 different robot embodiments. Our codebase is built on the [Octo codebase](https://github.com/octo-models/octo).
+    uv sync
 
-![CrossFormer model](docs/assets/teaser.jpg)
+# housekeeping
 
-## Get Started
+style of this document is concise
 
-Follow the installation instructions, then load the pre-trained CrossFormer model! See [our colab notebook](https://githubtocolab.com/rail-berkeley/crossformer/blob/main/inference_pretrained.ipynb) for an inference example.
+# organization
 
-```python
-from crossformer.model.crossformer_model import CrossFormerModel
-model = CrossFormerModel.load_pretrained("hf://rail-berkeley/crossformer")
-print(model.get_pretty_spec())
-```
+### config
 
-Out of the box, CrossFormer can control single and dual arm manipulation systems, wheeled robots, quadcopters, and quadrupeds, and can be instructed via language commands or goal images.
-CrossFormer uses a modular attention structure in its transformer backbone, allowing it to be effectively finetuned to robot setups with new sensory inputs, action spaces, and morphologies, using only a small target domain dataset and accessible compute budgets.
+configuration presets that dont fit cleanly into python-only. might be dynamic depending on data or
+they might change frequently
 
+### contract
 
-## Installation
-```bash
-conda create -n crossformer python=3.10
-conda activate crossformer
-pip install -e .
-pip install -r requirements.txt
-```
-For GPU:
-```bash
-pip install --upgrade "jax[cuda11_pip]==0.4.20" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-```
+configuration about agreed upon shapes and keys. only change when adding new embodiment
 
-For TPU
-```bash
-pip install --upgrade "jax[tpu]==0.4.20" -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
-```
-See the [Jax Github page](https://github.com/google/jax) for more details on installing Jax.
+# rough edges
 
-## Checkpoint
+What the structure tells me
 
-You can find the pre-trained CrossFormer 130M parameter checkpoint [here](https://huggingface.co/rail-berkeley/crossformer).
+  Duplication across module boundaries. The same names recur in crossformer/ and scripts/: dream.py appears at least 4 times (crossformer/model/dream.py, crossformer/run/dream.py, scripts/train/dream.py, scripts/serve/dream.py), plus _wrappers.py/run/wrappers/, and several viz/synth_viz/rast
+  callbacks. That's the classic sign of a research repo where every experiment forked its own entry point instead of parameterizing one.
 
-## CrossFormer Evaluation
+  Config sprawl. You have cn/ (a config-node tree with dataset/transform/, eval/, model/) and a new crossformer/contract/ and a top-level config/ (untracked) and scripts/configs/. Four places that describe "how a run is set up." Pick one.
 
-See [scripts/server.py](scripts/server.py) for an example of how to host the CrossFormer model on a server for remote inference. Remote inference is useful for evaluating on robots that cannot be directly connected to a powerful GPU.
+  Two data stacks. data/grain/ (with map/, util/) is clearly the current one; data/oxe/, data/arec/, data/mcap.py, data/bpnp.py, data/dba.py, data/dtw.py look like accreted format-specific loaders. The git status confirms churn here (from_zarr.py deleted, make_dset.py deleted).
 
-## CrossFormer Pre-training
+  Dead/scratch weight in the tree. scripts/old/, wip/, tmp-rast.py, *.bak, tests/broken/, flax_utils.py and types.err.txt at repo root. None of this should be in the tree a newcomer navigates.
 
-To reproduce CrossFormer pre-training, edit [scripts/configs/pretrain_config.py](scripts/configs/pretrain_config.py) to point to your data and log directory. Then, run:
+  Hot spots that are probably doing too much. utils/spatial/kp.py (105 defs) and data/grain/datasets.py (66) / pipelines.py (50) are large enough to be their own subpackages or to be hiding several concerns.
 
-```bash
-python scripts/train.py --config scripts/configs/pretrain_config.py
-```
+  How I'd prune if starting over
 
-To download the pre-training datasets from the [Open X-Embodiment Dataset](https://robotics-transformer-x.github.io/),
-install the [rlds_dataset_mod package](https://github.com/kpertsch/rlds_dataset_mod)
-and run the [prepare_open_x.sh script](https://github.com/kpertsch/rlds_dataset_mod/blob/main/prepare_open_x.sh).
+  1. One entry point per verb, not per experiment. Collapse the dream/robopepp/bela script forks into scripts/train.py, scripts/serve.py, scripts/eval.py, each driven by config. Delete scripts/old/, wip/, tmp-*.py, *.bak, tests/broken/ outright (they're in git history if needed).
+  2. Single config system. Keep cn/ or contract/, not both, and fold scripts/configs/ + top-level config/ into it. Right now a reader can't tell which one is authoritative.
+  3. One data path. Make data/grain/ the only loader. Move arec/oxe/mcap/zarr conversion into a data/ingest/ (or scripts/data/make/) that produces the grain format, so the training path never imports format-specific code.
+  4. Flatten run/ vs scripts/. crossformer/run/ and scripts/ overlap conceptually (both are "how you launch"). Library code (importable, tested) stays in crossformer/; thin argument-parsing shells stay in scripts/. Move logic out of scripts, kill _wrappers.py/wrappers/ duplication.
+  5. Break up the giants. spatial/kp.py at 105 defs is a subpackage waiting to happen; grain/datasets.py + pipelines.py are the other candidates.
+  6. Root cleanup. flax_utils.py, types.err.txt, tmp-rast.py, multiview.md don't belong at repo root.
 
-Pre-training takes 47 hours on a TPUv5-256 pod.
-
-## CrossFormer Finetuning
-
-To run finetuning on your own dataset, convert your dataset to the RLDS format using [this repository](https://github.com/kpertsch/rlds_dataset_builder). Then, edit [scripts/configs/finetune_config.py](scripts/configs/finetune_config.py), and run:
-
-```bash
-python scripts/finetune.py --config scripts/configs/finetune_config.py
-```
-
-There are a few options for finetuning CrossFormer. If your dataset has an observation space and action space that was used during pre-training, you can finetune from entirely pre-trained weights, using the existing observation tokenizers, action heads, and transformer backbone. Otherwise, you can initialize new observation tokenizers and/or action heads while keeping the pre-trained transformer backbone. Additionally, you may choose to finetune the entire model or freeze the transformer and finetune only the action head. Finally, you can choose to finetune on your data with goal image conditioning, language conditioning, or both.
-
-See the comments in [scripts/configs/finetune_config.py](scripts/configs/finetune_config.py) for an explanation of how to configure these fine-tuning options.
-
-
-## Citation
-
-```bibtex
-@article{doshi24-crossformer,
-    title={Scaling Cross-Embodied Learning: One Policy for Manipulation, Navigation, Locomotion and Aviation},
-    author={Ria Doshi and Homer Walke and Oier Mees and Sudeep Dasari and Sergey Levine},
-    journal={arXiv preprint arXiv:2408.11812},
-    year={2024}
-}
-```
+  The one-sentence version: the codebase grew by copy-forking experiments; pruning is mostly de-duplicating (one train/serve/eval, one config system, one data path) and deleting the old//wip//broken//bak scaffolding — not rewriting the core model code, which looks reasonably factored
+  (model/components/heads/ etc.).
