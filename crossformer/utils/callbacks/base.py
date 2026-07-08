@@ -45,11 +45,39 @@ def maybe_getpath(tree: Mapping[str, Any], path: tuple[str, ...]) -> Any | None:
     return cur
 
 
+def _broadcast_state_leaf(x: Any, horizon: int) -> Array:
+    """Broadcast state leaf from (B, A) to (B, W, A) when needed."""
+    arr = jnp.asarray(x)
+    if arr.ndim == 2:
+        return jnp.broadcast_to(arr[:, None, :], (arr.shape[0], horizon, arr.shape[-1]))
+    return arr
+
+
+def _add_state_obs(out: dict[str, Any], state: Mapping[str, Any] | None, mask: Mapping[str, Any] | None) -> None:
+    """Attach canonical model-facing state slots to observation dict in place."""
+    state = state or out.get("state")
+    if not isinstance(state, Mapping) or not {"base", "id", "view"} <= set(state):
+        return
+
+    horizon = int(out["timestep_pad_mask"].shape[1])
+    out["state"] = {
+        "base": _broadcast_state_leaf(state["base"], horizon),  # (B, W, A)
+        "id": _broadcast_state_leaf(state["id"], horizon),  # (B, W, A)
+        "view": _broadcast_state_leaf(state["view"], horizon),  # (B, W, A)
+    }
+
+    state_mask = maybe_getpath(mask or {}, ("state", "base"))
+    if state_mask is not None:
+        out.setdefault("mask", {}).setdefault("state", {})["base"] = _broadcast_state_leaf(state_mask, horizon)
+
+
 def flatten_obs(
     obs: Mapping[str, Any],
     obs_keys: tuple[str, ...],
     *,
     view_mask: ArrayLike | None = None,
+    state: Mapping[str, Any] | None = None,
+    mask: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Flatten selected lowdim inputs to (B, W, D).
 
@@ -72,6 +100,7 @@ def flatten_obs(
             horizon = int(out["timestep_pad_mask"].shape[1])
             vm = jnp.broadcast_to(vm[:, None, :], (vm.shape[0], horizon, vm.shape[-1]))
         out["view_mask"] = vm
+    _add_state_obs(out, state, mask)
     return out
 
 
@@ -99,8 +128,15 @@ def extract_bundled_actions(batch: Mapping[str, Any], max_h: int) -> tuple[Array
     horizon_mask = batch.get("mask", {}).get("horizon")
     if horizon_mask is not None:
         horizon_mask = jnp.asarray(horizon_mask, dtype=bool)
+        # chunk_steps is per sample, not per observation timestep: (B, H).
+        # Data may carry mask.horizon as (B, H) or windowed (B, W, H); collapse
+        # the latter to (B, H) before jnp.where to avoid broadcasting to (B, B, H).
         if horizon_mask.ndim == 1:
             horizon_mask = horizon_mask[None]
+        if horizon_mask.ndim == 3:
+            horizon_mask = horizon_mask[:, 0]
+        if horizon_mask.ndim != 2:
+            raise ValueError(f"mask.horizon must have shape (B, H) or (B, W, H); got {horizon_mask.shape}")
         horizon_mask = horizon_mask[:, :horizon]
         chunk_steps = jnp.where(horizon_mask, chunk_steps, CHUNK_PAD)
     return actions, dof_ids, chunk_steps, view_ids, mask_act

@@ -6,10 +6,13 @@ from typing import Any
 from crossformer.model.components.multiview import (
     StackedDinoTokenizer,
     StackedTipsTokenizer,
+    StackedVitTokenizer,
     TIPS_VARIANT_DEFAULT,
 )
+from crossformer.model.components.vit_encoders import vit_encoder_configs
 from crossformer.model.components.tokenizers import ImageTokenizer, LanguageTokenizer, LowdimObsTokenizer
 from crossformer.model.components.transformer import common_transformer_sizes
+from crossformer.model.components.xstate import XStateEncoder
 from crossformer.model.crossformer_module import CrossFormerModule
 from crossformer.utils.spec import ModuleSpec
 

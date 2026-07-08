@@ -335,6 +335,28 @@ def kp3dc_valid(sample: dict) -> np.ndarray | None:
     return np.repeat(valid, 3, axis=-1)  # (V, 3K) — xyz per keypoint
 
 
+def add_state_from_action_block(sample: dict, block: dict[str, dict[str, np.ndarray]]) -> dict:
+    """Add state slots matching the action slot order.
+
+    Shapes before batching:
+        act.base:        (H, A)
+        act.id/view:     (A,)
+        mask.act:        (A,)
+        state.base:      (A,) from act.base[0]
+        state.id/view:   (A,)
+        mask.state.base: (A,)
+    """
+    sample.setdefault("state", {}).update(
+        {
+            "base": np.asarray(block["act"]["base"][0], dtype=np.float32),
+            "id": np.asarray(block["act"]["id"], dtype=np.int32),
+            "view": np.asarray(block["act"]["view"], dtype=np.int32),
+        }
+    )
+    sample.setdefault("mask", {}).setdefault("state", {})["base"] = np.asarray(block["mask"]["act"], dtype=bool)
+    return sample
+
+
 def embody_transform(
     sample: dict,
     *,
@@ -362,6 +384,7 @@ def embody_transform(
         shuffle_slot=shuffle_slot,
         valid_mask_dict=valid_mask_dict,
     )
+    sample = add_state_from_action_block(sample, block)
     block["act"]["embody"] = _encode_name(embodiment.name)
     sample["act"] = block["act"]
     sample.setdefault("mask", {})["act"] = block["mask"]["act"]

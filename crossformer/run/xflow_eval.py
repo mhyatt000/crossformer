@@ -61,6 +61,10 @@ class EvalLoop:
             batch = next(self._it)
         batch = dict(batch)
         batch["observation"] = flatten_obs(
-            batch["observation"], self.obs_keys, view_mask=batch.get("mask", {}).get("view")
+            batch["observation"],
+            self.obs_keys,
+            view_mask=batch.get("mask", {}).get("view"),
+            state=batch.get("state"),
+            mask=batch.get("mask"),
         )
         return batch

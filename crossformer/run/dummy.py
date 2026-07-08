@@ -106,6 +106,11 @@ def make_fake_batch(
             },
         },
         "task": {"pad_mask_dict": {}},
+        "state": {
+            "base": actions[:, :, 0, :],
+            "id": dof_ids,
+            "view": views,
+        },
         "act": {
             "base": actions,
             "id": dof_ids,
@@ -113,6 +118,7 @@ def make_fake_batch(
         },
         "mask": {
             "act": act_mask,
+            "state": {"base": act_mask},
             "embodiment": emb_mask,
         },
     }
