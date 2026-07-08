@@ -621,6 +621,15 @@ _XARM_DREAM_PROPRIO = ProprioObs(key="proprio", dim=8)  # joints(7) + gripper(1)
 xgym_lift = Dataset("xgym_lift_single", SINGLE, SourceType.TFDS, images=_XGYM_IMG, proprio=_XGYM_PROPRIO)
 xgym_duck = Dataset("xgym_duck_single", SINGLE, SourceType.TFDS, images=_XGYM_IMG, proprio=_XGYM_PROPRIO)
 xgym_stack = Dataset("xgym_stack_single", SINGLE, SourceType.TFDS, images=_XGYM_IMG, proprio=_XGYM_PROPRIO)
+xarm_sim = Dataset(
+    "xarm_sim",
+    SINGLE,
+    SourceType.AREC,
+    images=_XGYM_IMG,
+    proprio=_XGYM_PROPRIO,
+    version="0.0.1",
+    branch="main",
+)
 xgym_sweep = Dataset(
     "xgym_sweep_single",
     SINGLE,

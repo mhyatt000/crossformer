@@ -9,11 +9,15 @@ from typing import Any, Iterable, Iterator
 from google.protobuf.descriptor import FieldDescriptor
 from google.protobuf.message import Message
 import grain
+import jax
 from mcap.reader import make_reader, McapReader
 from mcap.records import Channel, Schema
 from mcap_protobuf.decoder import DecoderFactory
 import numpy as np
+from scipy.spatial.transform import Rotation
 from tqdm import tqdm
+
+from crossformer.data.utils.trajectory import scan_noop
 
 
 def _stack(xs: list[Any]) -> Any:
@@ -199,6 +203,117 @@ def decode_cameras(tree: dict) -> dict[str, np.ndarray]:
         raise ValueError(f"episode has no RawImage topics: {sorted(tree['topics'])}")
     n = min(len(v) for v in images.values())
     return {k: v[:n] for k, v in images.items()}
+
+
+def truncate_to_shortest_topic(tree: dict) -> dict:
+    """Truncate every topic to the shortest topic length."""
+    topics = tree["topics"]
+    if not topics:
+        raise ValueError("episode has no topics")
+    lengths = {key: len(value["log_time"]) for key, value in topics.items()}
+    n = min(lengths.values())
+    if not n:
+        raise ValueError(f"episode has an empty topic: {lengths}")
+
+    out = dict(tree)
+    out["topics"] = {
+        key: jax.tree.map(
+            lambda x: x[:n] if isinstance(x, np.ndarray) and x.ndim else x,
+            value,
+        )
+        for key, value in topics.items()
+    }
+    return out
+
+
+def _pose(value: dict) -> tuple[np.ndarray, np.ndarray]:
+    data = value["data"]
+    position = np.stack([data["position"][key] for key in ("x", "y", "z")], axis=-1)
+    quaternion = np.stack([data["orientation"][key] for key in ("x", "y", "z", "w")], axis=-1)
+    position = (position / 1e3).astype(np.float32)
+    orientation = Rotation.from_quat(quaternion).as_euler("xyz").astype(np.float32)
+    return position, orientation
+
+
+def map_topic_payloads(tree: dict) -> dict:
+    """Group known MCAP topics into images and proprio.
+
+    Image topics are stacked in sorted-topic order so the view axis is deterministic.
+    """
+    images = []
+    proprio = {}
+    other = {}
+    for key, value in sorted(tree["topics"].items()):
+        schema = value["schema"]
+        if schema == "foxglove.JointStates":
+            proprio["joints"] = value["data"]["joints"]["position"]
+            continue
+        if schema == "foxglove.Pose":
+            proprio["position"], proprio["orientation"] = _pose(value)
+            continue
+        if schema == "xclients.Gripper":
+            proprio["gripper"] = np.asarray(value["data"]["norm"], dtype=np.float32)[:, None]
+            continue
+        if schema == "foxglove.RawImage":
+            images.append(decode_raw_image(value))
+            continue
+        other[key] = value
+
+    if not images:
+        raise ValueError("episode has no RawImage topics")
+    shapes = {image.shape for image in images}
+    if len(shapes) != 1:
+        raise ValueError(f"RawImage topics must share shape, got {sorted(shapes)}")
+
+    out = {key: value for key, value in tree.items() if key != "topics"}
+    out["images"] = np.stack(images, axis=1)
+    out["proprio"] = proprio
+    if other:
+        out["topics"] = other
+    return out
+
+
+def filter_noops(tree: dict, threshold: float = 1e-3) -> dict:
+    """Remove steps that are no-ops in both Cartesian and joint space."""
+    proprio = tree["proprio"]
+    gripper = proprio["gripper"]
+    pos = np.concatenate((proprio["position"], gripper), axis=-1)
+    jpos = np.concatenate((proprio["joints"], gripper), axis=-1)
+    mask = np.logical_and(
+        ~np.asarray(scan_noop(pos, threshold=threshold)),
+        ~np.asarray(scan_noop(jpos, threshold=threshold)),
+    )
+    n = len(mask)
+    print(f"mask | keep={sum(mask)} / total={n}")
+    return jax.tree.map(
+        lambda x: x[mask] if isinstance(x, np.ndarray) and x.ndim and len(x) == n else x,
+        tree,
+    )
+
+
+def add_episode_info(ds: grain.IterDataset) -> grain.IterDataset:
+    """Add contiguous IDs after filtering."""
+    global_step = 0
+    episode = 0
+
+    def add(tree: dict) -> dict:
+        nonlocal episode, global_step
+        n = len(tree["images"])
+        step = np.arange(n, dtype=np.int64)
+        info = tree["info"]
+        info.pop("episode", None)
+        info.pop("path", None)
+        info["id"] = {
+            "episode": np.full(n, episode, dtype=np.int64),
+            "step": step,
+            "global": step + global_step,
+        }
+        info["len"] = np.full(n, n, dtype=np.int64)
+        global_step += n
+        episode += 1
+        return tree
+
+    return ds.map(add)
 
 
 class McapLoader:

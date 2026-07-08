@@ -4,14 +4,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol
 
-import cv2
 import grain
 from grain._src.python.dataset.transformations.flatmap import FlatMapIterDataset
 from grain.experimental import ThreadPrefetchIterDataset
 import jax
 import numpy as np
 from rich import print
-from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 import tyro
 from webpolicy.client import Client
@@ -20,8 +18,13 @@ from crossformer.data.arec.arec import ArrayRecordBuilder
 from crossformer.data.grain.loader import _apply_fd_limit
 from crossformer.data.grain.map import flatmap
 from crossformer.data.grain.write import BuildMGR, make_writers
-from crossformer.data.mcap import McapLoader
-from crossformer.data.utils.trajectory import scan_noop
+from crossformer.data.mcap import (
+    add_episode_info,
+    filter_noops,
+    map_topic_payloads,
+    McapLoader,
+    truncate_to_shortest_topic,
+)
 from crossformer.run.dream import (
     dream_w2c_cv_to_roboreg_ht,
     filter_w2c_by_iou,
@@ -127,138 +130,6 @@ def first_spec_match():
         return (True, {}) if not any(delta.values()) else (False, delta)
 
     return match
-
-
-def _constant(x, name: str):
-    x = np.asarray(x)
-    if not len(x) or not np.all(x == x[0]):
-        raise ValueError(f"RawImage {name} must be constant")
-    return x[0].item()
-
-
-def _raw_images(value: dict) -> np.ndarray:
-    data = value["data"]
-    h = _constant(data["height"], "height")
-    w = _constant(data["width"], "width")
-    step = _constant(data["step"], "step")
-    if step % w:
-        raise ValueError(f"RawImage step={step} is not divisible by width={w}")
-    c = step // w
-    images = data["data"]
-    if images.shape[1] != h * step:
-        raise ValueError(f"RawImage data width={images.shape[1]} does not match height x step={h * step}")
-    images = images.reshape(len(images), h, w, c)
-    if c == 2:
-        images = np.stack([cv2.cvtColor(image, cv2.COLOR_YUV2RGB_YUY2) for image in images])
-    return images
-
-
-def truncate_to_shortest_topic(tree: dict) -> dict:
-    """Truncate every topic to the shortest topic length."""
-    topics = tree["topics"]
-    if not topics:
-        raise ValueError("episode has no topics")
-    lengths = {key: len(value["log_time"]) for key, value in topics.items()}
-    n = min(lengths.values())
-    if not n:
-        raise ValueError(f"episode has an empty topic: {lengths}")
-
-    out = dict(tree)
-    out["topics"] = {
-        key: jax.tree.map(
-            lambda x: x[:n] if isinstance(x, np.ndarray) and x.ndim else x,
-            value,
-        )
-        for key, value in topics.items()
-    }
-    return out
-
-
-def _pose(value: dict) -> tuple[np.ndarray, np.ndarray]:
-    data = value["data"]
-    position = np.stack([data["position"][key] for key in ("x", "y", "z")], axis=-1)
-    quaternion = np.stack([data["orientation"][key] for key in ("x", "y", "z", "w")], axis=-1)
-    position = (position / 1e3).astype(np.float32)
-    orientation = Rotation.from_quat(quaternion).as_euler("xyz").astype(np.float32)
-    return position, orientation
-
-
-def map_topic_payloads(tree: dict) -> dict:
-    """Group known MCAP topics into images and proprio."""
-    images = []
-    proprio = {}
-    other = {}
-    for key, value in tree["topics"].items():
-        schema = value["schema"]
-        if schema == "foxglove.JointStates":
-            proprio["joints"] = value["data"]["joints"]["position"]
-            continue
-        if schema == "foxglove.Pose":
-            proprio["position"], proprio["orientation"] = _pose(value)
-            continue
-        if schema == "xclients.Gripper":
-            proprio["gripper"] = np.asarray(value["data"]["norm"], dtype=np.float32)[:, None]
-            continue
-        if schema == "foxglove.RawImage":
-            images.append(_raw_images(value))
-            continue
-        other[key] = value
-
-    if not images:
-        raise ValueError("episode has no RawImage topics")
-    shapes = {image.shape for image in images}
-    if len(shapes) != 1:
-        raise ValueError(f"RawImage topics must share shape, got {sorted(shapes)}")
-
-    out = {key: value for key, value in tree.items() if key != "topics"}
-    out["images"] = np.stack(images, axis=1)
-    out["proprio"] = proprio
-    if other:
-        out["topics"] = other
-    return out
-
-
-def filter_noops(tree: dict, threshold: float = 1e-3) -> dict:
-    """Remove steps that are no-ops in both Cartesian and joint space."""
-    proprio = tree["proprio"]
-    gripper = proprio["gripper"]
-    pos = np.concatenate((proprio["position"], gripper), axis=-1)
-    jpos = np.concatenate((proprio["joints"], gripper), axis=-1)
-    mask = np.logical_and(
-        ~np.asarray(scan_noop(pos, threshold=threshold)),
-        ~np.asarray(scan_noop(jpos, threshold=threshold)),
-    )
-    n = len(mask)
-    print(f"mask | keep={sum(mask)} / total={n}")
-    return jax.tree.map(
-        lambda x: x[mask] if isinstance(x, np.ndarray) and x.ndim and len(x) == n else x,
-        tree,
-    )
-
-
-def add_episode_info(ds):
-    """Add contiguous IDs after filtering."""
-    global_step = 0
-    episode = 0
-
-    def add(tree: dict) -> dict:
-        nonlocal episode, global_step
-        n = len(tree["images"])
-        step = np.arange(n, dtype=np.int64)
-        info = tree["info"]
-        info.pop("episode", None)
-        info.pop("path", None)
-        info["id"] = {
-            "episode": np.full(n, episode, dtype=np.int64),
-            "step": step,
-            "global": step + global_step,
-        }
-        info["len"] = np.full(n, n, dtype=np.int64)
-        global_step += n
-        episode += 1
-        return tree
-
-    return ds.map(add)
 
 
 class SamClientWrapper:
