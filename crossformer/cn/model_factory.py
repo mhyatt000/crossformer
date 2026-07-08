@@ -235,7 +235,10 @@ class ModelFactory(CN):
         )
 
     def create(self) -> dict[str, Any]:
-        return {"model": self.to_model_cfg().create()}
+        # "trunk" is a sidecar key: from_config/load_pretrained only consume
+        # config["model"], but it lands in the checkpoint's config.json so
+        # inference can dispatch BELAModel vs CrossFormerModel.
+        return {"model": self.to_model_cfg().create(), "trunk": self.trunk}
 
     def build(self) -> Any:
         return self.to_model_cfg().build()

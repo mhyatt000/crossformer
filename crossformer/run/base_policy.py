@@ -47,16 +47,15 @@ class ModelPolicy(BasePolicy):
         use_guidance: bool = True,
         flow_steps: int | None = None,
         horizon: int | None = None,
+        model_cls: type[CrossFormerModel] = CrossFormerModel,
     ):
-        self.model: CrossFormerModel = CrossFormerModel.load_pretrained(path, step=step)
+        self.model: CrossFormerModel = model_cls.load_pretrained(path, step=step)
         self.params = self.model.params
         self.head_name = head_name
-        self.model.module.heads[head_name].flow_steps = (
-            flow_steps if flow_steps is not None else self.model.heads[head_name].flow_steps
-        )
-        self.model.module.heads[head_name].max_horizon = (
-            horizon if horizon is not None else self.model.heads[head_name].max_horizon
-        )
+        if flow_steps is not None:
+            self.model.module.heads[head_name].flow_steps = flow_steps
+        if horizon is not None:
+            self.model.module.heads[head_name].max_horizon = horizon
         self.guide_keys = guide_keys
         self.use_guidance = use_guidance
         self.rng = jax.random.PRNGKey(0)
