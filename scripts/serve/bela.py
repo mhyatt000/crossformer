@@ -39,6 +39,10 @@ class Config:
     warmup: bool = True
     viser: bool = True  # plot step inputs/outputs (images, joints, kp3dc) to a viser viewer
     viser_port: int = 8080
+    urdf: Path | None = Path("./xarm7_standalone.urdf")  # robot at current joints + ghost at final-horizon; None disables
+    kp_hw: tuple[int, int] = (480, 640)  # (H, W) original camera size to un-squash views to before projecting kp3d
+    kp_focal: float = 515.0  # pinhole focal (fx=fy) for kp3d reprojection; principal point = image center
+    viewer_config: Path = Path("./config/serve/viewer.yaml")  # what the viser viewer renders; see the yaml
 
 
 def main(cfg: Config) -> None:
@@ -56,10 +60,17 @@ def main(cfg: Config) -> None:
         resize_to=cfg.resize_to,
     )
     if cfg.viser:
-        from crossformer.run.viewer import PolicyViewer, ViserWrappedPolicy
+        from crossformer.run.viewer import PolicyViewer, ViewerConfig, ViserWrappedPolicy
 
-        policy = ViserWrappedPolicy(policy, PolicyViewer(host=cfg.host, port=cfg.viser_port))
-        print(f"viser viewer on {cfg.host}:{cfg.viser_port}")
+        vc = ViewerConfig.from_yaml(cfg.viewer_config) if cfg.viewer_config.exists() else ViewerConfig()
+        viewer = PolicyViewer(
+            host=cfg.host,
+            port=cfg.viser_port,
+            urdf_path=cfg.urdf if vc.urdf_show else None,
+            show_ghost=vc.ghost_show,
+        )
+        policy = ViserWrappedPolicy(policy, viewer, kp_focal=cfg.kp_focal, kp_orig_hw=cfg.kp_hw, cfg=vc)
+        print(f"viser viewer on {cfg.host}:{cfg.viser_port} (urdf={cfg.urdf}, config={cfg.viewer_config})")
     if cfg.warmup:
         # forwarded to ModelPolicy.warmup via PolicyWrapper.__getattr__;
         # compiles the serve path (accumulate=False) on example_batch

@@ -9,13 +9,45 @@ from webpolicy.base_policy import BasePolicy
 
 from crossformer.data.grain import metadata
 from crossformer.data.grain.embody import build_action_norm_mask
-from crossformer.embody import DOF
+from crossformer.embody import DOF, KP3DC, MAX_VIEWS
 from crossformer.model.components.heads.dof import pad_chunk_steps, pad_dof_ids
 from crossformer.model.crossformer_model import CrossFormerModel
 from crossformer.run._wrappers import _resize
 from crossformer.run.train_step import lookup_guide
 from crossformer.run.wrappers import PolicyWrapper
 from crossformer.utils.callbacks.denorm import ActionBatchDenormalizer
+
+# j0..j6 + gripper — the 8 arm+gripper DOFs (view-independent, view 0).
+_ARM_DOF_IDS: tuple[int, ...] = (
+    DOF["j0"],
+    DOF["j1"],
+    DOF["j2"],
+    DOF["j3"],
+    DOF["j4"],
+    DOF["j5"],
+    DOF["j6"],
+    DOF["gripper"],
+)
+
+# Robot kinematic-chain 3D keypoints (kp3dc_robot): one query copy per camera
+# view. The DOF ids (258..299) are shared across views; the query's view_id
+# (1..MAX_VIEWS) binds each copy to a camera via the shared view_embed the
+# stacked image tokens also carry (bela.py view_embed / crossformer_module
+# view_embed). The model predicts these camera-frame keypoints from the
+# image+state context — no w2c projection, no kp3dc input required.
+_KP3DC_DOF_IDS: tuple[int, ...] = KP3DC.dof_ids
+
+# Query = arm/gripper (view 0) + kp3dc for each camera view. dof_ids and
+# view_ids are index-aligned; slot_pos (default arange) keeps the repeated
+# kp3dc dof ids distinct per view.
+_QUERY_DOF_IDS: tuple[int, ...] = _ARM_DOF_IDS + _KP3DC_DOF_IDS * MAX_VIEWS
+_QUERY_VIEW_IDS: tuple[int, ...] = (0,) * len(_ARM_DOF_IDS) + tuple(
+    v for v in range(1, MAX_VIEWS + 1) for _ in _KP3DC_DOF_IDS
+)
+
+# kp3dc dof id -> position within the part (0..41), i.e. keypoint*3 + axis.
+_KP3DC_POS: dict[int, int] = {d: i for i, d in enumerate(_KP3DC_DOF_IDS)}
+_N_KP3DC: int = len(_KP3DC_DOF_IDS) // 3  # 14 keypoints x xyz
 
 
 class ModelPolicy(BasePolicy):
@@ -25,17 +57,8 @@ class ModelPolicy(BasePolicy):
     DOF ids (j0..j6 + gripper) are hardcoded.
     """
 
-    # j0..j6 + gripper — the 8 DOFs used for arm+gripper inference
-    _DEFAULT_DOF_IDS: tuple[int, ...] = (
-        DOF["j0"],
-        DOF["j1"],
-        DOF["j2"],
-        DOF["j3"],
-        DOF["j4"],
-        DOF["j5"],
-        DOF["j6"],
-        DOF["gripper"],
-    )
+    _DEFAULT_DOF_IDS: tuple[int, ...] = _QUERY_DOF_IDS
+    _DEFAULT_VIEW_IDS: tuple[int, ...] = _QUERY_VIEW_IDS
 
     def __init__(
         self,
@@ -63,25 +86,30 @@ class ModelPolicy(BasePolicy):
         module = self.model.module
         head = module.bind({"params": self.params}).heads[head_name]
         self._dof_ids_1 = jnp.asarray(pad_dof_ids(self._DEFAULT_DOF_IDS, head.max_dofs))[None]  # (1, max_dofs)
+        # view_ids pad with 0 (NO_VIEW), same length as dof_ids; index-aligned.
+        self._view_ids_1 = jnp.asarray(pad_dof_ids(self._DEFAULT_VIEW_IDS, head.max_dofs))[None]  # (1, max_dofs)
         chunk_steps = tuple(float(i) for i in range(head.max_horizon))
         self._chunk_steps_1 = jnp.asarray(pad_chunk_steps(chunk_steps, head.max_horizon), dtype=jnp.float32)[
             None
         ]  # (1, max_horizon)
 
         @partial(jax.jit, static_argnames=("accumulate",))
-        def _jit_step(params, obs, task, timestep_pad_mask, dof_ids, chunk_steps, guide_input, rng, accumulate=False):
+        def _jit_step(
+            params, obs, task, timestep_pad_mask, dof_ids, view_ids, chunk_steps, guide_input, rng, accumulate=False
+        ):
             bound = module.bind({"params": params})
             transformer_outputs = bound.crossformer_transformer(obs, task, timestep_pad_mask, train=False)
             pred = bound.heads[head_name].predict_action(
                 transformer_outputs,
                 rng=rng,
                 dof_ids=dof_ids,
+                view_ids=view_ids,
                 chunk_steps=chunk_steps,
                 train=False,
                 guide_input=guide_input,
                 accumulate=accumulate,
             )
-            return pred, dof_ids
+            return pred, dof_ids, view_ids
 
         self._jit_step = _jit_step
 
@@ -102,20 +130,26 @@ class ModelPolicy(BasePolicy):
         # print({k:v for k,v in obs.items() if 'proprio' in k})
 
         dof_ids = jnp.tile(self._dof_ids_1, (B, 1))
+        view_ids = jnp.tile(self._view_ids_1, (B, 1))
         chunk_steps = jnp.tile(self._chunk_steps_1, (B, 1))
         guide_input = lookup_guide(payload, self.guide_keys) if self.use_guidance else None
-        pred, dof_ids = self._jit_step(
+        pred, dof_ids, view_ids = self._jit_step(
             self.params,
             obs,
             task,
             obs["timestep_pad_mask"],
             dof_ids,
+            view_ids,
             chunk_steps,
             guide_input,
             key,
             accumulate=accumulate,
         )
-        out = {"actions": jax.device_get(pred), "dof_ids": jax.device_get(dof_ids)}
+        out = {
+            "actions": jax.device_get(pred),
+            "dof_ids": jax.device_get(dof_ids),
+            "view_ids": jax.device_get(view_ids),
+        }
         # print(out['actions'][...,:8])
         # print(out['dof_ids'][:,:8])
         return out
@@ -124,19 +158,24 @@ class ModelPolicy(BasePolicy):
 from crossformer.embody import DOF, MASK_ID
 
 
-def slots_to_action_dict(actions: np.ndarray, dof_ids: np.ndarray) -> dict[str, np.ndarray]:
+def slots_to_action_dict(
+    actions: np.ndarray, dof_ids: np.ndarray, view_ids: np.ndarray | None = None
+) -> dict[str, np.ndarray]:
     xs = np.asarray(actions, dtype=np.float32)
     ids = np.asarray(dof_ids)
+    vws = None if view_ids is None else np.asarray(view_ids)
     if ids.ndim == 2:
         if xs.shape[0] != ids.shape[0]:
             raise ValueError(f"Batch mismatch: actions {xs.shape}, dof_ids {ids.shape}")
-        rows = [slots_to_action_dict(xs[b], ids[b]) for b in range(xs.shape[0])]
+        rows = [slots_to_action_dict(xs[b], ids[b], None if vws is None else vws[b]) for b in range(xs.shape[0])]
         keys = sorted({k for row in rows for k in row})
         return {k: np.stack([row[k] for row in rows], axis=0) for k in keys}
     ids = ids.reshape(-1)
+    vws = None if vws is None else vws.reshape(-1)
     n = min(xs.shape[-1], ids.shape[0])
     xs = xs[..., :n]
     ids = ids[:n]
+    vws = None if vws is None else vws[:n]
 
     out: dict[str, list[tuple[int, np.ndarray]]] = {
         "joints": [],
@@ -144,6 +183,8 @@ def slots_to_action_dict(actions: np.ndarray, dof_ids: np.ndarray) -> dict[str, 
         "position": [],
         "orientation": [],
     }
+    # kp3dc is per-view: view id -> {part slot (0..41) -> value}.
+    kp3dc: dict[int, dict[int, np.ndarray]] = {}
 
     for slot, dof_id in enumerate(ids):
         dof_id = int(dof_id)
@@ -158,8 +199,25 @@ def slots_to_action_dict(actions: np.ndarray, dof_ids: np.ndarray) -> dict[str, 
             out["position"].append((dof_id - DOF["ee_x"], xs[..., slot]))
         elif DOF["ee_rx"] <= dof_id <= DOF["ee_rz"]:
             out["orientation"].append((dof_id - DOF["ee_rx"], xs[..., slot]))
+        elif dof_id in _KP3DC_POS:
+            view = int(vws[slot]) if vws is not None else 0
+            kp3dc.setdefault(view, {})[_KP3DC_POS[dof_id]] = xs[..., slot]
 
-    return {k: np.stack([v for _, v in sorted(vals)], axis=-1) for k, vals in out.items() if vals}
+    result = {k: np.stack([v for _, v in sorted(vals)], axis=-1) for k, vals in out.items() if vals}
+
+    if kp3dc:
+        # (..., V, 14, 3), views sorted ascending. Absent slots (shouldn't happen
+        # for a full-view query) are zero-filled to keep the (14, 3) block whole.
+        ref = next(iter(next(iter(kp3dc.values())).values()))
+        zero = np.zeros_like(ref)
+        per_view = []
+        for view in sorted(kp3dc):
+            slots = kp3dc[view]
+            flat = np.stack([slots.get(i, zero) for i in range(len(_KP3DC_POS))], axis=-1)  # (..., 42)
+            per_view.append(flat.reshape(*flat.shape[:-1], _N_KP3DC, 3))  # (..., 14, 3)
+        result["kp3dc_robot"] = np.stack(per_view, axis=-3)  # (..., V, 14, 3)
+
+    return result
 
 
 def action_dict_to_slots(action: dict[str, np.ndarray], dof_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -215,7 +273,7 @@ class ActionDenormWrapper(PolicyWrapper):
 
     def step(self, payload: dict, **kwargs) -> dict:
         result = dict(self.inner.step(payload, **kwargs))
-        result["actions"] = slots_to_action_dict(result["actions"], result["dof_ids"])
+        result["actions"] = slots_to_action_dict(result["actions"], result["dof_ids"], result.get("view_ids"))
         result = self.denorm_new(result)
 
         # B = np.asarray(result["dof_ids"]).shape[0]

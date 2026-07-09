@@ -1,0 +1,17 @@
+# Viewer config for scripts/serve/bela.py and scripts/debug/bela.py.
+# Controls what the viser viewer renders. All keys are optional; omitted keys
+# fall back to the defaults shown here.
+
+kp3d:
+  kp: [0, 7, 12, 13, 14]            # which of the 14 robot-chain keypoints to display (indices; out-of-range dropped)
+  horizon: [0, 10, 20, 30, 40, 50]   # which horizon steps to display (clamped to the last step)
+
+urdf:
+  show: true               # render the solid robot at the current joints
+  ghost:
+    show: true             # render the translucent light-blue robot at the final-horizon pose
+
+cam:
+  frustum:
+    show: all              # which camera frustums to place in 3D: all | none | [0, 1, ...]
+    distance: 0.02         # frustum scale = apex->image depth (m); the image fills the frustum. smaller -> smaller

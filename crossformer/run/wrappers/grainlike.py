@@ -23,8 +23,13 @@ from crossformer.data.grain.pipelines import add_mask, compatibility, drop_str
 from crossformer.data.grain.util.remap import rekey
 from crossformer.embody import Embodiment
 from crossformer.run.wrappers import PolicyWrapper
+from crossformer.utils.callbacks.base import flatten_obs
 from crossformer.utils.jax_utils import str2np
 from crossformer.utils.tree import drop, flat
+
+import logging
+
+log = logging.getLogger(__name__)
 
 
 class GrainlikeWrapper(PolicyWrapper):
@@ -89,7 +94,20 @@ class GrainlikeWrapper(PolicyWrapper):
         batch_size = leaves[0].shape[0] if leaves else 1
         samples = [jax.tree.map(lambda x, i=i: x[i], payload) for i in range(batch_size)]
         preprocessed = [self.preprocess(s) for s in samples]
-        return jax.tree.map(lambda *xs: np.stack(xs, axis=0), *preprocessed)
+        batched = jax.tree.map(lambda *xs: np.stack(xs, axis=0), *preprocessed)
+        # Nest the top-level state slots (built by embody_transform) under
+        # observation and broadcast to (B, W, A) — the state tokenizer reads
+        # observation.state. Mirrors flatten_obs in the training loop
+        # (scripts/train/xflow.py); obs_keys is empty so all other leaves pass
+        # through verbatim.
+        batched["observation"] = flatten_obs(
+            batched["observation"],
+            (),
+            view_mask=batched.get("mask", {}).get("view"),
+            state=batched.get("state"),
+            mask=batched.get("mask"),
+        )
+        return batched
 
     def step(self, payload: dict, **kwargs) -> dict:
         preprocessed = self.preprocess_batch(payload)
@@ -98,6 +116,12 @@ class GrainlikeWrapper(PolicyWrapper):
         extra = {"info": preprocessed["info"]}
         if "act" in preprocessed:
             extra["act"] = preprocessed["act"]
+        # expose the stacked model-input image so the viser layer can overlay
+        # kp3dc on the exact views the model saw (raw robot payloads don't carry
+        # it). ViserWrappedPolicy pops this before the result reaches the client.
+        img = preprocessed["observation"].get("image")
+        if img is not None:
+            extra["viz_image"] = img
         return jax.tree.map(np.asarray, result) | jax.tree.map(np.asarray, extra)
 
     def predict_flow(self, payload: dict) -> np.ndarray:
@@ -145,10 +169,35 @@ class GrainlikeWrapper(PolicyWrapper):
         # self.norm_mask: dict = build_action_norm_mask(eb["action"], embodiment)
 
         def norm_all(x: dict, stats: metadata.DatasetStatistics):
-            _norm = partial(metadata.normalize_tree, mask=self.norm_mask) if self.norm_mask else metadata.normalize_tree
             if has_action and self.norm_action:
+                _norm = (
+                    partial(metadata.normalize_tree, mask=self.norm_mask)
+                    if self.norm_mask
+                    else metadata.normalize_tree
+                )
                 x["action"] = _norm(x["action"], stats.action)
-            x["observation"]["proprio"] = _norm(x["observation"]["proprio"], stats.proprio)
+            # Proprio: normalize only the keys the payload actually carries.
+            # Serve inputs can omit DOFs the checkpoint was trained with (e.g. the
+            # kp3dc/kp3dw robot keypoints); a whole-tree jax.tree.map against
+            # stats.proprio would raise a dict-key mismatch. Those absent slots are
+            # force-masked downstream by embody_transform, so leaving them
+            # unnormalized matches the training-time normalizer, which also skips
+            # keys not present in the sample.
+            proprio = x["observation"]["proprio"]
+            missing = [k for k in stats.proprio if k not in proprio]
+            if missing:
+                log.warning(
+                    "serve proprio missing %s; normalizing present keys %s, "
+                    "remaining DOFs are masked downstream",
+                    sorted(missing),
+                    sorted(proprio),
+                )
+            for k in list(proprio):
+                if k in self.skip_norm_keys:
+                    continue
+                s = stats.proprio.get(k)
+                if s is not None:
+                    proprio[k] = metadata.normalize_arr(proprio[k], stats=s)
             return x
 
         # TODO bad practice. bug prone
@@ -167,7 +216,16 @@ class GrainlikeWrapper(PolicyWrapper):
         # 12. unsqueeze proprio horizon
         x = self._unsqueeze_proprio_horizon(x)
 
-        # 13. embody_transform (skipped when no GT actions — ModelPolicy hardcodes dof_ids)
+        # 13. embody_transform builds the state slots the model's state
+        # tokenizer reads (observation.state.{base,id,view} + mask.state.base).
+        # Serve payloads carry current proprio but no GT action, so synthesize a
+        # horizon-1 action from the already-normalized proprio — this mirrors the
+        # training multiarray path where action == proprio. Absent DOFs (e.g. the
+        # kp3dc/kp3dw robot keypoints) are zero-filled and force-masked by
+        # embody_transform, so the perceiver state tokenizer simply skips them.
+        if not has_action and "proprio" in x["observation"]:
+            x["action"] = {k: np.asarray(v) for k, v in x["observation"]["proprio"].items()}
+            has_action = True
         if has_action:
             x = embody_transform(
                 x,
