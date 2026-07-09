@@ -278,7 +278,7 @@ def main(cfg: Config) -> None:
         shuffle=False,
         mask_slot=False,
         shuffle_slot=False,
-        imaug=False,
+        imaug=True,
         rotate=cfg.rotate,
         resize=effective_resize,
     ).make(eval_cfg, shard_fn=partial(shard_batch, mesh=mesh), train=False)

@@ -394,6 +394,13 @@ class RandomAspect(augmax.GeometricTransformation):
         coordinates.push_transform(transform)
 
 
+class FloatToByte(augmax.ByteToFloat):
+    """Inverse of ByteToFloat: float [0, 1] -> uint8 [0, 255]."""
+
+    def pixelwise(self, rng: jnp.ndarray, pixel: jnp.ndarray, invert=False) -> jnp.ndarray:
+        return super().pixelwise(rng, pixel, invert=not invert)
+
+
 def get_frame_transform(
     config: builders.GrainDatasetConfig,
     tfconfig: TransformConfig,
@@ -411,19 +418,30 @@ def get_frame_transform(
         else:
             chain_ops.append(augmax.Resize(re))
     if imaug:
-        chain_ops.append(augmax.ChannelShuffle(p=0.5))
+        chain_ops += [
+            augmax.ChannelShuffle(p=0.5),
+            # color ops require float32 [0, 1]; model normalization expects 0-255,
+            # so FloatToByte closes the float region
+            augmax.ByteToFloat(),
+            # augmax halves brightness/contrast ranges internally: effective
+            # brightness ±0.4, contrast slant 0.6x-1.6x. sized to cover the
+            # sim/real gap (sim ~50/255 brighter, ~2x contrast on exo views)
+            augmax.RandomBrightness((-0.8, 0.8), p=0.5),
+            augmax.RandomContrast((-0.6, 0.6), p=0.5),
+            augmax.RandomGamma((0.7, 1.5), p=0.5),
+            # per-channel gamma: mild WB/color-cast variation; p<0.5 to limit aug stacking
+            augmax.RandomChannelGamma((0.8, 1.25), p=0.3),
+            # augmax 0.4.1: zero strengths misalign ColorJitter's rng keys and its
+            # saturation branch is a no-op; keep all > 0, hue is the useful part
+            augmax.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1, p=0.5),
+            augmax.Blur(size=3, p=0.3),  # runs at post-Resize resolution
+            FloatToByte(),
+        ]
         # RandomAspect(x_range=(0.9, 1.1), y_range=(0.9, 1.1), p=0.5),
         # augmax.RandomGrayscale(p= 0.5),
-        # augmax.ByteToFloat(),
         # augmax.ChannelDrop(),
         # augmax.Warp(strength= 5, coarseness= 32),
         # augmax.Normalize(),
-        # augmax.Blur(),
-        # augmax.RandomBrightness((-1.0, 1.0), p= 0.5),
-        # augmax.RandomContrast(),
-        # augmax.RandomGamma(),
-        # augmax.RandomChannelGamma(),
-        # augmax.ColorJitter(),
         # augmax.Solarization(),
     if rotate:
         chain_ops.append(augmax.Rotate((-15, 15), p=0.3))

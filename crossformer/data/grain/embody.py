@@ -313,18 +313,23 @@ def decode_embody_name(arr: np.ndarray) -> str:
     return arr.astype(np.uint8).tobytes().rstrip(b"\x00").decode("utf-8")
 
 
-def kp3dc_valid(sample: dict) -> np.ndarray | None:
-    """Per-view kp3dc validity (V, 42) from per-keypoint + extrinsics masks.
+def kp3dc_valid(sample: dict, key: str = "kp3dc_robot") -> np.ndarray | None:
+    """Per-view kp3dc validity (V, 3K) from per-keypoint + extrinsics masks.
 
     Conservative over the horizon: a keypoint/view is valid only if valid at
     every real (non-padded) chunk step. Padded steps (mask.horizon False) are
-    ignored.
+    ignored. Handles both per-keypoint (H, V, K) masks (kp3dc_robot) and
+    per-view (H, V) masks (kp3dc_hand), broadcasting the latter over the
+    keypoint axis of the action array.
     """
     m = sample.get("mask", {})
-    kp = m.get("proprio", {}).get("kp3dc_robot")  # (H, V, K) bool
+    kp = m.get("proprio", {}).get(key)  # (H, V, K) or (H, V) bool
     if kp is None:
         return None
     kp = np.asarray(kp, dtype=bool)
+    if kp.ndim == 2:  # per-view validity only -> broadcast over keypoints
+        n_kp = np.asarray(sample["action"][key]).shape[-2]
+        kp = np.repeat(kp[..., None], n_kp, axis=-1)  # (H, V, K)
     w2c = m.get("state", {}).get("extr", {}).get("w2c")  # (H, V) bool
     w2c = np.ones(kp.shape[:2], dtype=bool) if w2c is None else np.asarray(w2c, dtype=bool)
     horizon = np.asarray(m.get("horizon", np.ones(kp.shape[0])), dtype=bool)  # (H,)
@@ -371,10 +376,11 @@ def embody_transform(
     # Consume per-part validity masks from restructure, if present. Pop because
     # mask.act is re-written below as the (max_a,) slot mask of the built block.
     valid_mask_dict = sample.get("mask", {}).pop("act", None)
-    kpv = kp3dc_valid(sample)
-    if kpv is not None:
-        valid_mask_dict = dict(valid_mask_dict or {})
-        valid_mask_dict["kp3dc_robot"] = kpv  # (V, D); sliced per view part
+    for key in ("kp3dc_robot", "kp3dc_hand"):
+        kpv = kp3dc_valid(sample, key)
+        if kpv is not None:
+            valid_mask_dict = dict(valid_mask_dict or {})
+            valid_mask_dict[key] = kpv  # (V, D); sliced per view part
     block = build_embodiment_action(
         sample["action"],
         embodiment,
